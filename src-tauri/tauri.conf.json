@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicbarker/tauri-v2-config-schema/main/schema.json",
+  "productName": "Project Builder Dashboard",
+  "version": "0.1.0",
+  "identifier": "com.projectbuilder.dashboard",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Project Builder Dashboard",
+        "width": 1400,
+        "height": 900
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

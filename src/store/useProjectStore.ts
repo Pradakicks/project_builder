@@ -1,0 +1,232 @@
+import { create } from "zustand";
+import type {
+  Project,
+  Piece,
+  Connection,
+  PieceUpdate,
+  ConnectionUpdate,
+} from "../types";
+import * as api from "../api/tauriApi";
+
+interface ProjectStore {
+  // State
+  project: Project | null;
+  pieces: Piece[];
+  connections: Connection[];
+  selectedPieceId: string | null;
+  selectedConnectionId: string | null;
+  currentParentId: string | null; // for nested piece navigation
+  breadcrumbs: { id: string; name: string }[];
+
+  // Project actions
+  loadProject: (id: string) => Promise<void>;
+  createProject: (name: string, description: string) => Promise<Project>;
+  updateProject: (name?: string, description?: string) => Promise<void>;
+
+  // Piece actions
+  addPiece: (name: string, positionX: number, positionY: number) => Promise<Piece>;
+  updatePiece: (id: string, updates: PieceUpdate) => Promise<void>;
+  deletePiece: (id: string) => Promise<void>;
+  selectPiece: (id: string | null) => void;
+
+  // Connection actions
+  addConnection: (sourcePieceId: string, targetPieceId: string, label: string) => Promise<Connection>;
+  updateConnection: (id: string, updates: ConnectionUpdate) => Promise<void>;
+  deleteConnection: (id: string) => Promise<void>;
+  selectConnection: (id: string | null) => void;
+
+  // Navigation
+  drillInto: (pieceId: string) => Promise<void>;
+  navigateTo: (index: number) => Promise<void>;
+
+  // File I/O
+  saveToFile: (path: string) => Promise<void>;
+  loadFromFile: (path: string) => Promise<void>;
+}
+
+export const useProjectStore = create<ProjectStore>((set, get) => ({
+  project: null,
+  pieces: [],
+  connections: [],
+  selectedPieceId: null,
+  selectedConnectionId: null,
+  currentParentId: null,
+  breadcrumbs: [],
+
+  loadProject: async (id: string) => {
+    const project = await api.getProject(id);
+    const pieces = await api.listPieces(id);
+    const connections = await api.listConnections(id);
+    // Filter to show only top-level pieces (no parent)
+    const topLevelPieces = pieces.filter((p) => p.parentId === null);
+    set({
+      project,
+      pieces: topLevelPieces,
+      connections,
+      currentParentId: null,
+      breadcrumbs: [{ id: project.id, name: project.name }],
+    });
+  },
+
+  createProject: async (name: string, description: string) => {
+    const project = await api.createProject(name, description);
+    set({
+      project,
+      pieces: [],
+      connections: [],
+      currentParentId: null,
+      breadcrumbs: [{ id: project.id, name: project.name }],
+    });
+    return project;
+  },
+
+  updateProject: async (name?: string, description?: string) => {
+    const { project } = get();
+    if (!project) return;
+    const updated = await api.updateProject(project.id, name, description);
+    set({ project: updated });
+  },
+
+  addPiece: async (name: string, positionX: number, positionY: number) => {
+    const { project, currentParentId, pieces } = get();
+    if (!project) throw new Error("No project loaded");
+    const piece = await api.createPiece(project.id, currentParentId, name, positionX, positionY);
+    set({ pieces: [...pieces, piece] });
+    return piece;
+  },
+
+  updatePiece: async (id: string, updates: PieceUpdate) => {
+    const updated = await api.updatePiece(id, updates);
+    set({
+      pieces: get().pieces.map((p) => (p.id === id ? updated : p)),
+    });
+  },
+
+  deletePiece: async (id: string) => {
+    await api.deletePiece(id);
+    const { pieces, connections, selectedPieceId } = get();
+    set({
+      pieces: pieces.filter((p) => p.id !== id),
+      connections: connections.filter(
+        (c) => c.sourcePieceId !== id && c.targetPieceId !== id,
+      ),
+      selectedPieceId: selectedPieceId === id ? null : selectedPieceId,
+    });
+  },
+
+  selectPiece: (id: string | null) => {
+    set({ selectedPieceId: id, selectedConnectionId: null });
+  },
+
+  addConnection: async (sourcePieceId: string, targetPieceId: string, label: string) => {
+    const { project, connections } = get();
+    if (!project) throw new Error("No project loaded");
+    const connection = await api.createConnection(project.id, sourcePieceId, targetPieceId, label);
+    set({ connections: [...connections, connection] });
+    return connection;
+  },
+
+  updateConnection: async (id: string, updates: ConnectionUpdate) => {
+    const updated = await api.updateConnection(id, updates);
+    set({
+      connections: get().connections.map((c) => (c.id === id ? updated : c)),
+    });
+  },
+
+  deleteConnection: async (id: string) => {
+    await api.deleteConnection(id);
+    const { connections, selectedConnectionId } = get();
+    set({
+      connections: connections.filter((c) => c.id !== id),
+      selectedConnectionId: selectedConnectionId === id ? null : selectedConnectionId,
+    });
+  },
+
+  selectConnection: (id: string | null) => {
+    set({ selectedConnectionId: id, selectedPieceId: null });
+  },
+
+  drillInto: async (pieceId: string) => {
+    const { project, breadcrumbs } = get();
+    if (!project) return;
+    const piece = get().pieces.find((p) => p.id === pieceId);
+    if (!piece) return;
+    const children = await api.listChildren(pieceId);
+    // Get connections between children
+    const allConnections = await api.listConnections(project.id);
+    const childIds = new Set(children.map((c) => c.id));
+    const childConnections = allConnections.filter(
+      (c) => childIds.has(c.sourcePieceId) && childIds.has(c.targetPieceId),
+    );
+    set({
+      pieces: children,
+      connections: childConnections,
+      currentParentId: pieceId,
+      breadcrumbs: [...breadcrumbs, { id: pieceId, name: piece.name }],
+      selectedPieceId: null,
+      selectedConnectionId: null,
+    });
+  },
+
+  navigateTo: async (index: number) => {
+    const { project, breadcrumbs } = get();
+    if (!project) return;
+    const newBreadcrumbs = breadcrumbs.slice(0, index + 1);
+    const target = newBreadcrumbs[newBreadcrumbs.length - 1];
+
+    if (index === 0) {
+      // Navigate to project root
+      const allPieces = await api.listPieces(project.id);
+      const topLevel = allPieces.filter((p) => p.parentId === null);
+      const allConnections = await api.listConnections(project.id);
+      const topIds = new Set(topLevel.map((p) => p.id));
+      const topConnections = allConnections.filter(
+        (c) => topIds.has(c.sourcePieceId) && topIds.has(c.targetPieceId),
+      );
+      set({
+        pieces: topLevel,
+        connections: topConnections,
+        currentParentId: null,
+        breadcrumbs: newBreadcrumbs,
+        selectedPieceId: null,
+        selectedConnectionId: null,
+      });
+    } else {
+      // Navigate to a piece level
+      const children = await api.listChildren(target.id);
+      const allConnections = await api.listConnections(project.id);
+      const childIds = new Set(children.map((c) => c.id));
+      const childConnections = allConnections.filter(
+        (c) => childIds.has(c.sourcePieceId) && childIds.has(c.targetPieceId),
+      );
+      set({
+        pieces: children,
+        connections: childConnections,
+        currentParentId: target.id,
+        breadcrumbs: newBreadcrumbs,
+        selectedPieceId: null,
+        selectedConnectionId: null,
+      });
+    }
+  },
+
+  saveToFile: async (path: string) => {
+    const { project } = get();
+    if (!project) return;
+    await api.saveProjectToFile(project.id, path);
+  },
+
+  loadFromFile: async (path: string) => {
+    const project = await api.loadProjectFromFile(path);
+    const pieces = await api.listPieces(project.id);
+    const connections = await api.listConnections(project.id);
+    const topLevelPieces = pieces.filter((p) => p.parentId === null);
+    set({
+      project,
+      pieces: topLevelPieces,
+      connections,
+      currentParentId: null,
+      breadcrumbs: [{ id: project.id, name: project.name }],
+    });
+  },
+}));
