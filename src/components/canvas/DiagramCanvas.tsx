@@ -46,6 +46,7 @@ export function DiagramCanvas() {
           pieceType: p.pieceType,
           phase: p.phase,
           color: p.color,
+          interfaces: p.interfaces,
         },
       })),
     [pieces],

@@ -4,10 +4,11 @@ import type {
   Piece,
   PieceInterface,
   Constraint,
-  OutputMode,
   Phase,
 } from "../../types";
 import { AgentPromptEditor } from "./AgentPromptEditor";
+import { PillSelect } from "../ui/PillSelect";
+import { SelectWithOther } from "../ui/SelectWithOther";
 
 type Tab = "general" | "interfaces" | "constraints" | "notes" | "agent";
 
@@ -18,6 +19,29 @@ const tabs: { id: Tab; label: string }[] = [
   { id: "notes", label: "Notes" },
   { id: "agent", label: "Agent" },
 ];
+
+const phaseOptions: { value: Phase; label: string }[] = [
+  { value: "design", label: "Design" },
+  { value: "review", label: "Review" },
+  { value: "approved", label: "Approved" },
+  { value: "implementing", label: "Implementing" },
+];
+
+const phaseColors: Record<Phase, string> = {
+  design: "bg-yellow-500/30 text-yellow-300",
+  review: "bg-purple-500/30 text-purple-300",
+  approved: "bg-green-500/30 text-green-300",
+  implementing: "bg-blue-500/30 text-blue-300",
+};
+
+const providerPresets = ["Claude", "OpenAI", "Google", "Local"];
+
+const modelPresets: Record<string, string[]> = {
+  Claude: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+  OpenAI: ["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"],
+  Google: ["gemini-2.0-flash", "gemini-2.5-pro"],
+  Local: ["ollama", "lm-studio"],
+};
 
 export function PieceEditor({ pieceId }: { pieceId: string }) {
   const { pieces, updatePiece, deletePiece, selectPiece } = useProjectStore();
@@ -136,30 +160,6 @@ function TextArea({
   );
 }
 
-function Select<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: { value: T; label: string }[];
-  onChange: (v: T) => void;
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as T)}
-      className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 focus:border-blue-500 focus:outline-none"
-    >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 // ── Tabs ─────────────────────────────────────────────────
 
 function GeneralTab({
@@ -227,28 +227,11 @@ function GeneralTab({
         </div>
       </div>
       <div>
-        <FieldLabel>Output Mode</FieldLabel>
-        <Select<OutputMode>
-          value={piece.outputMode}
-          options={[
-            { value: "both", label: "Docs + Code" },
-            { value: "docs-only", label: "Docs Only" },
-            { value: "code-only", label: "Code Only" },
-          ]}
-          onChange={(v) => save("outputMode", v)}
-        />
-      </div>
-      <div>
         <FieldLabel>Phase</FieldLabel>
-        <Select<Phase>
+        <PillSelect<Phase>
           value={piece.phase}
-          options={[
-            { value: "design", label: "Design" },
-            { value: "review", label: "Review" },
-            { value: "approved", label: "Approved" },
-            { value: "implementing", label: "Implementing" },
-            { value: "done", label: "Done" },
-          ]}
+          options={phaseOptions}
+          colorMap={phaseColors}
           onChange={(v) => save("phase", v)}
         />
       </div>
@@ -289,7 +272,7 @@ function InterfacesTab({
   const addInterface = () => {
     save([
       ...interfaces,
-      { name: "", direction: "in" as const, dataType: "", description: "" },
+      { name: "", direction: "in" as const, description: "" },
     ]);
   };
 
@@ -321,26 +304,27 @@ function InterfacesTab({
               Remove
             </button>
           </div>
-          <div className="flex gap-2">
-            <select
-              value={iface.direction}
-              onChange={(e) => updateInterface(i, "direction", e.target.value)}
-              className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-100"
+          <div className="flex gap-2 items-center">
+            <button
+              onClick={() =>
+                updateInterface(i, "direction", iface.direction === "in" ? "out" : "in")
+              }
+              className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium border ${
+                iface.direction === "in"
+                  ? "bg-green-500/20 text-green-400 border-green-500/30"
+                  : "bg-orange-500/20 text-orange-400 border-orange-500/30"
+              }`}
             >
-              <option value="in">In</option>
-              <option value="out">Out</option>
-            </select>
-            <TextInput
-              value={iface.dataType}
-              onChange={(v) => updateInterface(i, "dataType", v)}
-              placeholder="Data type"
-            />
+              {iface.direction === "in" ? "← In" : "Out →"}
+            </button>
+            <div className="flex-1">
+              <TextInput
+                value={iface.description}
+                onChange={(v) => updateInterface(i, "description", v)}
+                placeholder="Description"
+              />
+            </div>
           </div>
-          <TextInput
-            value={iface.description}
-            onChange={(v) => updateInterface(i, "description", v)}
-            placeholder="Description"
-          />
         </div>
       ))}
       <button
@@ -457,6 +441,12 @@ function AgentTab({
   piece: Piece;
   onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
 }) {
+  const provider = piece.agentConfig.provider ?? "";
+  const model = piece.agentConfig.model ?? "";
+
+  // Determine which model presets to show based on provider
+  const currentModelPresets = modelPresets[provider] ?? [];
+
   return (
     <div className="flex flex-col gap-3">
       <div>
@@ -471,27 +461,43 @@ function AgentTab({
       </div>
       <div>
         <FieldLabel>LLM Provider</FieldLabel>
-        <TextInput
-          value={piece.agentConfig.provider ?? ""}
+        <SelectWithOther
+          value={provider}
+          presets={providerPresets}
           onChange={(v) =>
             onUpdate(piece.id, {
-              agentConfig: { ...piece.agentConfig, provider: v || null },
+              agentConfig: { ...piece.agentConfig, provider: v || null, model: null },
             })
           }
-          placeholder="e.g. claude"
+          placeholder="Custom provider..."
         />
       </div>
       <div>
         <FieldLabel>Model</FieldLabel>
-        <TextInput
-          value={piece.agentConfig.model ?? ""}
-          onChange={(v) =>
-            onUpdate(piece.id, {
-              agentConfig: { ...piece.agentConfig, model: v || null },
-            })
-          }
-          placeholder="e.g. claude-sonnet-4-6"
-        />
+        {currentModelPresets.length > 0 ? (
+          <SelectWithOther
+            value={model}
+            presets={currentModelPresets}
+            onChange={(v) =>
+              onUpdate(piece.id, {
+                agentConfig: { ...piece.agentConfig, model: v || null },
+              })
+            }
+            placeholder="Custom model..."
+          />
+        ) : (
+          <input
+            type="text"
+            value={model}
+            onChange={(e) =>
+              onUpdate(piece.id, {
+                agentConfig: { ...piece.agentConfig, model: e.target.value || null },
+              })
+            }
+            placeholder="Model name..."
+            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+          />
+        )}
       </div>
       <div>
         <FieldLabel>Token Budget</FieldLabel>

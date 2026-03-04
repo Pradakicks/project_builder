@@ -50,7 +50,6 @@ export interface Piece {
 export interface PieceInterface {
   name: string;
   direction: InterfaceDirection;
-  dataType: string;
   description: string;
 }
 
@@ -69,7 +68,7 @@ export interface AgentConfig {
 }
 
 export type OutputMode = "docs-only" | "code-only" | "both";
-export type Phase = "design" | "review" | "approved" | "implementing" | "done";
+export type Phase = "design" | "review" | "approved" | "implementing";
 
 export interface Connection {
   id: string;

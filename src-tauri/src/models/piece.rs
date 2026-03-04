@@ -29,7 +29,6 @@ pub struct Piece {
 pub struct Interface {
     pub name: String,
     pub direction: InterfaceDirection,
-    pub data_type: String,
     pub description: String,
 }
 
@@ -82,5 +81,4 @@ pub enum Phase {
     Review,
     Approved,
     Implementing,
-    Done,
 }
