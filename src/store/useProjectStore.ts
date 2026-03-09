@@ -7,6 +7,9 @@ import type {
   ConnectionUpdate,
 } from "../types";
 import * as api from "../api/tauriApi";
+import { useToastStore } from "./useToastStore";
+
+const toast = (msg: string) => useToastStore.getState().addToast(msg);
 
 interface ProjectStore {
   // State
@@ -15,7 +18,7 @@ interface ProjectStore {
   connections: Connection[];
   selectedPieceId: string | null;
   selectedConnectionId: string | null;
-  currentParentId: string | null; // for nested piece navigation
+  currentParentId: string | null;
   breadcrumbs: { id: string; name: string }[];
 
   // Project actions
@@ -54,64 +57,89 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   breadcrumbs: [],
 
   loadProject: async (id: string) => {
-    const project = await api.getProject(id);
-    const pieces = await api.listPieces(id);
-    const connections = await api.listConnections(id);
-    // Filter to show only top-level pieces (no parent)
-    const topLevelPieces = pieces.filter((p) => p.parentId === null);
-    set({
-      project,
-      pieces: topLevelPieces,
-      connections,
-      currentParentId: null,
-      breadcrumbs: [{ id: project.id, name: project.name }],
-    });
+    try {
+      const project = await api.getProject(id);
+      const pieces = await api.listPieces(id);
+      const connections = await api.listConnections(id);
+      const topLevelPieces = pieces.filter((p) => p.parentId === null);
+      set({
+        project,
+        pieces: topLevelPieces,
+        connections,
+        currentParentId: null,
+        breadcrumbs: [{ id: project.id, name: project.name }],
+      });
+    } catch (e) {
+      toast(`Failed to load project: ${e}`);
+    }
   },
 
   createProject: async (name: string, description: string) => {
-    const project = await api.createProject(name, description);
-    set({
-      project,
-      pieces: [],
-      connections: [],
-      currentParentId: null,
-      breadcrumbs: [{ id: project.id, name: project.name }],
-    });
-    return project;
+    try {
+      const project = await api.createProject(name, description);
+      set({
+        project,
+        pieces: [],
+        connections: [],
+        currentParentId: null,
+        breadcrumbs: [{ id: project.id, name: project.name }],
+      });
+      return project;
+    } catch (e) {
+      toast(`Failed to create project: ${e}`);
+      throw e;
+    }
   },
 
   updateProject: async (name?: string, description?: string) => {
     const { project } = get();
     if (!project) return;
-    const updated = await api.updateProject(project.id, name, description);
-    set({ project: updated });
+    try {
+      const updated = await api.updateProject(project.id, name, description);
+      set({ project: updated });
+    } catch (e) {
+      toast(`Failed to update project: ${e}`);
+    }
   },
 
   addPiece: async (name: string, positionX: number, positionY: number) => {
     const { project, currentParentId, pieces } = get();
     if (!project) throw new Error("No project loaded");
-    const piece = await api.createPiece(project.id, currentParentId, name, positionX, positionY);
-    set({ pieces: [...pieces, piece] });
-    return piece;
+    try {
+      const piece = await api.createPiece(project.id, currentParentId, name, positionX, positionY);
+      set({ pieces: [...pieces, piece] });
+      return piece;
+    } catch (e) {
+      toast(`Failed to add piece: ${e}`);
+      throw e;
+    }
   },
 
   updatePiece: async (id: string, updates: PieceUpdate) => {
-    const updated = await api.updatePiece(id, updates);
-    set({
-      pieces: get().pieces.map((p) => (p.id === id ? updated : p)),
-    });
+    try {
+      const updated = await api.updatePiece(id, updates);
+      set({
+        pieces: get().pieces.map((p) => (p.id === id ? updated : p)),
+      });
+    } catch (e) {
+      toast(`Failed to update piece: ${e}`);
+    }
   },
 
   deletePiece: async (id: string) => {
-    await api.deletePiece(id);
-    const { pieces, connections, selectedPieceId } = get();
-    set({
-      pieces: pieces.filter((p) => p.id !== id),
-      connections: connections.filter(
-        (c) => c.sourcePieceId !== id && c.targetPieceId !== id,
-      ),
-      selectedPieceId: selectedPieceId === id ? null : selectedPieceId,
-    });
+    try {
+      await api.deletePiece(id);
+      const { pieces, connections, selectedPieceId } = get();
+      set({
+        pieces: pieces.filter((p) => p.id !== id),
+        connections: connections.filter(
+          (c) => c.sourcePieceId !== id && c.targetPieceId !== id,
+        ),
+        selectedPieceId: selectedPieceId === id ? null : selectedPieceId,
+      });
+    } catch (e) {
+      toast(`Failed to delete piece: ${e}`);
+    }
   },
 
   selectPiece: (id: string | null) => {
@@ -121,25 +149,38 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addConnection: async (sourcePieceId: string, targetPieceId: string, label: string) => {
     const { project, connections } = get();
     if (!project) throw new Error("No project loaded");
-    const connection = await api.createConnection(project.id, sourcePieceId, targetPieceId, label);
-    set({ connections: [...connections, connection] });
-    return connection;
+    try {
+      const connection = await api.createConnection(project.id, sourcePieceId, targetPieceId, label);
+      set({ connections: [...connections, connection] });
+      return connection;
+    } catch (e) {
+      toast(`Failed to add connection: ${e}`);
+      throw e;
+    }
   },
 
   updateConnection: async (id: string, updates: ConnectionUpdate) => {
-    const updated = await api.updateConnection(id, updates);
-    set({
-      connections: get().connections.map((c) => (c.id === id ? updated : c)),
-    });
+    try {
+      const updated = await api.updateConnection(id, updates);
+      set({
+        connections: get().connections.map((c) => (c.id === id ? updated : c)),
+      });
+    } catch (e) {
+      toast(`Failed to update connection: ${e}`);
+    }
   },
 
   deleteConnection: async (id: string) => {
-    await api.deleteConnection(id);
-    const { connections, selectedConnectionId } = get();
-    set({
-      connections: connections.filter((c) => c.id !== id),
-      selectedConnectionId: selectedConnectionId === id ? null : selectedConnectionId,
-    });
+    try {
+      await api.deleteConnection(id);
+      const { connections, selectedConnectionId } = get();
+      set({
+        connections: connections.filter((c) => c.id !== id),
+        selectedConnectionId: selectedConnectionId === id ? null : selectedConnectionId,
+      });
+    } catch (e) {
+      toast(`Failed to delete connection: ${e}`);
+    }
   },
 
   selectConnection: (id: string | null) => {
@@ -147,53 +188,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   drillInto: async (pieceId: string) => {
-    const { project, breadcrumbs } = get();
-    if (!project) return;
-    const piece = get().pieces.find((p) => p.id === pieceId);
-    if (!piece) return;
-    const children = await api.listChildren(pieceId);
-    // Get connections between children
-    const allConnections = await api.listConnections(project.id);
-    const childIds = new Set(children.map((c) => c.id));
-    const childConnections = allConnections.filter(
-      (c) => childIds.has(c.sourcePieceId) && childIds.has(c.targetPieceId),
-    );
-    set({
-      pieces: children,
-      connections: childConnections,
-      currentParentId: pieceId,
-      breadcrumbs: [...breadcrumbs, { id: pieceId, name: piece.name }],
-      selectedPieceId: null,
-      selectedConnectionId: null,
-    });
-  },
-
-  navigateTo: async (index: number) => {
-    const { project, breadcrumbs } = get();
-    if (!project) return;
-    const newBreadcrumbs = breadcrumbs.slice(0, index + 1);
-    const target = newBreadcrumbs[newBreadcrumbs.length - 1];
-
-    if (index === 0) {
-      // Navigate to project root
-      const allPieces = await api.listPieces(project.id);
-      const topLevel = allPieces.filter((p) => p.parentId === null);
-      const allConnections = await api.listConnections(project.id);
-      const topIds = new Set(topLevel.map((p) => p.id));
-      const topConnections = allConnections.filter(
-        (c) => topIds.has(c.sourcePieceId) && topIds.has(c.targetPieceId),
-      );
-      set({
-        pieces: topLevel,
-        connections: topConnections,
-        currentParentId: null,
-        breadcrumbs: newBreadcrumbs,
-        selectedPieceId: null,
-        selectedConnectionId: null,
-      });
-    } else {
-      // Navigate to a piece level
-      const children = await api.listChildren(target.id);
+    try {
+      const { project, breadcrumbs } = get();
+      if (!project) return;
+      const piece = get().pieces.find((p) => p.id === pieceId);
+      if (!piece) return;
+      const children = await api.listChildren(pieceId);
       const allConnections = await api.listConnections(project.id);
       const childIds = new Set(children.map((c) => c.id));
       const childConnections = allConnections.filter(
@@ -202,31 +202,85 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set({
         pieces: children,
         connections: childConnections,
-        currentParentId: target.id,
-        breadcrumbs: newBreadcrumbs,
+        currentParentId: pieceId,
+        breadcrumbs: [...breadcrumbs, { id: pieceId, name: piece.name }],
         selectedPieceId: null,
         selectedConnectionId: null,
       });
+    } catch (e) {
+      toast(`Failed to navigate: ${e}`);
+    }
+  },
+
+  navigateTo: async (index: number) => {
+    try {
+      const { project, breadcrumbs } = get();
+      if (!project) return;
+      const newBreadcrumbs = breadcrumbs.slice(0, index + 1);
+      const target = newBreadcrumbs[newBreadcrumbs.length - 1];
+
+      if (index === 0) {
+        const allPieces = await api.listPieces(project.id);
+        const topLevel = allPieces.filter((p) => p.parentId === null);
+        const allConnections = await api.listConnections(project.id);
+        const topIds = new Set(topLevel.map((p) => p.id));
+        const topConnections = allConnections.filter(
+          (c) => topIds.has(c.sourcePieceId) && topIds.has(c.targetPieceId),
+        );
+        set({
+          pieces: topLevel,
+          connections: topConnections,
+          currentParentId: null,
+          breadcrumbs: newBreadcrumbs,
+          selectedPieceId: null,
+          selectedConnectionId: null,
+        });
+      } else {
+        const children = await api.listChildren(target.id);
+        const allConnections = await api.listConnections(project.id);
+        const childIds = new Set(children.map((c) => c.id));
+        const childConnections = allConnections.filter(
+          (c) => childIds.has(c.sourcePieceId) && childIds.has(c.targetPieceId),
+        );
+        set({
+          pieces: children,
+          connections: childConnections,
+          currentParentId: target.id,
+          breadcrumbs: newBreadcrumbs,
+          selectedPieceId: null,
+          selectedConnectionId: null,
+        });
+      }
+    } catch (e) {
+      toast(`Failed to navigate: ${e}`);
     }
   },
 
   saveToFile: async (path: string) => {
     const { project } = get();
     if (!project) return;
-    await api.saveProjectToFile(project.id, path);
+    try {
+      await api.saveProjectToFile(project.id, path);
+    } catch (e) {
+      toast(`Failed to save: ${e}`);
+    }
   },
 
   loadFromFile: async (path: string) => {
-    const project = await api.loadProjectFromFile(path);
-    const pieces = await api.listPieces(project.id);
-    const connections = await api.listConnections(project.id);
-    const topLevelPieces = pieces.filter((p) => p.parentId === null);
-    set({
-      project,
-      pieces: topLevelPieces,
-      connections,
-      currentParentId: null,
-      breadcrumbs: [{ id: project.id, name: project.name }],
-    });
+    try {
+      const project = await api.loadProjectFromFile(path);
+      const pieces = await api.listPieces(project.id);
+      const connections = await api.listConnections(project.id);
+      const topLevelPieces = pieces.filter((p) => p.parentId === null);
+      set({
+        project,
+        pieces: topLevelPieces,
+        connections,
+        currentParentId: null,
+        breadcrumbs: [{ id: project.id, name: project.name }],
+      });
+    } catch (e) {
+      toast(`Failed to load file: ${e}`);
+    }
   },
 }));

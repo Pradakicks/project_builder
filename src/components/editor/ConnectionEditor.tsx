@@ -1,10 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
-
+import { useDialogStore } from "../../store/useDialogStore";
+import { debounce } from "../../utils/debounce";
 
 export function ConnectionEditor({ connectionId }: { connectionId: string }) {
   const { connections, updateConnection, deleteConnection, selectConnection } =
     useProjectStore();
+  const showConfirm = useDialogStore((s) => s.showConfirm);
   const connection = connections.find((c) => c.id === connectionId);
 
   const [label, setLabel] = useState("");
@@ -21,11 +23,15 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
     }
   }, [connection]);
 
-  if (!connection) return null;
+  const save = useMemo(
+    () =>
+      debounce((field: string, value: unknown) => {
+        if (connection) updateConnection(connection.id, { [field]: value });
+      }, 300),
+    [connection?.id, updateConnection],
+  );
 
-  const save = (field: string, value: unknown) => {
-    updateConnection(connection.id, { [field]: value });
-  };
+  if (!connection) return null;
 
   return (
     <div className="flex h-full flex-col">
@@ -33,10 +39,12 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
         <h2 className="text-sm font-semibold text-gray-200">Connection</h2>
         <div className="flex gap-1">
           <button
-            onClick={async () => {
-              await deleteConnection(connection.id);
-              selectConnection(null);
-            }}
+            onClick={() =>
+              showConfirm("Delete this connection?", async () => {
+                await deleteConnection(connection.id);
+                selectConnection(null);
+              })
+            }
             className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-900/30"
           >
             Delete
@@ -73,7 +81,7 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
           </label>
           <select
             value={connection.direction}
-            onChange={(e) => save("direction", e.target.value)}
+            onChange={(e) => updateConnection(connection.id, { direction: e.target.value as "unidirectional" | "bidirectional" })}
             className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 focus:border-blue-500 focus:outline-none"
           >
             <option value="unidirectional">Unidirectional</option>

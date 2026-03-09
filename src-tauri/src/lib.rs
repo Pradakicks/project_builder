@@ -1,6 +1,8 @@
 mod commands;
 mod db;
 pub mod models;
+mod llm;
+mod agent;
 
 use db::Database;
 use std::sync::Mutex;
@@ -13,6 +15,7 @@ pub fn run() {
     let database = Database::new().expect("Failed to initialize database");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             db: Mutex::new(database),
         })
@@ -35,6 +38,13 @@ pub fn run() {
             commands::connection_commands::update_connection,
             commands::connection_commands::delete_connection,
             commands::connection_commands::list_connections,
+            commands::agent_commands::run_piece_agent,
+            commands::agent_commands::get_agent_history,
+            commands::agent_commands::chat_with_cto,
+            commands::settings_commands::get_api_key,
+            commands::settings_commands::set_api_key,
+            commands::settings_commands::delete_api_key,
+            commands::settings_commands::update_project_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

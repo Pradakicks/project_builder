@@ -1,6 +1,8 @@
 mod queries;
+mod agent_queries;
 
 pub use queries::*;
+pub use agent_queries::*;
 
 use rusqlite::Connection;
 use std::path::PathBuf;

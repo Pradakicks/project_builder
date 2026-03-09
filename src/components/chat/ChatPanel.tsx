@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../../store/useChatStore";
+import { useProjectStore } from "../../store/useProjectStore";
+import { useToastStore } from "../../store/useToastStore";
 
 export function ChatPanel({
   open,
@@ -9,18 +11,68 @@ export function ChatPanel({
   onToggle: () => void;
 }) {
   const { messages, addMessage } = useChatStore();
+  const project = useProjectStore((s) => s.project);
   const [input, setInput] = useState("");
+  const [streaming, setStreaming] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const streamBufferRef = useRef("");
 
   useEffect(() => {
     listRef.current?.scrollTo(0, listRef.current.scrollHeight);
-  }, [messages.length]);
+  }, [messages.length, streaming]);
 
-  const send = () => {
+  const send = async () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text || streaming || !project) return;
     addMessage("user", text);
     setInput("");
+    setStreaming(true);
+    streamBufferRef.current = "";
+
+    // Add a placeholder agent message
+    addMessage("agent", "");
+
+    try {
+      const { chatWithCto, onCtoChatChunk } = await import("../../api/tauriApi");
+
+      // Build conversation history (exclude the empty placeholder)
+      const conversation = messages
+        .filter((m) => m.content)
+        .map((m) => ({
+          role: m.role === "user" ? "user" : "assistant",
+          content: m.content,
+        }));
+
+      const unlisten = await onCtoChatChunk((payload) => {
+        if (payload.done) {
+          setStreaming(false);
+          unlisten();
+        } else {
+          streamBufferRef.current += payload.chunk;
+          // Update the last agent message
+          const store = useChatStore.getState();
+          const msgs = [...store.messages];
+          const lastIdx = msgs.length - 1;
+          if (lastIdx >= 0 && msgs[lastIdx].role === "agent") {
+            msgs[lastIdx] = { ...msgs[lastIdx], content: streamBufferRef.current };
+            useChatStore.setState({ messages: msgs });
+          }
+        }
+      });
+
+      await chatWithCto(project.id, text, conversation);
+    } catch (e) {
+      setStreaming(false);
+      useToastStore.getState().addToast(`CTO chat error: ${e}`);
+      // Update the placeholder with error
+      const store = useChatStore.getState();
+      const msgs = [...store.messages];
+      const lastIdx = msgs.length - 1;
+      if (lastIdx >= 0 && msgs[lastIdx].role === "agent" && !msgs[lastIdx].content) {
+        msgs[lastIdx] = { ...msgs[lastIdx], content: "(Failed to connect to LLM)" };
+        useChatStore.setState({ messages: msgs });
+      }
+    }
   };
 
   if (!open) {
@@ -52,7 +104,7 @@ export function ChatPanel({
       <div ref={listRef} className="flex-1 overflow-y-auto p-3 space-y-2">
         {messages.length === 0 && (
           <p className="text-[11px] text-gray-600 text-center mt-8">
-            Agent not connected — will be available in a future update
+            Ask the CTO agent about your project's architecture, design, or implementation strategy.
           </p>
         )}
         {messages.map((msg) => (
@@ -67,7 +119,7 @@ export function ChatPanel({
                   : "bg-gray-800 text-gray-200"
               }`}
             >
-              {msg.content}
+              {msg.content || (streaming ? "..." : "")}
             </div>
           </div>
         ))}
@@ -80,11 +132,13 @@ export function ChatPanel({
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
           placeholder="Message CTO agent..."
-          className="flex-1 rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+          disabled={streaming}
+          className="flex-1 rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
         />
         <button
           onClick={send}
-          className="rounded bg-blue-600 px-2.5 py-1.5 text-xs text-white hover:bg-blue-500"
+          disabled={streaming}
+          className="rounded bg-blue-600 px-2.5 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
         >
           Send
         </button>

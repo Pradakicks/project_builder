@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project,
   Piece,
@@ -121,4 +122,91 @@ export async function deleteConnection(id: string): Promise<void> {
 
 export async function listConnections(projectId: string): Promise<Connection[]> {
   return invoke("list_connections", { projectId });
+}
+
+// ── Settings / Keyring ───────────────────────────────────
+
+export async function getApiKey(provider: string): Promise<string | null> {
+  return invoke("get_api_key", { provider });
+}
+
+export async function setApiKey(provider: string, key: string): Promise<void> {
+  return invoke("set_api_key", { provider, key });
+}
+
+export async function deleteApiKey(provider: string): Promise<void> {
+  return invoke("delete_api_key", { provider });
+}
+
+export async function updateProjectSettings(
+  id: string,
+  settings: import("../types").ProjectSettings,
+): Promise<import("../types").Project> {
+  return invoke("update_project_settings", { id, settings });
+}
+
+// ── Agent ─────────────────────────────────────────────────
+
+export async function runPieceAgent(pieceId: string): Promise<void> {
+  return invoke("run_piece_agent", { pieceId });
+}
+
+export interface AgentHistoryEntry {
+  id: string;
+  agentId: string;
+  action: string;
+  inputText: string;
+  outputText: string;
+  tokensUsed: number;
+  createdAt: string;
+}
+
+export async function getAgentHistory(
+  pieceId: string,
+): Promise<AgentHistoryEntry[]> {
+  return invoke("get_agent_history", { pieceId });
+}
+
+export interface LlmMessage {
+  role: string;
+  content: string;
+}
+
+export async function chatWithCto(
+  projectId: string,
+  userMessage: string,
+  conversation: LlmMessage[],
+): Promise<void> {
+  return invoke("chat_with_cto", { projectId, userMessage, conversation });
+}
+
+// ── Event Listeners ───────────────────────────────────────
+
+export interface AgentOutputChunk {
+  pieceId: string;
+  chunk: string;
+  done: boolean;
+  usage?: { input: number; output: number };
+}
+
+export function onAgentOutputChunk(
+  callback: (payload: AgentOutputChunk) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentOutputChunk>("agent-output-chunk", (event) => {
+    callback(event.payload);
+  });
+}
+
+export interface CtoChatChunk {
+  chunk: string;
+  done: boolean;
+  usage?: { input: number; output: number };
+}
+
+export function onCtoChatChunk(
+  callback: (payload: CtoChatChunk) => void,
+): Promise<UnlistenFn> {
+  return listen<CtoChatChunk>("cto-chat-chunk", (event) => {
+    callback(event.payload);
+  });
 }

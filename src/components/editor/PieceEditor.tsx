@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
+import { useDialogStore } from "../../store/useDialogStore";
+import { useAgentStore } from "../../store/useAgentStore";
+import { useToastStore } from "../../store/useToastStore";
 import type {
   Piece,
   PieceInterface,
@@ -9,6 +12,7 @@ import type {
 import { AgentPromptEditor } from "./AgentPromptEditor";
 import { PillSelect } from "../ui/PillSelect";
 import { SelectWithOther } from "../ui/SelectWithOther";
+import { debounce } from "../../utils/debounce";
 
 type Tab = "general" | "interfaces" | "constraints" | "notes" | "agent";
 
@@ -45,6 +49,7 @@ const modelPresets: Record<string, string[]> = {
 
 export function PieceEditor({ pieceId }: { pieceId: string }) {
   const { pieces, updatePiece, deletePiece, selectPiece } = useProjectStore();
+  const showConfirm = useDialogStore((s) => s.showConfirm);
   const piece = pieces.find((p) => p.id === pieceId);
   const [activeTab, setActiveTab] = useState<Tab>("general");
 
@@ -58,10 +63,12 @@ export function PieceEditor({ pieceId }: { pieceId: string }) {
         </h2>
         <div className="flex gap-1">
           <button
-            onClick={async () => {
-              await deletePiece(piece.id);
-              selectPiece(null);
-            }}
+            onClick={() =>
+              showConfirm(`Delete piece "${piece.name}"?`, async () => {
+                await deletePiece(piece.id);
+                selectPiece(null);
+              })
+            }
             className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-900/30"
           >
             Delete
@@ -181,10 +188,11 @@ function GeneralTab({
     setResponsibilities(piece.responsibilities);
   }, [piece.id, piece.name, piece.pieceType, piece.color, piece.responsibilities]);
 
-  const save = useCallback(
-    (field: string, value: unknown) => {
-      onUpdate(piece.id, { [field]: value });
-    },
+  const save = useMemo(
+    () =>
+      debounce((field: string, value: unknown) => {
+        onUpdate(piece.id, { [field]: value });
+      }, 300),
     [piece.id, onUpdate],
   );
 
@@ -264,9 +272,14 @@ function InterfacesTab({
     setInterfaces(piece.interfaces);
   }, [piece.id, piece.interfaces]);
 
+  const debouncedUpdate = useMemo(
+    () => debounce((updated: PieceInterface[]) => onUpdate(piece.id, { interfaces: updated }), 300),
+    [piece.id, onUpdate],
+  );
+
   const save = (updated: PieceInterface[]) => {
     setInterfaces(updated);
-    onUpdate(piece.id, { interfaces: updated });
+    debouncedUpdate(updated);
   };
 
   const addInterface = () => {
@@ -350,9 +363,14 @@ function ConstraintsTab({
     setConstraints(piece.constraints);
   }, [piece.id, piece.constraints]);
 
+  const debouncedUpdate = useMemo(
+    () => debounce((updated: Constraint[]) => onUpdate(piece.id, { constraints: updated }), 300),
+    [piece.id, onUpdate],
+  );
+
   const save = (updated: Constraint[]) => {
     setConstraints(updated);
-    onUpdate(piece.id, { constraints: updated });
+    debouncedUpdate(updated);
   };
 
   const addConstraint = () => {
@@ -418,6 +436,11 @@ function NotesTab({
     setNotes(piece.notes);
   }, [piece.id, piece.notes]);
 
+  const debouncedSave = useMemo(
+    () => debounce((v: string) => onUpdate(piece.id, { notes: v }), 300),
+    [piece.id, onUpdate],
+  );
+
   return (
     <div>
       <FieldLabel>Notes (Markdown)</FieldLabel>
@@ -425,7 +448,7 @@ function NotesTab({
         value={notes}
         onChange={(v) => {
           setNotes(v);
-          onUpdate(piece.id, { notes: v });
+          debouncedSave(v);
         }}
         placeholder="Freeform notes..."
         rows={16}
@@ -443,9 +466,39 @@ function AgentTab({
 }) {
   const provider = piece.agentConfig.provider ?? "";
   const model = piece.agentConfig.model ?? "";
-
-  // Determine which model presets to show based on provider
   const currentModelPresets = modelPresets[provider] ?? [];
+
+  const run = useAgentStore((s) => s.runs[piece.id]);
+
+  const handleRun = async () => {
+    const { runPieceAgent, onAgentOutputChunk } = await import("../../api/tauriApi");
+    const agentStore = useAgentStore.getState();
+    agentStore.startRun(piece.id);
+
+    const unlisten = await onAgentOutputChunk((payload) => {
+      if (payload.pieceId !== piece.id) return;
+      const store = useAgentStore.getState();
+      if (payload.done) {
+        store.completeRun(piece.id, payload.usage ?? { input: 0, output: 0 });
+        unlisten();
+      } else {
+        store.appendChunk(piece.id, payload.chunk);
+      }
+    });
+
+    try {
+      await runPieceAgent(piece.id);
+    } catch (e) {
+      useToastStore.getState().addToast(`Agent error: ${e}`);
+      useAgentStore.getState().completeRun(piece.id, { input: 0, output: 0 });
+      unlisten();
+    }
+  };
+
+  const canRun = !!provider && !!model;
+  const outputRef = useCallback((el: HTMLPreElement | null) => {
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [run?.output]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -516,6 +569,39 @@ function AgentTab({
           className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
         />
       </div>
+
+      <div className="border-t border-gray-800 pt-3">
+        <button
+          onClick={handleRun}
+          disabled={!canRun || run?.running}
+          className="w-full rounded bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {run?.running ? "Running..." : "Run Agent"}
+        </button>
+        {!canRun && (
+          <p className="text-[10px] text-gray-600 mt-1">
+            Select a provider and model to run the agent
+          </p>
+        )}
+      </div>
+
+      {run?.output && (
+        <div>
+          <FieldLabel>Output</FieldLabel>
+          <pre
+            ref={outputRef}
+            className="max-h-64 overflow-y-auto rounded border border-gray-700 bg-gray-800 p-2 text-xs text-gray-200 font-mono whitespace-pre-wrap"
+          >
+            {run.output}
+          </pre>
+        </div>
+      )}
+
+      {run?.usage && !run.running && (
+        <p className="text-[10px] text-gray-500">
+          Tokens: {run.usage.input} in / {run.usage.output} out
+        </p>
+      )}
     </div>
   );
 }

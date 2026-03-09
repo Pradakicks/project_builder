@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import {
   ReactFlow,
   Background,
@@ -31,9 +31,13 @@ export function DiagramCanvas() {
     selectPiece,
     selectConnection,
     addConnection,
+    addPiece,
     updatePiece,
     drillInto,
   } = useProjectStore();
+
+  // Debounce position persistence (500ms)
+  const positionTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const initialNodes: Node[] = useMemo(
     () =>
@@ -96,13 +100,16 @@ export function DiagramCanvas() {
   const handleNodesChange: OnNodesChange = useCallback(
     (changes) => {
       onNodesChange(changes);
-      // Persist position changes
+      // Persist position changes with debounce
       for (const change of changes) {
         if (change.type === "position" && change.position && !change.dragging) {
-          updatePiece(change.id, {
-            positionX: change.position.x,
-            positionY: change.position.y,
-          }).catch(() => {});
+          const id = change.id;
+          const pos = change.position;
+          clearTimeout(positionTimers.current[id]);
+          positionTimers.current[id] = setTimeout(() => {
+            updatePiece(id, { positionX: pos.x, positionY: pos.y }).catch(() => {});
+            delete positionTimers.current[id];
+          }, 500);
         }
       }
     },
@@ -141,6 +148,26 @@ export function DiagramCanvas() {
     selectPiece(null);
     selectConnection(null);
   }, [selectPiece, selectConnection]);
+
+  // Empty state
+  if (pieces.length === 0) {
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-gray-950">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <p className="text-sm text-gray-400">No pieces yet</p>
+          <button
+            onClick={() => addPiece("New Piece", 400, 250)}
+            className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
+          >
+            Add your first piece
+          </button>
+          <p className="text-xs text-gray-600 max-w-xs">
+            Pieces represent components of your project. Connect them to define how they interact.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full w-full">
