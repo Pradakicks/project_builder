@@ -4,6 +4,7 @@ import type { ProjectSettings, LlmConfig, PhaseControlPolicy } from "../../types
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
+import { useDialogStore } from "../../store/useDialogStore";
 
 const PROVIDERS = ["claude", "openai"] as const;
 
@@ -18,12 +19,16 @@ export function SettingsPage() {
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const project = useProjectStore((s) => s.project);
   const addToast = useToastStore((s) => s.addToast);
+  const showConfirm = useDialogStore((s) => s.showConfirm);
 
   // API keys state
   const [keys, setKeys] = useState<Record<string, KeyState>>({});
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+  const [savingKey, setSavingKey] = useState<Record<string, boolean>>({});
+  const [clearingKey, setClearingKey] = useState<Record<string, boolean>>({});
 
   // Project settings state
+  const [savingProjectSettings, setSavingProjectSettings] = useState(false);
   const [tokenBudget, setTokenBudget] = useState(100_000);
   const [phaseControl, setPhaseControl] = useState<PhaseControlPolicy>("manual");
   const [llmConfigs, setLlmConfigs] = useState<LlmConfig[]>([]);
@@ -65,6 +70,7 @@ export function SettingsPage() {
   const handleSaveKey = async (provider: string) => {
     const value = keyInputs[provider];
     if (!value?.trim()) return;
+    setSavingKey((prev) => ({ ...prev, [provider]: true }));
     try {
       await api.setApiKey(provider, value.trim());
       const masked = value.length > 4 ? "****" + value.slice(-4) : "****";
@@ -76,10 +82,13 @@ export function SettingsPage() {
       addToast(`${provider} key saved`, "info");
     } catch (e) {
       addToast(`Failed to save key: ${e}`);
+    } finally {
+      setSavingKey((prev) => ({ ...prev, [provider]: false }));
     }
   };
 
   const handleClearKey = async (provider: string) => {
+    setClearingKey((prev) => ({ ...prev, [provider]: true }));
     try {
       await api.deleteApiKey(provider);
       setKeys((prev) => ({
@@ -89,11 +98,14 @@ export function SettingsPage() {
       addToast(`${provider} key removed`, "info");
     } catch (e) {
       addToast(`Failed to remove key: ${e}`);
+    } finally {
+      setClearingKey((prev) => ({ ...prev, [provider]: false }));
     }
   };
 
   const handleSaveProjectSettings = async () => {
     if (!activeProjectId) return;
+    setSavingProjectSettings(true);
     try {
       const settings: ProjectSettings = {
         defaultTokenBudget: tokenBudget,
@@ -104,6 +116,8 @@ export function SettingsPage() {
       addToast("Project settings saved", "info");
     } catch (e) {
       addToast(`Failed to save settings: ${e}`);
+    } finally {
+      setSavingProjectSettings(false);
     }
   };
 
@@ -165,10 +179,16 @@ export function SettingsPage() {
                           {keyState.masked}
                         </span>
                         <button
-                          onClick={() => handleClearKey(provider)}
-                          className="rounded px-2.5 py-1 text-xs text-red-400 hover:bg-gray-800 hover:text-red-300 border border-gray-700"
+                          onClick={() =>
+                            showConfirm(
+                              `Remove the ${provider} API key?`,
+                              () => handleClearKey(provider),
+                            )
+                          }
+                          disabled={clearingKey[provider]}
+                          className="rounded px-2.5 py-1 text-xs text-red-400 hover:bg-gray-800 hover:text-red-300 border border-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Clear
+                          {clearingKey[provider] ? "Clearing..." : "Clear"}
                         </button>
                       </>
                     ) : (
@@ -190,9 +210,10 @@ export function SettingsPage() {
                         />
                         <button
                           onClick={() => handleSaveKey(provider)}
-                          className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500"
+                          disabled={savingKey[provider] || !keyInputs[provider]?.trim()}
+                          className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Save
+                          {savingKey[provider] ? "Saving..." : "Save"}
                         </button>
                       </>
                     )}
@@ -215,7 +236,7 @@ export function SettingsPage() {
                 {/* Token budget */}
                 <div className="flex items-center gap-3">
                   <label className="text-sm text-gray-400 w-40">
-                    Default token budget
+                    Default response length
                   </label>
                   <input
                     type="number"
@@ -228,7 +249,7 @@ export function SettingsPage() {
                 {/* Phase control */}
                 <div className="flex items-center gap-3">
                   <label className="text-sm text-gray-400 w-40">
-                    Phase control
+                    Phase management
                   </label>
                   <select
                     value={phaseControl}
@@ -238,8 +259,8 @@ export function SettingsPage() {
                     className="rounded border border-gray-700 bg-gray-800 px-2.5 py-1 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
                   >
                     <option value="manual">Manual</option>
-                    <option value="gated-auto-advance">Gated auto-advance</option>
-                    <option value="fully-autonomous">Fully autonomous</option>
+                    <option value="gated-auto-advance">Auto-advance with approval</option>
+                    <option value="fully-autonomous">Fully automatic</option>
                   </select>
                 </div>
 
@@ -247,7 +268,7 @@ export function SettingsPage() {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-sm text-gray-400">
-                      LLM configurations
+                      AI Model Settings
                     </label>
                     <button
                       onClick={addLlmConfig}
@@ -258,7 +279,7 @@ export function SettingsPage() {
                   </div>
                   {llmConfigs.length === 0 && (
                     <p className="text-xs text-gray-600">
-                      No LLM configs. Uses defaults (Claude Sonnet).
+                      No custom AI models configured. Uses default settings.
                     </p>
                   )}
                   {llmConfigs.map((config, i) => (
@@ -306,9 +327,10 @@ export function SettingsPage() {
 
                 <button
                   onClick={handleSaveProjectSettings}
-                  className="rounded bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
+                  disabled={savingProjectSettings}
+                  className="rounded bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
-                  Save Project Settings
+                  {savingProjectSettings ? "Saving..." : "Save Project Settings"}
                 </button>
               </div>
             </section>

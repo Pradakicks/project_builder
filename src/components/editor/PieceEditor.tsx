@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useDialogStore } from "../../store/useDialogStore";
 import { useAgentStore } from "../../store/useAgentStore";
@@ -10,16 +10,18 @@ import type {
   Phase,
 } from "../../types";
 import { AgentPromptEditor } from "./AgentPromptEditor";
+import { ReferenceSuggestions } from "./ReferenceSuggestions";
 import { PillSelect } from "../ui/PillSelect";
 import { SelectWithOther } from "../ui/SelectWithOther";
 import { debounce } from "../../utils/debounce";
+import { useAtReference } from "../../hooks/useAtReference";
 
 type Tab = "general" | "interfaces" | "constraints" | "notes" | "agent";
 
 const tabs: { id: Tab; label: string }[] = [
   { id: "general", label: "General" },
-  { id: "interfaces", label: "Interfaces" },
-  { id: "constraints", label: "Constraints" },
+  { id: "interfaces", label: "Inputs & Outputs" },
+  { id: "constraints", label: "Requirements" },
   { id: "notes", label: "Notes" },
   { id: "agent", label: "Agent" },
 ];
@@ -180,6 +182,8 @@ function GeneralTab({
   const [pieceType, setPieceType] = useState(piece.pieceType);
   const [color, setColor] = useState(piece.color ?? "#3b82f6");
   const [responsibilities, setResponsibilities] = useState(piece.responsibilities);
+  const responsibilitiesRef = useRef<HTMLTextAreaElement>(null);
+  const refHook = useAtReference(responsibilitiesRef, responsibilities);
 
   useEffect(() => {
     setName(piece.name);
@@ -245,15 +249,31 @@ function GeneralTab({
       </div>
       <div>
         <FieldLabel>Responsibilities</FieldLabel>
-        <TextArea
-          value={responsibilities}
-          onChange={(v) => {
-            setResponsibilities(v);
-            save("responsibilities", v);
-          }}
-          placeholder="What does this piece do?"
-          rows={4}
-        />
+        <div className="relative">
+          <textarea
+            ref={responsibilitiesRef}
+            value={responsibilities}
+            onChange={(e) =>
+              refHook.handleChange(e, (v) => {
+                setResponsibilities(v);
+                save("responsibilities", v);
+              })
+            }
+            placeholder="What does this piece do? Use @PieceName to reference others."
+            rows={4}
+            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none resize-none font-mono"
+          />
+          <ReferenceSuggestions
+            show={refHook.showSuggestions}
+            suggestions={refHook.suggestions}
+            onSelect={(name) =>
+              refHook.insertReference(name, (v) => {
+                setResponsibilities(v);
+                save("responsibilities", v);
+              })
+            }
+          />
+        </div>
       </div>
     </div>
   );
@@ -302,6 +322,14 @@ function InterfacesTab({
 
   return (
     <div className="flex flex-col gap-3">
+      {interfaces.length === 0 && (
+        <div className="rounded border border-dashed border-gray-700 px-4 py-6 text-center">
+          <p className="text-xs text-gray-500">No inputs or outputs defined yet.</p>
+          <p className="text-[10px] text-gray-600 mt-1">
+            Add ports to describe what data this piece sends and receives.
+          </p>
+        </div>
+      )}
       {interfaces.map((iface, i) => (
         <div key={i} className="rounded border border-gray-700 p-2 flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
@@ -344,7 +372,7 @@ function InterfacesTab({
         onClick={addInterface}
         className="rounded border border-dashed border-gray-700 py-1.5 text-xs text-gray-500 hover:border-gray-600 hover:text-gray-400"
       >
-        + Add Interface
+        + Add Input or Output
       </button>
     </div>
   );
@@ -390,6 +418,14 @@ function ConstraintsTab({
 
   return (
     <div className="flex flex-col gap-3">
+      {constraints.length === 0 && (
+        <div className="rounded border border-dashed border-gray-700 px-4 py-6 text-center">
+          <p className="text-xs text-gray-500">No requirements defined yet.</p>
+          <p className="text-[10px] text-gray-600 mt-1">
+            Add constraints like performance targets, security rules, or technology limits.
+          </p>
+        </div>
+      )}
       {constraints.map((c, i) => (
         <div key={i} className="rounded border border-gray-700 p-2 flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
@@ -417,7 +453,7 @@ function ConstraintsTab({
         onClick={addConstraint}
         className="rounded border border-dashed border-gray-700 py-1.5 text-xs text-gray-500 hover:border-gray-600 hover:text-gray-400"
       >
-        + Add Constraint
+        + Add Requirement
       </button>
     </div>
   );
@@ -431,6 +467,8 @@ function NotesTab({
   onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
 }) {
   const [notes, setNotes] = useState(piece.notes);
+  const notesRef = useRef<HTMLTextAreaElement>(null);
+  const refHook = useAtReference(notesRef, notes);
 
   useEffect(() => {
     setNotes(piece.notes);
@@ -443,16 +481,32 @@ function NotesTab({
 
   return (
     <div>
-      <FieldLabel>Notes (Markdown)</FieldLabel>
-      <TextArea
-        value={notes}
-        onChange={(v) => {
-          setNotes(v);
-          debouncedSave(v);
-        }}
-        placeholder="Freeform notes..."
-        rows={16}
-      />
+      <FieldLabel>Notes</FieldLabel>
+      <div className="relative">
+        <textarea
+          ref={notesRef}
+          value={notes}
+          onChange={(e) =>
+            refHook.handleChange(e, (v) => {
+              setNotes(v);
+              debouncedSave(v);
+            })
+          }
+          placeholder="Freeform notes... Use @PieceName to reference other pieces."
+          rows={16}
+          className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none resize-none font-mono"
+        />
+        <ReferenceSuggestions
+          show={refHook.showSuggestions}
+          suggestions={refHook.suggestions}
+          onSelect={(name) =>
+            refHook.insertReference(name, (v) => {
+              setNotes(v);
+              debouncedSave(v);
+            })
+          }
+        />
+      </div>
     </div>
   );
 }
@@ -503,7 +557,7 @@ function AgentTab({
   return (
     <div className="flex flex-col gap-3">
       <div>
-        <FieldLabel>Agent Prompt</FieldLabel>
+        <FieldLabel>Agent Instructions</FieldLabel>
         <p className="text-[10px] text-gray-600 mb-1">
           Use @PieceName to reference other pieces
         </p>
@@ -513,7 +567,7 @@ function AgentTab({
         />
       </div>
       <div>
-        <FieldLabel>LLM Provider</FieldLabel>
+        <FieldLabel>AI Provider</FieldLabel>
         <SelectWithOther
           value={provider}
           presets={providerPresets}
@@ -553,7 +607,7 @@ function AgentTab({
         )}
       </div>
       <div>
-        <FieldLabel>Token Budget</FieldLabel>
+        <FieldLabel>Response length limit</FieldLabel>
         <input
           type="number"
           value={piece.agentConfig.tokenBudget ?? ""}

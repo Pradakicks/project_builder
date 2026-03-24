@@ -1,7 +1,9 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useDialogStore } from "../../store/useDialogStore";
 import { debounce } from "../../utils/debounce";
+import { useAtReference } from "../../hooks/useAtReference";
+import { ReferenceSuggestions } from "./ReferenceSuggestions";
 
 export function ConnectionEditor({ connectionId }: { connectionId: string }) {
   const { connections, updateConnection, deleteConnection, selectConnection } =
@@ -13,6 +15,8 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
   const [dataType, setDataType] = useState("");
   const [protocol, setProtocol] = useState("");
   const [notes, setNotes] = useState("");
+  const notesRef = useRef<HTMLTextAreaElement>(null);
+  const refHook = useAtReference(notesRef, notes);
 
   useEffect(() => {
     if (connection) {
@@ -22,6 +26,15 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
       setNotes(connection.notes);
     }
   }, [connection]);
+
+  // Escape key closes the editor
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") selectConnection(null);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [selectConnection]);
 
   const save = useMemo(
     () =>
@@ -61,7 +74,7 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
         <div>
           <label className="block text-xs font-medium text-gray-400 mb-1">
-            Label
+            Connection Name
           </label>
           <input
             type="text"
@@ -84,8 +97,8 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
             onChange={(e) => updateConnection(connection.id, { direction: e.target.value as "unidirectional" | "bidirectional" })}
             className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 focus:border-blue-500 focus:outline-none"
           >
-            <option value="unidirectional">Unidirectional</option>
-            <option value="bidirectional">Bidirectional</option>
+            <option value="unidirectional">One-way</option>
+            <option value="bidirectional">Two-way</option>
           </select>
         </div>
 
@@ -125,16 +138,31 @@ export function ConnectionEditor({ connectionId }: { connectionId: string }) {
           <label className="block text-xs font-medium text-gray-400 mb-1">
             Notes
           </label>
-          <textarea
-            value={notes}
-            onChange={(e) => {
-              setNotes(e.target.value);
-              save("notes", e.target.value);
-            }}
-            placeholder="Connection notes..."
-            rows={6}
-            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none resize-none font-mono"
-          />
+          <div className="relative">
+            <textarea
+              ref={notesRef}
+              value={notes}
+              onChange={(e) =>
+                refHook.handleChange(e, (v) => {
+                  setNotes(v);
+                  save("notes", v);
+                })
+              }
+              placeholder="Connection notes... Use @PieceName to reference pieces."
+              rows={6}
+              className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none resize-none font-mono"
+            />
+            <ReferenceSuggestions
+              show={refHook.showSuggestions}
+              suggestions={refHook.suggestions}
+              onSelect={(name) =>
+                refHook.insertReference(name, (v) => {
+                  setNotes(v);
+                  save("notes", v);
+                })
+              }
+            />
+          </div>
         </div>
       </div>
     </div>
