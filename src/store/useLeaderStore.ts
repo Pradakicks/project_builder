@@ -135,6 +135,9 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
           exitCode: payload.exitCode,
           phaseProposal: payload.phaseProposal,
           phaseChanged: payload.phaseChanged,
+          gitBranch: payload.gitBranch,
+          gitCommitSha: payload.gitCommitSha,
+          gitDiffStat: payload.gitDiffStat,
         });
         unlisten();
         // Mark task as complete

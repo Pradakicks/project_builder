@@ -199,6 +199,9 @@ export interface AgentOutputChunk {
   usage?: { input: number; output: number };
   phaseProposal?: string;
   phaseChanged?: string;
+  gitBranch?: string;
+  gitCommitSha?: string;
+  gitDiffStat?: string;
 }
 
 export function onAgentOutputChunk(
@@ -220,6 +223,21 @@ export function onPhaseWarning(
   return listen<PhaseWarning>("phase-warning", (event) => {
     callback(event.payload);
   });
+}
+
+// ── Git Status ───────────────────────────────────────────
+
+export interface GitStatusInfo {
+  currentBranch: string;
+  hasUncommittedChanges: boolean;
+  lastCommitMessage: string | null;
+  lastCommitSha: string | null;
+}
+
+export async function getGitStatus(
+  pieceId: string,
+): Promise<GitStatusInfo | null> {
+  return invoke("get_git_status", { pieceId });
 }
 
 export interface CtoChatChunk {

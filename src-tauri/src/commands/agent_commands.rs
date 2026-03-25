@@ -2,6 +2,7 @@ use crate::agent;
 use crate::db::AgentHistoryEntry;
 use crate::llm::{self, LlmConfig, Message};
 use crate::AppState;
+use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
@@ -118,4 +119,65 @@ pub async fn chat_with_cto(
     );
 
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusInfo {
+    pub current_branch: String,
+    pub has_uncommitted_changes: bool,
+    pub last_commit_message: Option<String>,
+    pub last_commit_sha: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_git_status(
+    state: State<'_, AppState>,
+    piece_id: String,
+) -> Result<Option<GitStatusInfo>, String> {
+    // Load piece → project → working_directory
+    let working_dir = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let piece = db.get_piece(&piece_id)?;
+        let project = db.get_project(&piece.project_id)?;
+        project.settings.working_directory
+    };
+
+    let working_dir = match working_dir {
+        Some(dir) => dir,
+        None => return Ok(None),
+    };
+
+    let current_branch = agent::git_ops::current_branch(&working_dir)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let has_uncommitted = agent::git_ops::has_uncommitted_changes(&working_dir)
+        .await
+        .unwrap_or(false);
+
+    let last_sha = agent::git_ops::get_head_sha(&working_dir).await.ok();
+
+    // Get last commit message
+    let last_message = tokio::process::Command::new("git")
+        .current_dir(&working_dir)
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if msg.is_empty() { None } else { Some(msg) }
+            } else {
+                None
+            }
+        });
+
+    Ok(Some(GitStatusInfo {
+        current_branch,
+        has_uncommitted_changes: has_uncommitted,
+        last_commit_message: last_message,
+        last_commit_sha: last_sha,
+    }))
 }

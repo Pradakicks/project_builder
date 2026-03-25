@@ -7,6 +7,9 @@ export interface AgentRunState {
   exitCode?: number;
   phaseProposal?: string;
   phaseChanged?: string;
+  gitBranch?: string;
+  gitCommitSha?: string;
+  gitDiffStat?: string;
 }
 
 interface CompleteRunOpts {
@@ -14,6 +17,9 @@ interface CompleteRunOpts {
   exitCode?: number;
   phaseProposal?: string;
   phaseChanged?: string;
+  gitBranch?: string;
+  gitCommitSha?: string;
+  gitDiffStat?: string;
 }
 
 interface AgentStore {
@@ -59,6 +65,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           exitCode: opts.exitCode,
           phaseProposal: opts.phaseProposal,
           phaseChanged: opts.phaseChanged,
+          gitBranch: opts.gitBranch,
+          gitCommitSha: opts.gitCommitSha,
+          gitDiffStat: opts.gitDiffStat,
         },
       },
     });

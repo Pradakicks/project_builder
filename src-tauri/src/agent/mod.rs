@@ -1,4 +1,5 @@
 pub mod external;
+pub mod git_ops;
 pub mod runner;
 
 use crate::db::Database;

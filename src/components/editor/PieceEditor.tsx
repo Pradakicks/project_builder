@@ -547,6 +547,9 @@ function AgentTab({
           exitCode: payload.exitCode,
           phaseProposal: payload.phaseProposal,
           phaseChanged: payload.phaseChanged,
+          gitBranch: payload.gitBranch,
+          gitCommitSha: payload.gitCommitSha,
+          gitDiffStat: payload.gitDiffStat,
         });
         // If phase was auto-changed (autonomous mode), refresh the piece
         if (payload.phaseChanged) {
@@ -756,6 +759,25 @@ function AgentTab({
           )}
           {run.usage && (run.usage.input > 0 || run.usage.output > 0) && (
             <span>Tokens: {run.usage.input} in / {run.usage.output} out</span>
+          )}
+        </div>
+      )}
+
+      {/* Git info (external engines only) */}
+      {run?.gitBranch && !run.running && (
+        <div className="rounded border border-gray-800 bg-gray-900 px-3 py-2 text-[10px] text-gray-400 space-y-0.5">
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500">branch</span>
+            <span className="font-mono text-gray-300">{run.gitBranch}</span>
+          </div>
+          {run.gitCommitSha && (
+            <div className="flex items-center gap-2">
+              <span className="text-gray-500">commit</span>
+              <span className="font-mono text-green-400">{run.gitCommitSha}</span>
+            </div>
+          )}
+          {run.gitDiffStat && (
+            <pre className="text-gray-500 whitespace-pre-wrap">{run.gitDiffStat}</pre>
           )}
         </div>
       )}

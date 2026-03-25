@@ -53,7 +53,12 @@ fn load_piece_context(
 /// Result of an inner agent run (before done-event emission).
 enum AgentResult {
     Builtin { usage: TokenUsage },
-    External { exit_code: i32 },
+    External {
+        exit_code: i32,
+        git_branch: Option<String>,
+        git_commit_sha: Option<String>,
+        git_diff_stat: Option<String>,
+    },
 }
 
 /// Run a piece's agent: dispatches to built-in LLM or external tool based on config.
@@ -83,7 +88,7 @@ pub async fn run_piece_agent(
     // Determine if the run was successful
     let success = match &result {
         Ok(AgentResult::Builtin { .. }) => true,
-        Ok(AgentResult::External { exit_code }) => *exit_code == 0,
+        Ok(AgentResult::External { exit_code, .. }) => *exit_code == 0,
         Err(_) => false,
     };
 
@@ -117,21 +122,35 @@ pub async fn run_piece_agent(
     }
 
     // Emit unified done event
-    let (usage, exit_code) = match &result {
-        Ok(AgentResult::Builtin { usage }) => (json!({"input": usage.input, "output": usage.output}), None),
-        Ok(AgentResult::External { exit_code }) => (json!({"input": 0, "output": 0}), Some(*exit_code)),
-        Err(_) => (json!({"input": 0, "output": 0}), Some(-1)),
-    };
-
     let mut done_payload = json!({
         "pieceId": piece_id,
         "chunk": "",
         "done": true,
-        "usage": usage,
     });
-    if let Some(code) = exit_code {
-        done_payload["exitCode"] = json!(code);
+
+    match &result {
+        Ok(AgentResult::Builtin { usage }) => {
+            done_payload["usage"] = json!({"input": usage.input, "output": usage.output});
+        }
+        Ok(AgentResult::External { exit_code, git_branch, git_commit_sha, git_diff_stat }) => {
+            done_payload["usage"] = json!({"input": 0, "output": 0});
+            done_payload["exitCode"] = json!(exit_code);
+            if let Some(ref branch) = git_branch {
+                done_payload["gitBranch"] = json!(branch);
+            }
+            if let Some(ref sha) = git_commit_sha {
+                done_payload["gitCommitSha"] = json!(sha);
+            }
+            if let Some(ref stat) = git_diff_stat {
+                done_payload["gitDiffStat"] = json!(stat);
+            }
+        }
+        Err(_) => {
+            done_payload["usage"] = json!({"input": 0, "output": 0});
+            done_payload["exitCode"] = json!(-1);
+        }
     }
+
     if let Some(ref proposal) = phase_proposal {
         done_payload["phaseProposal"] = json!(proposal);
     }
@@ -231,8 +250,20 @@ async fn run_builtin_agent(
     Ok(AgentResult::Builtin { usage })
 }
 
-/// Run an external tool (Claude Code, Codex, etc.). Streams chunks but does NOT
-/// emit the done event (that's handled by run_piece_agent).
+/// Emit a git-related info line through the agent output stream.
+fn emit_git_info(app_handle: &AppHandle, piece_id: &str, message: &str) {
+    let _ = app_handle.emit(
+        "agent-output-chunk",
+        json!({
+            "pieceId": piece_id,
+            "chunk": format!("[git] {message}\n"),
+            "done": false,
+        }),
+    );
+}
+
+/// Run an external tool (Claude Code, Codex, etc.) with git branch/commit lifecycle.
+/// Streams chunks but does NOT emit the done event (that's handled by run_piece_agent).
 async fn run_external_agent(
     piece: &Piece,
     context: &PieceContext,
@@ -242,6 +273,8 @@ async fn run_external_agent(
     db: &Mutex<Database>,
     app_handle: &AppHandle,
 ) -> Result<AgentResult, String> {
+    use super::git_ops;
+
     let working_dir = settings
         .working_directory
         .as_deref()
@@ -266,6 +299,44 @@ async fn run_external_agent(
         vec![]
     };
 
+    // ── Git: pre-execution ──────────────────────────────────
+    let branch_name = git_ops::slugify_branch_name(&piece.name);
+    let mut git_branch: Option<String> = None;
+    let mut before_sha: Option<String> = None;
+
+    // Save HEAD SHA before any changes
+    match git_ops::get_head_sha(working_dir).await {
+        Ok(sha) => before_sha = Some(sha),
+        Err(e) => emit_git_info(app_handle, piece_id, &format!("Warning: {e}")),
+    }
+
+    // WIP-commit any dirty state so we don't lose uncommitted work
+    match git_ops::has_uncommitted_changes(working_dir).await {
+        Ok(true) => {
+            emit_git_info(app_handle, piece_id, "Saving uncommitted changes...");
+            if let Err(e) = git_ops::stage_and_commit(working_dir, "WIP: save uncommitted changes before agent run").await {
+                emit_git_info(app_handle, piece_id, &format!("Warning: could not save changes: {e}"));
+            }
+        }
+        Ok(false) => {}
+        Err(e) => emit_git_info(app_handle, piece_id, &format!("Warning: {e}")),
+    }
+
+    // Switch to piece branch
+    match git_ops::ensure_branch(working_dir, &branch_name).await {
+        Ok(()) => {
+            emit_git_info(app_handle, piece_id, &format!("On branch {branch_name}"));
+            git_branch = Some(branch_name.clone());
+        }
+        Err(e) => {
+            emit_git_info(app_handle, piece_id, &format!("Warning: could not switch to branch: {e}"));
+        }
+    }
+
+    // Record HEAD after branch switch (for diff stat later)
+    let branch_head_sha = git_ops::get_head_sha(working_dir).await.ok();
+
+    // ── Run external tool (unchanged) ───────────────────────
     let run_config = super::external::ExternalRunConfig {
         system_prompt,
         user_prompt: user_prompt.clone(),
@@ -274,7 +345,6 @@ async fn run_external_agent(
         env_vars,
     };
 
-    // Stream via channel -> Tauri events
     let (tx, mut rx) = mpsc::channel::<String>(256);
     let piece_id_owned = piece_id.to_string();
     let app = app_handle.clone();
@@ -295,9 +365,42 @@ async fn run_external_agent(
     let result = super::external::run_external(engine_name, &run_config, tx).await;
     let _ = stream_handle.await;
 
+    // ── Git: post-execution ─────────────────────────────────
     match result {
         Ok(run_result) => {
             let exit_code = run_result.exit_code;
+            let mut git_commit_sha: Option<String> = None;
+            let mut git_diff_stat: Option<String> = None;
+
+            if exit_code == 0 {
+                // Auto-commit changes on success
+                let phase_str = format!("{:?}", piece.phase).to_lowercase();
+                let commit_msg = format!(
+                    "{}: {} phase agent run\n\nPiece: {}\nEngine: {}",
+                    branch_name, phase_str, piece.name, engine_name
+                );
+                match git_ops::stage_and_commit(working_dir, &commit_msg).await {
+                    Ok(Some(sha)) => {
+                        emit_git_info(app_handle, piece_id, &format!("Committed: {sha}"));
+                        git_commit_sha = Some(sha);
+                    }
+                    Ok(None) => {
+                        emit_git_info(app_handle, piece_id, "No changes to commit");
+                    }
+                    Err(e) => {
+                        emit_git_info(app_handle, piece_id, &format!("Warning: commit failed: {e}"));
+                    }
+                }
+
+                // Get diff stat since branch start
+                if let Some(ref base) = branch_head_sha {
+                    if let Ok(stat) = git_ops::diff_stat(working_dir, base).await {
+                        if !stat.is_empty() {
+                            git_diff_stat = Some(stat);
+                        }
+                    }
+                }
+            }
 
             {
                 let db = db.lock().map_err(|e| e.to_string())?;
@@ -310,7 +413,12 @@ async fn run_external_agent(
                 );
             }
 
-            Ok(AgentResult::External { exit_code })
+            Ok(AgentResult::External {
+                exit_code,
+                git_branch,
+                git_commit_sha,
+                git_diff_stat,
+            })
         }
         Err(err) => Err(err),
     }
