@@ -6,6 +6,7 @@ import type {
   Connection,
   PieceUpdate,
   ConnectionUpdate,
+  Artifact,
   WorkPlan,
   PlanStatus,
   TaskStatus,
@@ -238,6 +239,12 @@ export async function getGitStatus(
   pieceId: string,
 ): Promise<GitStatusInfo | null> {
   return invoke("get_git_status", { pieceId });
+}
+
+// ── Artifacts ────────────────────────────────────────────
+
+export async function listArtifacts(pieceId: string): Promise<Artifact[]> {
+  return invoke("list_artifacts", { pieceId });
 }
 
 export interface CtoChatChunk {

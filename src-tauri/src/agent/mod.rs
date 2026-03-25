@@ -11,6 +11,8 @@ use crate::models::Piece;
 pub struct PieceContext {
     pub connected_pieces: Vec<Piece>,
     pub parent: Option<Piece>,
+    /// (piece_name, summary_content) from context_summary artifacts of connected pieces
+    pub connected_summaries: Vec<(String, String)>,
 }
 
 /// Build the LLM messages from a piece's configuration
@@ -59,6 +61,18 @@ pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message>
 
     if let Some(parent) = &context.parent {
         system_parts.push(format!("Parent piece: {} ({})", parent.name, parent.piece_type));
+    }
+
+    if !context.connected_summaries.is_empty() {
+        let summary_parts: Vec<String> = context
+            .connected_summaries
+            .iter()
+            .map(|(name, summary)| format!("### {} — What it produced:\n{}", name, summary))
+            .collect();
+        system_parts.push(format!(
+            "Context from connected pieces (use this to understand what they built):\n\n{}",
+            summary_parts.join("\n\n")
+        ));
     }
 
     system_parts.push(format!(

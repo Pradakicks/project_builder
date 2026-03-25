@@ -1,10 +1,11 @@
 use crate::agent::{build_agent_prompt, build_external_prompt, build_leader_prompt, next_phase, PieceContext};
 use crate::db::{Database, PieceUpdate};
-use crate::llm::{self, LlmConfig, TokenUsage};
+use crate::llm::{self, LlmConfig, Message, TokenUsage};
 use crate::models::*;
+use crate::AppState;
 use serde_json::json;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
 /// Load a piece and its context from the database.
@@ -39,12 +40,24 @@ fn load_piece_context(
         None
     };
 
+    // Load context summaries from connected pieces
+    let connected_summaries: Vec<(String, String)> = connected_pieces
+        .iter()
+        .filter_map(|cp| {
+            db.get_artifact_by_type(&cp.id, "context_summary")
+                .ok()
+                .flatten()
+                .map(|a| (cp.name.clone(), a.content))
+        })
+        .collect();
+
     let project = db.get_project(&piece.project_id).ok();
     let settings = project.map(|p| p.settings).unwrap_or_default();
 
     let context = PieceContext {
         connected_pieces,
         parent,
+        connected_summaries,
     };
 
     Ok((piece, context, settings))
@@ -52,7 +65,7 @@ fn load_piece_context(
 
 /// Result of an inner agent run (before done-event emission).
 enum AgentResult {
-    Builtin { usage: TokenUsage },
+    Builtin { usage: TokenUsage, output: String },
     External {
         exit_code: i32,
         git_branch: Option<String>,
@@ -129,7 +142,7 @@ pub async fn run_piece_agent(
     });
 
     match &result {
-        Ok(AgentResult::Builtin { usage }) => {
+        Ok(AgentResult::Builtin { usage, .. }) => {
             done_payload["usage"] = json!({"input": usage.input, "output": usage.output});
         }
         Ok(AgentResult::External { exit_code, git_branch, git_commit_sha, git_diff_stat }) => {
@@ -159,9 +172,52 @@ pub async fn run_piece_agent(
     }
     let _ = app_handle.emit("agent-output-chunk", done_payload);
 
+    // Fire-and-forget context summarization on success
+    if success {
+        let agent_output = match &result {
+            Ok(AgentResult::Builtin { output, .. }) => output.clone(),
+            Ok(AgentResult::External { .. }) => {
+                // External output is in agent_history; load it
+                db.lock()
+                    .ok()
+                    .and_then(|db| db.list_agent_history(piece_id).ok())
+                    .and_then(|history| history.into_iter().next().map(|h| h.output_text))
+                    .unwrap_or_default()
+            }
+            Err(_) => String::new(),
+        };
+
+        let git_info: Option<(String, String)> = match &result {
+            Ok(AgentResult::External { git_branch: Some(branch), .. }) => {
+                settings.working_directory.clone().map(|wd| (wd, branch.clone()))
+            }
+            _ => None,
+        };
+
+        let piece_id_owned = piece_id.to_string();
+        let piece_name = piece.name.clone();
+        let settings_clone = settings.clone();
+        let app = app_handle.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = generate_context_summary(
+                &piece_id_owned,
+                &piece_name,
+                &agent_output,
+                git_info.as_ref().map(|(wd, b)| (wd.as_str(), b.as_str())),
+                &settings_clone,
+                &app,
+            )
+            .await
+            {
+                eprintln!("Warning: context summary generation failed: {e}");
+            }
+        });
+    }
+
     // Convert result to TokenUsage for return
     match result {
-        Ok(AgentResult::Builtin { usage }) => Ok(usage),
+        Ok(AgentResult::Builtin { usage, .. }) => Ok(usage),
         Ok(AgentResult::External { .. }) => Ok(TokenUsage { input: 0, output: 0 }),
         Err(e) => Err(e),
     }
@@ -219,9 +275,12 @@ async fn run_builtin_agent(
     let (tx, mut rx) = mpsc::channel::<String>(256);
     let piece_id_owned = piece_id.to_string();
     let app = app_handle.clone();
+    let full_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+    let full_output_writer = full_output.clone();
 
     let stream_handle = tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
+            full_output_writer.lock().await.push_str(&chunk);
             let _ = app.emit(
                 "agent-output-chunk",
                 json!({
@@ -236,18 +295,20 @@ async fn run_builtin_agent(
     let usage = provider.chat_stream(&messages, &config, tx).await?;
     let _ = stream_handle.await;
 
+    let output_text = full_output.lock().await.clone();
+
     {
         let db = db.lock().map_err(|e| e.to_string())?;
         let _ = db.insert_agent_history(
             piece_id,
             "run",
             &piece.agent_prompt,
-            "",
+            &output_text,
             (usage.input + usage.output) as i64,
         );
     }
 
-    Ok(AgentResult::Builtin { usage })
+    Ok(AgentResult::Builtin { usage, output: output_text })
 }
 
 /// Emit a git-related info line through the agent output stream.
@@ -422,6 +483,81 @@ async fn run_external_agent(
         }
         Err(err) => Err(err),
     }
+}
+
+/// Generate a concise context summary from an agent's output and store as an artifact.
+/// Called fire-and-forget after successful agent runs.
+async fn generate_context_summary(
+    piece_id: &str,
+    piece_name: &str,
+    agent_output: &str,
+    git_info: Option<(&str, &str)>, // (working_dir, branch_name)
+    settings: &ProjectSettings,
+    app_handle: &AppHandle,
+) -> Result<(), String> {
+    if agent_output.is_empty() {
+        return Ok(());
+    }
+
+    let (provider_name, api_key, model, base_url) = resolve_llm_config(settings);
+    if api_key.is_empty() {
+        return Err("No API key available for summarization".to_string());
+    }
+
+    // Optionally get file listing for external tool runs
+    let file_listing = if let Some((working_dir, branch)) = git_info {
+        super::git_ops::list_branch_files(working_dir, branch)
+            .await
+            .ok()
+    } else {
+        None
+    };
+
+    let system_msg = "You are a technical summarizer. Given the output of an AI agent run on a software component, produce a concise context summary that other agents working on connected components will use.\n\nFocus on:\n- What was produced (files, APIs, data structures, schemas)\n- Key interfaces: endpoint paths, function signatures, event names, message formats\n- Important decisions or constraints that affect other components\n- File structure (if applicable)\n\nRules:\n- Be concise: aim for 200-400 words\n- Use bullet points, not prose\n- Include specific names (endpoint paths, type names, file paths) — not vague descriptions\n- Omit internal implementation details that don't affect other components";
+
+    let mut user_content = format!("Component: \"{piece_name}\"\n\nAgent output:\n{agent_output}");
+
+    if let Some(ref files) = file_listing {
+        if !files.is_empty() {
+            user_content.push_str(&format!("\n\nFiles on branch:\n{files}"));
+        }
+    }
+
+    // Truncate if extremely long (keep last 8000 chars which are most relevant)
+    if user_content.len() > 10000 {
+        let truncated = &user_content[user_content.len() - 8000..];
+        user_content = format!("(output truncated — showing last portion)\n\n{truncated}");
+    }
+
+    let messages = vec![
+        Message {
+            role: "system".to_string(),
+            content: system_msg.to_string(),
+        },
+        Message {
+            role: "user".to_string(),
+            content: user_content,
+        },
+    ];
+
+    let provider = llm::create_provider(&provider_name);
+    let config = LlmConfig {
+        api_key,
+        model,
+        base_url,
+        max_tokens: 1024,
+    };
+
+    let response = provider.chat(&messages, &config).await?;
+    let summary = response.content;
+
+    // Store as artifact
+    let state = app_handle.state::<AppState>();
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let title = format!("{piece_name} — Context Summary");
+    db.upsert_artifact(piece_id, "context_summary", &title, &summary)?;
+
+    Ok(())
 }
 
 /// Run the Leader Agent: analyze full diagram, produce a structured work plan

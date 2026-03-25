@@ -1,6 +1,7 @@
 use crate::agent;
 use crate::db::AgentHistoryEntry;
 use crate::llm::{self, LlmConfig, Message};
+use crate::models::Artifact;
 use crate::AppState;
 use serde::Serialize;
 use serde_json::json;
@@ -180,4 +181,13 @@ pub async fn get_git_status(
         last_commit_message: last_message,
         last_commit_sha: last_sha,
     }))
+}
+
+#[tauri::command]
+pub fn list_artifacts(
+    state: State<'_, AppState>,
+    piece_id: String,
+) -> Result<Vec<Artifact>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_artifacts(&piece_id)
 }

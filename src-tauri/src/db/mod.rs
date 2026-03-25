@@ -1,5 +1,6 @@
 mod queries;
 mod agent_queries;
+mod artifact_queries;
 mod plan_queries;
 
 pub use queries::*;

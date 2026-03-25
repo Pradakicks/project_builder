@@ -106,6 +106,11 @@ pub async fn get_head_sha(working_dir: &str) -> Result<String, String> {
     git(working_dir, &["rev-parse", "--short", "HEAD"]).await
 }
 
+/// List files on a branch (relative to repo root).
+pub async fn list_branch_files(working_dir: &str, branch: &str) -> Result<String, String> {
+    git(working_dir, &["ls-tree", "-r", "--name-only", branch]).await
+}
+
 /// Get a diff stat summary between two refs.
 pub async fn diff_stat(working_dir: &str, since_ref: &str) -> Result<String, String> {
     git(working_dir, &["diff", "--stat", &format!("{since_ref}..HEAD")]).await

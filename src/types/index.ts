@@ -121,6 +121,21 @@ export interface ConnectionUpdate {
   metadata?: Record<string, string>;
 }
 
+// ── Artifacts ────────────────────────────────────────────
+
+export interface Artifact {
+  id: string;
+  pieceId: string;
+  agentId: string | null;
+  artifactType: string;
+  title: string;
+  content: string;
+  reviewStatus: ReviewStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ── Work Plans ───────────────────────────────────────────
 
 export type PlanStatus = "generating" | "draft" | "approved" | "rejected" | "superseded";

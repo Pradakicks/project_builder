@@ -46,6 +46,7 @@ pub fn run() {
             commands::agent_commands::get_agent_history,
             commands::agent_commands::chat_with_cto,
             commands::agent_commands::get_git_status,
+            commands::agent_commands::list_artifacts,
             commands::settings_commands::get_api_key,
             commands::settings_commands::set_api_key,
             commands::settings_commands::delete_api_key,
