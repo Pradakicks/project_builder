@@ -154,15 +154,15 @@ export function DiagramCanvas() {
     return (
       <div className="flex h-full w-full items-center justify-center bg-gray-950">
         <div className="flex flex-col items-center gap-3 text-center">
-          <p className="text-sm text-gray-400">No pieces yet</p>
+          <p className="text-sm text-gray-400">No components yet</p>
           <button
-            onClick={() => addPiece("New Piece", 400, 250)}
+            onClick={() => addPiece("New Component", 400, 250)}
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
           >
-            Add your first piece
+            Add your first component
           </button>
           <p className="text-xs text-gray-600 max-w-xs">
-            Pieces represent components of your project. Connect them to define how they interact.
+            Components are the building blocks of your project. Connect them to define how they interact.
           </p>
         </div>
       </div>

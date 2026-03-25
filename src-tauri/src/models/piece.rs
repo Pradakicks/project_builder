@@ -53,6 +53,10 @@ pub struct AgentConfig {
     pub model: Option<String>,
     pub token_budget: Option<i64>,
     pub active_agents: Vec<String>,
+    /// Execution engine: None or "built-in" = LLM API, "claude-code", "codex"
+    pub execution_engine: Option<String>,
+    /// Timeout in seconds for external tool runs (default 300)
+    pub timeout: Option<u64>,
 }
 
 impl Default for AgentConfig {
@@ -62,6 +66,8 @@ impl Default for AgentConfig {
             model: None,
             token_budget: None,
             active_agents: vec![],
+            execution_engine: None,
+            timeout: None,
         }
     }
 }

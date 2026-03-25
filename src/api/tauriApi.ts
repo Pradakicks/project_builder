@@ -6,6 +6,9 @@ import type {
   Connection,
   PieceUpdate,
   ConnectionUpdate,
+  WorkPlan,
+  PlanStatus,
+  TaskStatus,
 } from "../types";
 
 // ── Projects ──────────────────────────────────────────────
@@ -145,6 +148,12 @@ export async function updateProjectSettings(
   return invoke("update_project_settings", { id, settings });
 }
 
+export async function validateWorkingDirectory(
+  path: string,
+): Promise<boolean> {
+  return invoke("validate_working_directory", { path });
+}
+
 // ── Agent ─────────────────────────────────────────────────
 
 export async function runPieceAgent(pieceId: string): Promise<void> {
@@ -186,6 +195,7 @@ export interface AgentOutputChunk {
   pieceId: string;
   chunk: string;
   done: boolean;
+  exitCode?: number;
   usage?: { input: number; output: number };
 }
 
@@ -207,6 +217,52 @@ export function onCtoChatChunk(
   callback: (payload: CtoChatChunk) => void,
 ): Promise<UnlistenFn> {
   return listen<CtoChatChunk>("cto-chat-chunk", (event) => {
+    callback(event.payload);
+  });
+}
+
+// ── Work Plans ───────────────────────────────────────────
+
+export async function generateWorkPlan(
+  projectId: string,
+  userGuidance: string,
+): Promise<WorkPlan> {
+  return invoke("generate_work_plan", { projectId, userGuidance });
+}
+
+export async function getWorkPlan(planId: string): Promise<WorkPlan> {
+  return invoke("get_work_plan", { planId });
+}
+
+export async function listWorkPlans(projectId: string): Promise<WorkPlan[]> {
+  return invoke("list_work_plans", { projectId });
+}
+
+export async function updatePlanStatus(
+  planId: string,
+  status: PlanStatus,
+): Promise<WorkPlan> {
+  return invoke("update_plan_status", { planId, status });
+}
+
+export async function updatePlanTaskStatus(
+  planId: string,
+  taskId: string,
+  status: TaskStatus,
+): Promise<WorkPlan> {
+  return invoke("update_plan_task_status", { planId, taskId, status });
+}
+
+export interface LeaderPlanChunk {
+  planId: string;
+  chunk: string;
+  done: boolean;
+}
+
+export function onLeaderPlanChunk(
+  callback: (payload: LeaderPlanChunk) => void,
+): Promise<UnlistenFn> {
+  return listen<LeaderPlanChunk>("leader-plan-chunk", (event) => {
     callback(event.payload);
   });
 }

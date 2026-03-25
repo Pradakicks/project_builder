@@ -1,8 +1,10 @@
 mod queries;
 mod agent_queries;
+mod plan_queries;
 
 pub use queries::*;
 pub use agent_queries::*;
+pub use plan_queries::*;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -125,11 +127,27 @@ impl Database {
                 FOREIGN KEY (piece_id) REFERENCES pieces(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS work_plans (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'generating',
+                summary TEXT NOT NULL DEFAULT '',
+                user_guidance TEXT NOT NULL DEFAULT '',
+                tasks_json TEXT NOT NULL DEFAULT '[]',
+                raw_output TEXT NOT NULL DEFAULT '',
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_pieces_project ON pieces(project_id);
             CREATE INDEX IF NOT EXISTS idx_pieces_parent ON pieces(parent_id);
             CREATE INDEX IF NOT EXISTS idx_connections_project ON connections(project_id);
             CREATE INDEX IF NOT EXISTS idx_agents_piece ON agents(piece_id);
             CREATE INDEX IF NOT EXISTS idx_artifacts_piece ON artifacts(piece_id);
+            CREATE INDEX IF NOT EXISTS idx_work_plans_project ON work_plans(project_id);
             ",
             )
             .map_err(|e| e.to_string())?;

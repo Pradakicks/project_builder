@@ -29,6 +29,9 @@ export function SettingsPage() {
 
   // Project settings state
   const [savingProjectSettings, setSavingProjectSettings] = useState(false);
+  const [workingDirectory, setWorkingDirectory] = useState("");
+  const [workingDirValid, setWorkingDirValid] = useState<boolean | null>(null);
+  const [workingDirError, setWorkingDirError] = useState("");
   const [tokenBudget, setTokenBudget] = useState(100_000);
   const [phaseControl, setPhaseControl] = useState<PhaseControlPolicy>("manual");
   const [llmConfigs, setLlmConfigs] = useState<LlmConfig[]>([]);
@@ -64,6 +67,13 @@ export function SettingsPage() {
       setTokenBudget(project.settings.defaultTokenBudget);
       setPhaseControl(project.settings.phaseControl);
       setLlmConfigs(project.settings.llmConfigs);
+      setWorkingDirectory(project.settings.workingDirectory ?? "");
+      // Validate existing working directory
+      if (project.settings.workingDirectory) {
+        api.validateWorkingDirectory(project.settings.workingDirectory)
+          .then(() => { setWorkingDirValid(true); setWorkingDirError(""); })
+          .catch((e) => { setWorkingDirValid(false); setWorkingDirError(String(e)); });
+      }
     }
   }, [project]);
 
@@ -111,6 +121,7 @@ export function SettingsPage() {
         defaultTokenBudget: tokenBudget,
         phaseControl,
         llmConfigs,
+        workingDirectory: workingDirectory.trim() || null,
       };
       await api.updateProjectSettings(activeProjectId, settings);
       addToast("Project settings saved", "info");
@@ -262,6 +273,67 @@ export function SettingsPage() {
                     <option value="gated-auto-advance">Auto-advance with approval</option>
                     <option value="fully-autonomous">Fully automatic</option>
                   </select>
+                </div>
+
+                {/* Working Directory */}
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">
+                    Working Directory
+                  </label>
+                  <p className="text-[10px] text-gray-600 mb-1.5">
+                    Git repo path for external tools (Claude Code, Codex).
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={workingDirectory}
+                      onChange={(e) => {
+                        setWorkingDirectory(e.target.value);
+                        setWorkingDirValid(null);
+                        setWorkingDirError("");
+                      }}
+                      onBlur={() => {
+                        if (workingDirectory.trim()) {
+                          api.validateWorkingDirectory(workingDirectory.trim())
+                            .then(() => { setWorkingDirValid(true); setWorkingDirError(""); })
+                            .catch((e) => { setWorkingDirValid(false); setWorkingDirError(String(e)); });
+                        } else {
+                          setWorkingDirValid(null);
+                          setWorkingDirError("");
+                        }
+                      }}
+                      placeholder="/path/to/your/repo"
+                      className="flex-1 rounded border border-gray-700 bg-gray-800 px-2.5 py-1 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none font-mono"
+                    />
+                    <button
+                      onClick={async () => {
+                        try {
+                          const { open } = await import("@tauri-apps/plugin-dialog");
+                          const selected = await open({ directory: true, multiple: false });
+                          if (selected && typeof selected === "string") {
+                            setWorkingDirectory(selected);
+                            api.validateWorkingDirectory(selected)
+                              .then(() => { setWorkingDirValid(true); setWorkingDirError(""); })
+                              .catch((e) => { setWorkingDirValid(false); setWorkingDirError(String(e)); });
+                          }
+                        } catch (e) {
+                          addToast(`Browse failed: ${e}`);
+                        }
+                      }}
+                      className="rounded border border-gray-700 px-2.5 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+                    >
+                      Browse
+                    </button>
+                    {workingDirValid === true && (
+                      <span className="text-green-400 text-xs" title="Valid git repo">&#10003;</span>
+                    )}
+                    {workingDirValid === false && (
+                      <span className="text-red-400 text-xs" title={workingDirError}>&#10007;</span>
+                    )}
+                  </div>
+                  {workingDirError && (
+                    <p className="text-[10px] text-red-400 mt-1">{workingDirError}</p>
+                  )}
                 </div>
 
                 {/* LLM Configs */}

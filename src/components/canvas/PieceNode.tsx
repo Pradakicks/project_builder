@@ -76,7 +76,7 @@ export function PieceNode({ data, selected }: NodeProps) {
           </div>
         )}
         <div className={`inline-flex self-start rounded px-1.5 py-0.5 text-[10px] font-medium ${phaseColors[nodeData.phase] ?? phaseColors.design}`}>
-          {nodeData.phase}
+          {nodeData.phase.charAt(0).toUpperCase() + nodeData.phase.slice(1)}
         </div>
 
         {/* Interface port indicators */}

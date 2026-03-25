@@ -18,6 +18,8 @@ pub struct ProjectSettings {
     pub llm_configs: Vec<LlmConfig>,
     pub default_token_budget: i64,
     pub phase_control: PhaseControlPolicy,
+    /// Path to a git repository for external tool execution
+    pub working_directory: Option<String>,
 }
 
 impl Default for ProjectSettings {
@@ -26,6 +28,7 @@ impl Default for ProjectSettings {
             llm_configs: vec![],
             default_token_budget: 100_000,
             phase_control: PhaseControlPolicy::Manual,
+            working_directory: None,
         }
     }
 }

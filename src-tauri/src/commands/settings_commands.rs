@@ -37,6 +37,19 @@ pub fn delete_api_key(provider: String) -> Result<(), String> {
     }
 }
 
+/// Validate that a path is an existing directory containing a .git folder.
+#[tauri::command]
+pub fn validate_working_directory(path: String) -> Result<bool, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() || !p.is_dir() {
+        return Err("Directory does not exist".into());
+    }
+    if !p.join(".git").exists() {
+        return Err("Not a git repository (no .git directory found)".into());
+    }
+    Ok(true)
+}
+
 /// Persist project-level settings (token budget, phase control, LLM configs).
 #[tauri::command]
 pub fn update_project_settings(

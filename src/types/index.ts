@@ -14,6 +14,7 @@ export interface ProjectSettings {
   llmConfigs: LlmConfig[];
   defaultTokenBudget: number;
   phaseControl: PhaseControlPolicy;
+  workingDirectory: string | null;
 }
 
 export interface LlmConfig {
@@ -65,6 +66,8 @@ export interface AgentConfig {
   model: string | null;
   tokenBudget: number | null;
   activeAgents: string[];
+  executionEngine: string | null;
+  timeout: number | null;
 }
 
 export type OutputMode = "docs-only" | "code-only" | "both";
@@ -116,4 +119,37 @@ export interface ConnectionUpdate {
   constraints?: Constraint[];
   notes?: string;
   metadata?: Record<string, string>;
+}
+
+// ── Work Plans ───────────────────────────────────────────
+
+export type PlanStatus = "generating" | "draft" | "approved" | "rejected" | "superseded";
+export type TaskPriority = "critical" | "high" | "medium" | "low";
+export type TaskStatus = "pending" | "in-progress" | "complete" | "skipped";
+
+export interface WorkPlan {
+  id: string;
+  projectId: string;
+  version: number;
+  status: PlanStatus;
+  summary: string;
+  userGuidance: string;
+  tasks: PlanTask[];
+  rawOutput: string;
+  tokensUsed: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanTask {
+  id: string;
+  pieceId: string;
+  pieceName: string;
+  title: string;
+  description: string;
+  priority: TaskPriority;
+  suggestedPhase: string;
+  dependencies: string[];
+  status: TaskStatus;
+  order: number;
 }

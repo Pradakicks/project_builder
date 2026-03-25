@@ -120,7 +120,10 @@ export function ProjectsPage() {
       {/* Project list */}
       <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
-          <p className="text-center text-gray-500 mt-20">Loading...</p>
+          <div className="flex items-center justify-center gap-2 text-gray-500 mt-20">
+            <svg className="h-5 w-5 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+            <p>Loading...</p>
+          </div>
         ) : projects.length === 0 ? (
           <div className="text-center mt-20">
             <p className="text-gray-500 mb-4">No projects yet</p>
@@ -175,17 +178,17 @@ export function ProjectsPage() {
                 </span>
 
                 {/* Actions */}
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                <div className="flex gap-1 shrink-0">
                   <button
                     onClick={() => handleRename(project)}
-                    className="rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+                    className="rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-gray-200"
                     title="Rename"
                   >
                     Rename
                   </button>
                   <button
                     onClick={() => handleDelete(project)}
-                    className="rounded px-2 py-1 text-xs text-red-400 hover:bg-gray-800 hover:text-red-300"
+                    className="rounded px-2 py-1 text-xs text-red-400/60 hover:bg-gray-800 hover:text-red-300"
                     title="Delete"
                   >
                     Delete

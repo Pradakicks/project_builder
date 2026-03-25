@@ -12,9 +12,25 @@ pub async fn run_piece_agent(
     app_handle: AppHandle,
     piece_id: String,
 ) -> Result<(), String> {
-    let db = &state.db;
-    agent::runner::run_piece_agent(&piece_id, db, &app_handle).await?;
-    Ok(())
+    // Piece-level run lock — prevent double-runs on the same piece
+    {
+        let mut running = state.running_pieces.lock().map_err(|e| e.to_string())?;
+        if !running.insert(piece_id.clone()) {
+            return Err(format!(
+                "An agent is already running for this piece. Wait for it to finish."
+            ));
+        }
+    }
+
+    let result = agent::runner::run_piece_agent(&piece_id, &state.db, &app_handle).await;
+
+    // Always release the lock
+    {
+        let mut running = state.running_pieces.lock().map_err(|e| e.to_string())?;
+        running.remove(&piece_id);
+    }
+
+    result.map(|_| ())
 }
 
 #[tauri::command]
@@ -39,18 +55,10 @@ pub async fn chat_with_cto(
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let cto_messages = agent::build_cto_prompt(&db, &project_id);
 
-        // Get default LLM config from project settings
+        // Resolve LLM config — uses project settings, falls back to any available key
         let project = db.get_project(&project_id)?;
-        let llm_config = project.settings.llm_configs.first();
-        let provider_name = llm_config
-            .map(|c| c.provider.clone())
-            .unwrap_or_else(|| "claude".to_string());
-        let model = llm_config
-            .map(|c| c.model.clone())
-            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-        let base_url = llm_config.and_then(|c| c.base_url.clone());
-
-        let api_key = agent::runner::resolve_api_key(&provider_name);
+        let (provider_name, api_key, model, base_url) =
+            agent::runner::resolve_llm_config(&project.settings);
 
         (cto_messages, provider_name, api_key, model, base_url)
     };

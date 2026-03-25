@@ -511,6 +511,12 @@ function NotesTab({
   );
 }
 
+const engineOptions = [
+  { value: "built-in", label: "Built-in LLM" },
+  { value: "claude-code", label: "Claude Code" },
+  { value: "codex", label: "Codex" },
+];
+
 function AgentTab({
   piece,
   onUpdate,
@@ -518,9 +524,12 @@ function AgentTab({
   piece: Piece;
   onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
 }) {
+  const engine = piece.agentConfig.executionEngine ?? "built-in";
+  const isExternal = engine !== "built-in";
   const provider = piece.agentConfig.provider ?? "";
   const model = piece.agentConfig.model ?? "";
   const currentModelPresets = modelPresets[provider] ?? [];
+  const workingDir = useProjectStore((s) => s.project?.settings.workingDirectory);
 
   const run = useAgentStore((s) => s.runs[piece.id]);
 
@@ -533,7 +542,7 @@ function AgentTab({
       if (payload.pieceId !== piece.id) return;
       const store = useAgentStore.getState();
       if (payload.done) {
-        store.completeRun(piece.id, payload.usage ?? { input: 0, output: 0 });
+        store.completeRun(piece.id, payload.usage ?? { input: 0, output: 0 }, payload.exitCode);
         unlisten();
       } else {
         store.appendChunk(piece.id, payload.chunk);
@@ -549,7 +558,10 @@ function AgentTab({
     }
   };
 
-  const canRun = !!provider && !!model;
+  const canRun = isExternal
+    ? !!workingDir
+    : !!provider && !!model;
+
   const outputRef = useCallback((el: HTMLPreElement | null) => {
     if (el) el.scrollTop = el.scrollHeight;
   }, [run?.output]);
@@ -566,63 +578,121 @@ function AgentTab({
           onChange={(v) => onUpdate(piece.id, { agentPrompt: v })}
         />
       </div>
+
+      {/* Execution Engine selector */}
       <div>
-        <FieldLabel>AI Provider</FieldLabel>
-        <SelectWithOther
-          value={provider}
-          presets={providerPresets}
-          onChange={(v) =>
-            onUpdate(piece.id, {
-              agentConfig: { ...piece.agentConfig, provider: v || null, model: null },
-            })
-          }
-          placeholder="Custom provider..."
-        />
-      </div>
-      <div>
-        <FieldLabel>Model</FieldLabel>
-        {currentModelPresets.length > 0 ? (
-          <SelectWithOther
-            value={model}
-            presets={currentModelPresets}
-            onChange={(v) =>
-              onUpdate(piece.id, {
-                agentConfig: { ...piece.agentConfig, model: v || null },
-              })
-            }
-            placeholder="Custom model..."
-          />
-        ) : (
-          <input
-            type="text"
-            value={model}
-            onChange={(e) =>
-              onUpdate(piece.id, {
-                agentConfig: { ...piece.agentConfig, model: e.target.value || null },
-              })
-            }
-            placeholder="Model name..."
-            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
-          />
-        )}
-      </div>
-      <div>
-        <FieldLabel>Response length limit</FieldLabel>
-        <input
-          type="number"
-          value={piece.agentConfig.tokenBudget ?? ""}
+        <FieldLabel>Execution Engine</FieldLabel>
+        <select
+          value={engine}
           onChange={(e) =>
             onUpdate(piece.id, {
-              agentConfig: {
-                ...piece.agentConfig,
-                tokenBudget: e.target.value ? parseInt(e.target.value) : null,
-              },
+              agentConfig: { ...piece.agentConfig, executionEngine: e.target.value === "built-in" ? null : e.target.value },
             })
           }
-          placeholder="100000"
-          className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
-        />
+          className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-200 focus:border-blue-500 focus:outline-none"
+        >
+          {engineOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
       </div>
+
+      {/* Built-in LLM fields */}
+      {!isExternal && (
+        <>
+          <div>
+            <FieldLabel>AI Provider</FieldLabel>
+            <SelectWithOther
+              value={provider}
+              presets={providerPresets}
+              onChange={(v) =>
+                onUpdate(piece.id, {
+                  agentConfig: { ...piece.agentConfig, provider: v || null, model: null },
+                })
+              }
+              placeholder="Custom provider..."
+            />
+          </div>
+          <div>
+            <FieldLabel>Model</FieldLabel>
+            {currentModelPresets.length > 0 ? (
+              <SelectWithOther
+                value={model}
+                presets={currentModelPresets}
+                onChange={(v) =>
+                  onUpdate(piece.id, {
+                    agentConfig: { ...piece.agentConfig, model: v || null },
+                  })
+                }
+                placeholder="Custom model..."
+              />
+            ) : (
+              <input
+                type="text"
+                value={model}
+                onChange={(e) =>
+                  onUpdate(piece.id, {
+                    agentConfig: { ...piece.agentConfig, model: e.target.value || null },
+                  })
+                }
+                placeholder="Model name..."
+                className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+              />
+            )}
+          </div>
+          <div>
+            <FieldLabel>Response length limit</FieldLabel>
+            <input
+              type="number"
+              value={piece.agentConfig.tokenBudget ?? ""}
+              onChange={(e) =>
+                onUpdate(piece.id, {
+                  agentConfig: {
+                    ...piece.agentConfig,
+                    tokenBudget: e.target.value ? parseInt(e.target.value) : null,
+                  },
+                })
+              }
+              placeholder="100000"
+              className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+        </>
+      )}
+
+      {/* External engine fields */}
+      {isExternal && (
+        <>
+          <div>
+            <FieldLabel>Timeout (seconds)</FieldLabel>
+            <input
+              type="number"
+              value={piece.agentConfig.timeout ?? 300}
+              onChange={(e) =>
+                onUpdate(piece.id, {
+                  agentConfig: {
+                    ...piece.agentConfig,
+                    timeout: e.target.value ? parseInt(e.target.value) : null,
+                  },
+                })
+              }
+              placeholder="300"
+              className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="rounded border border-gray-800 bg-gray-900 px-3 py-2 text-xs">
+            {workingDir ? (
+              <p className="text-gray-400">
+                Runs in: <span className="font-mono text-gray-300">{workingDir}</span>
+              </p>
+            ) : (
+              <p className="text-amber-400">
+                No working directory set. Configure one in Settings to use external tools.
+              </p>
+            )}
+          </div>
+        </>
+      )}
 
       <div className="border-t border-gray-800 pt-3">
         <button
@@ -632,7 +702,7 @@ function AgentTab({
         >
           {run?.running ? "Running..." : "Run Agent"}
         </button>
-        {!canRun && (
+        {!canRun && !isExternal && (
           <p className="text-[10px] text-gray-600 mt-1">
             Select a provider and model to run the agent
           </p>
@@ -651,10 +721,23 @@ function AgentTab({
         </div>
       )}
 
-      {run?.usage && !run.running && (
-        <p className="text-[10px] text-gray-500">
-          Tokens: {run.usage.input} in / {run.usage.output} out
-        </p>
+      {run && !run.running && (
+        <div className="flex items-center gap-2 text-[10px] text-gray-500">
+          {run.exitCode !== undefined && (
+            <span
+              className={`rounded px-1.5 py-0.5 font-medium ${
+                run.exitCode === 0
+                  ? "bg-green-900/50 text-green-400"
+                  : "bg-red-900/50 text-red-400"
+              }`}
+            >
+              {run.exitCode === 0 ? "Success" : `Failed (exit ${run.exitCode})`}
+            </span>
+          )}
+          {run.usage && (run.usage.input > 0 || run.usage.output > 0) && (
+            <span>Tokens: {run.usage.input} in / {run.usage.output} out</span>
+          )}
+        </div>
       )}
     </div>
   );

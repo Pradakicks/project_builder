@@ -2,24 +2,36 @@ import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../../store/useChatStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
+import { Markdown } from "../ui/Markdown";
+import {
+  parseActions,
+  stripActionBlocks,
+  describeAction,
+  executeActions,
+  type CtoAction,
+} from "../../utils/ctoActions";
 
 export function ChatPanel({
   open,
   onToggle,
+  embedded,
 }: {
   open: boolean;
   onToggle: () => void;
+  embedded?: boolean;
 }) {
   const { messages, addMessage } = useChatStore();
   const project = useProjectStore((s) => s.project);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [pendingActions, setPendingActions] = useState<CtoAction[] | null>(null);
+  const [applying, setApplying] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const streamBufferRef = useRef("");
 
   useEffect(() => {
     listRef.current?.scrollTo(0, listRef.current.scrollHeight);
-  }, [messages.length, streaming]);
+  }, [messages.length, streaming, pendingActions]);
 
   const send = async () => {
     const text = input.trim();
@@ -27,6 +39,7 @@ export function ChatPanel({
     addMessage("user", text);
     setInput("");
     setStreaming(true);
+    setPendingActions(null);
     streamBufferRef.current = "";
 
     // Add a placeholder agent message
@@ -46,6 +59,20 @@ export function ChatPanel({
       const unlisten = await onCtoChatChunk((payload) => {
         if (payload.done) {
           setStreaming(false);
+          // Parse actions from completed response
+          const actions = parseActions(streamBufferRef.current);
+          if (actions.length > 0) {
+            setPendingActions(actions);
+            // Strip action blocks from displayed message
+            const cleaned = stripActionBlocks(streamBufferRef.current);
+            const store = useChatStore.getState();
+            const msgs = [...store.messages];
+            const lastIdx = msgs.length - 1;
+            if (lastIdx >= 0 && msgs[lastIdx].role === "agent") {
+              msgs[lastIdx] = { ...msgs[lastIdx], content: cleaned };
+              useChatStore.setState({ messages: msgs });
+            }
+          }
           unlisten();
         } else {
           streamBufferRef.current += payload.chunk;
@@ -75,6 +102,27 @@ export function ChatPanel({
     }
   };
 
+  const handleApplyActions = async () => {
+    if (!pendingActions || !project) return;
+    setApplying(true);
+    const addToast = useToastStore.getState().addToast;
+    try {
+      const result = await executeActions(pendingActions, project.id);
+      if (result.executed > 0) {
+        addToast(`Applied ${result.executed} change${result.executed > 1 ? "s" : ""}`, "info");
+      }
+      for (const err of result.errors) {
+        addToast(err);
+      }
+      // Reload project to reflect changes
+      await useProjectStore.getState().loadProject(project.id);
+    } catch (e) {
+      addToast(`Failed to apply changes: ${e}`);
+    }
+    setPendingActions(null);
+    setApplying(false);
+  };
+
   if (!open) {
     return (
       <button
@@ -89,17 +137,19 @@ export function ChatPanel({
     );
   }
 
-  return (
-    <div className="flex w-72 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
-      <div className="flex items-center justify-between border-b border-gray-800 px-3 py-2">
-        <span className="text-xs font-semibold text-gray-300">CTO Agent</span>
-        <button
-          onClick={onToggle}
-          className="text-xs text-gray-500 hover:text-gray-300"
-        >
-          Collapse
-        </button>
-      </div>
+  const content = (
+    <>
+      {!embedded && (
+        <div className="flex items-center justify-between border-b border-gray-800 px-3 py-2">
+          <span className="text-xs font-semibold text-gray-300">CTO Agent</span>
+          <button
+            onClick={onToggle}
+            className="text-xs text-gray-500 hover:text-gray-300"
+          >
+            Collapse
+          </button>
+        </div>
+      )}
 
       <div ref={listRef} className="flex-1 overflow-y-auto p-3 space-y-2">
         {messages.length === 0 && (
@@ -119,10 +169,55 @@ export function ChatPanel({
                   : "bg-gray-800 text-gray-200"
               }`}
             >
-              {msg.content || (streaming ? "..." : "")}
+              {msg.role === "agent" ? (
+                msg.content ? (
+                  <Markdown content={msg.content} />
+                ) : streaming ? (
+                  <span className="inline-flex gap-1">
+                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}} />
+                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}} />
+                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}} />
+                  </span>
+                ) : null
+              ) : (
+                msg.content || ""
+              )}
             </div>
           </div>
         ))}
+
+        {/* CTO Action Card */}
+        {pendingActions && pendingActions.length > 0 && (
+          <div className="rounded-lg border border-blue-500/30 bg-blue-950/30 p-2.5">
+            <p className="text-[11px] font-medium text-blue-300 mb-1.5">
+              CTO wants to make {pendingActions.length} change{pendingActions.length > 1 ? "s" : ""}:
+            </p>
+            <ul className="space-y-0.5 mb-2">
+              {pendingActions.map((action, i) => (
+                <li key={i} className="text-[10px] text-gray-400 flex items-start gap-1">
+                  <span className="text-blue-400 mt-px">•</span>
+                  <span>{describeAction(action)}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-1.5">
+              <button
+                onClick={handleApplyActions}
+                disabled={applying}
+                className="rounded bg-blue-600 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {applying ? "Applying..." : "Apply"}
+              </button>
+              <button
+                onClick={() => setPendingActions(null)}
+                disabled={applying}
+                className="rounded border border-gray-700 px-2.5 py-1 text-[10px] text-gray-400 hover:bg-gray-800 disabled:opacity-50"
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="border-t border-gray-800 p-2 flex gap-1.5">
@@ -143,6 +238,16 @@ export function ChatPanel({
           Send
         </button>
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return content;
+  }
+
+  return (
+    <div className="flex w-72 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
+      {content}
     </div>
   );
 }
