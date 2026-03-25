@@ -13,6 +13,8 @@ export function ToastContainer() {
           className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-xs shadow-lg ${
             toast.type === "error"
               ? "bg-red-900/90 text-red-100 border border-red-700"
+              : toast.type === "warning"
+              ? "bg-amber-900/90 text-amber-100 border border-amber-700"
               : "bg-gray-800/90 text-gray-100 border border-gray-700"
           }`}
         >

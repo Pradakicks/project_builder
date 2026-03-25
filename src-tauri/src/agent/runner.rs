@@ -1,5 +1,5 @@
-use crate::agent::{build_agent_prompt, build_external_prompt, build_leader_prompt, PieceContext};
-use crate::db::Database;
+use crate::agent::{build_agent_prompt, build_external_prompt, build_leader_prompt, next_phase, PieceContext};
+use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, TokenUsage};
 use crate::models::*;
 use serde_json::json;
@@ -50,7 +50,14 @@ fn load_piece_context(
     Ok((piece, context, settings))
 }
 
+/// Result of an inner agent run (before done-event emission).
+enum AgentResult {
+    Builtin { usage: TokenUsage },
+    External { exit_code: i32 },
+}
+
 /// Run a piece's agent: dispatches to built-in LLM or external tool based on config.
+/// Emits the unified done event with phase transition fields.
 pub async fn run_piece_agent(
     piece_id: &str,
     db: &Mutex<Database>,
@@ -64,17 +71,85 @@ pub async fn run_piece_agent(
         .as_deref()
         .unwrap_or("built-in");
 
-    match engine {
+    let result = match engine {
         "built-in" | "" => {
             run_builtin_agent(&piece, &context, &settings, piece_id, db, app_handle).await
         }
         name => {
             run_external_agent(&piece, &context, &settings, name, piece_id, db, app_handle).await
         }
+    };
+
+    // Determine if the run was successful
+    let success = match &result {
+        Ok(AgentResult::Builtin { .. }) => true,
+        Ok(AgentResult::External { exit_code }) => *exit_code == 0,
+        Err(_) => false,
+    };
+
+    // Compute phase transition based on policy (only on success)
+    let mut phase_proposal: Option<String> = None;
+    let mut phase_changed: Option<String> = None;
+
+    if success {
+        if let Some(next) = next_phase(&piece.phase) {
+            let next_str = serde_json::to_string(&next)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string();
+
+            match settings.phase_control {
+                PhaseControlPolicy::FullyAutonomous => {
+                    let update = PieceUpdate {
+                        phase: Some(next),
+                        ..Default::default()
+                    };
+                    let db_lock = db.lock().map_err(|e| e.to_string())?;
+                    let _ = db_lock.update_piece(piece_id, &update);
+                    phase_changed = Some(next_str);
+                }
+                PhaseControlPolicy::GatedAutoAdvance => {
+                    phase_proposal = Some(next_str);
+                }
+                PhaseControlPolicy::Manual => {}
+            }
+        }
+    }
+
+    // Emit unified done event
+    let (usage, exit_code) = match &result {
+        Ok(AgentResult::Builtin { usage }) => (json!({"input": usage.input, "output": usage.output}), None),
+        Ok(AgentResult::External { exit_code }) => (json!({"input": 0, "output": 0}), Some(*exit_code)),
+        Err(_) => (json!({"input": 0, "output": 0}), Some(-1)),
+    };
+
+    let mut done_payload = json!({
+        "pieceId": piece_id,
+        "chunk": "",
+        "done": true,
+        "usage": usage,
+    });
+    if let Some(code) = exit_code {
+        done_payload["exitCode"] = json!(code);
+    }
+    if let Some(ref proposal) = phase_proposal {
+        done_payload["phaseProposal"] = json!(proposal);
+    }
+    if let Some(ref changed) = phase_changed {
+        done_payload["phaseChanged"] = json!(changed);
+    }
+    let _ = app_handle.emit("agent-output-chunk", done_payload);
+
+    // Convert result to TokenUsage for return
+    match result {
+        Ok(AgentResult::Builtin { usage }) => Ok(usage),
+        Ok(AgentResult::External { .. }) => Ok(TokenUsage { input: 0, output: 0 }),
+        Err(e) => Err(e),
     }
 }
 
-/// Run the built-in LLM agent (existing behavior).
+/// Run the built-in LLM agent. Streams chunks but does NOT emit the done event
+/// (that's handled by run_piece_agent).
 async fn run_builtin_agent(
     piece: &Piece,
     context: &PieceContext,
@@ -82,7 +157,7 @@ async fn run_builtin_agent(
     piece_id: &str,
     db: &Mutex<Database>,
     app_handle: &AppHandle,
-) -> Result<TokenUsage, String> {
+) -> Result<AgentResult, String> {
     let max_tokens = piece.agent_config.token_budget.unwrap_or(4096) as u32;
 
     let (provider_name, api_key, model, base_url) =
@@ -142,19 +217,6 @@ async fn run_builtin_agent(
     let usage = provider.chat_stream(&messages, &config, tx).await?;
     let _ = stream_handle.await;
 
-    let _ = app_handle.emit(
-        "agent-output-chunk",
-        json!({
-            "pieceId": piece_id,
-            "chunk": "",
-            "done": true,
-            "usage": {
-                "input": usage.input,
-                "output": usage.output,
-            }
-        }),
-    );
-
     {
         let db = db.lock().map_err(|e| e.to_string())?;
         let _ = db.insert_agent_history(
@@ -166,10 +228,11 @@ async fn run_builtin_agent(
         );
     }
 
-    Ok(usage)
+    Ok(AgentResult::Builtin { usage })
 }
 
-/// Run an external tool (Claude Code, Codex, etc.) as the execution engine.
+/// Run an external tool (Claude Code, Codex, etc.). Streams chunks but does NOT
+/// emit the done event (that's handled by run_piece_agent).
 async fn run_external_agent(
     piece: &Piece,
     context: &PieceContext,
@@ -178,7 +241,7 @@ async fn run_external_agent(
     piece_id: &str,
     db: &Mutex<Database>,
     app_handle: &AppHandle,
-) -> Result<TokenUsage, String> {
+) -> Result<AgentResult, String> {
     let working_dir = settings
         .working_directory
         .as_deref()
@@ -234,16 +297,7 @@ async fn run_external_agent(
 
     match result {
         Ok(run_result) => {
-            let _ = app_handle.emit(
-                "agent-output-chunk",
-                json!({
-                    "pieceId": piece_id,
-                    "chunk": "",
-                    "done": true,
-                    "exitCode": run_result.exit_code,
-                    "usage": { "input": 0, "output": 0 },
-                }),
-            );
+            let exit_code = run_result.exit_code;
 
             {
                 let db = db.lock().map_err(|e| e.to_string())?;
@@ -256,21 +310,9 @@ async fn run_external_agent(
                 );
             }
 
-            Ok(TokenUsage { input: 0, output: 0 })
+            Ok(AgentResult::External { exit_code })
         }
-        Err(err) => {
-            let _ = app_handle.emit(
-                "agent-output-chunk",
-                json!({
-                    "pieceId": piece_id,
-                    "chunk": "",
-                    "done": true,
-                    "exitCode": -1,
-                    "usage": { "input": 0, "output": 0 },
-                }),
-            );
-            Err(err)
-        }
+        Err(err) => Err(err),
     }
 }
 

@@ -1,7 +1,9 @@
+use crate::agent::validate_phase_transition;
 use crate::db::PieceUpdate;
 use crate::models::Piece;
 use crate::AppState;
-use tauri::State;
+use serde_json::json;
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 pub fn create_piece(
@@ -23,8 +25,25 @@ pub fn get_piece(state: State<AppState>, id: String) -> Result<Piece, String> {
 }
 
 #[tauri::command]
-pub fn update_piece(state: State<AppState>, id: String, updates: PieceUpdate) -> Result<Piece, String> {
+pub fn update_piece(
+    state: State<AppState>,
+    app_handle: AppHandle,
+    id: String,
+    updates: PieceUpdate,
+) -> Result<Piece, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Soft validation: warn if phase transition skips steps
+    if let Some(ref new_phase) = updates.phase {
+        let old_piece = db.get_piece(&id)?;
+        if let Some(warning) = validate_phase_transition(&old_piece.phase, new_phase) {
+            let _ = app_handle.emit(
+                "phase-warning",
+                json!({ "pieceId": id, "warning": warning }),
+            );
+        }
+    }
+
     db.update_piece(&id, &updates)
 }
 

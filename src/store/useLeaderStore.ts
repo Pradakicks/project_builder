@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { WorkPlan, PlanTask, TaskStatus } from "../types";
+import type { WorkPlan, PlanTask, TaskStatus, Phase } from "../types";
 import {
   generateWorkPlan,
   listWorkPlans,
@@ -9,6 +9,7 @@ import {
   onAgentOutputChunk,
 } from "../api/tauriApi";
 import { useAgentStore } from "./useAgentStore";
+import { useProjectStore } from "./useProjectStore";
 import { useToastStore } from "./useToastStore";
 
 interface LeaderStore {
@@ -107,8 +108,21 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       set({ plans });
     } catch (e) {
       useToastStore.getState().addToast(`Failed to start task: ${e}`);
-      agentStore.completeRun(task.pieceId, { input: 0, output: 0 });
+      agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
       return;
+    }
+
+    // Apply suggested phase before running (so phase-aware prompt matches leader's intent)
+    if (task.suggestedPhase && task.pieceId) {
+      const projStore = useProjectStore.getState();
+      const piece = projStore.pieces.find((p) => p.id === task.pieceId);
+      if (piece && piece.phase !== task.suggestedPhase) {
+        try {
+          await projStore.updatePiece(task.pieceId, { phase: task.suggestedPhase as Phase });
+        } catch {
+          // Non-fatal: continue with current phase
+        }
+      }
     }
 
     // Set up chunk listener before calling run
@@ -116,7 +130,12 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       if (payload.pieceId !== task.pieceId) return;
       const store = useAgentStore.getState();
       if (payload.done) {
-        store.completeRun(task.pieceId, payload.usage ?? { input: 0, output: 0 });
+        store.completeRun(task.pieceId, {
+          usage: payload.usage ?? { input: 0, output: 0 },
+          exitCode: payload.exitCode,
+          phaseProposal: payload.phaseProposal,
+          phaseChanged: payload.phaseChanged,
+        });
         unlisten();
         // Mark task as complete
         updatePlanTaskStatus(planId, task.id, "complete")
@@ -135,7 +154,7 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       await runPieceAgent(task.pieceId);
     } catch (e) {
       useToastStore.getState().addToast(`Agent error: ${e}`);
-      agentStore.completeRun(task.pieceId, { input: 0, output: 0 });
+      agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
       unlisten();
       // Revert task status
       updatePlanTaskStatus(planId, task.id, "pending")

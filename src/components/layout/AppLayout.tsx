@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { DiagramCanvas } from "../canvas/DiagramCanvas";
 import { PieceEditor } from "../editor/PieceEditor";
@@ -8,6 +8,8 @@ import { LeaderPanel } from "../leader/LeaderPanel";
 import { Toolbar } from "./Toolbar";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { useProjectStore } from "../../store/useProjectStore";
+import { useToastStore } from "../../store/useToastStore";
+import { onPhaseWarning } from "../../api/tauriApi";
 
 type LeftTab = "chat" | "plan";
 
@@ -15,8 +17,17 @@ export function AppLayout() {
   const { project, selectedPieceId, selectedConnectionId } = useProjectStore();
   const [leftOpen, setLeftOpen] = useState(false);
   const [leftTab, setLeftTab] = useState<LeftTab>("chat");
+  const addToast = useToastStore((s) => s.addToast);
 
   const togglePanel = () => setLeftOpen(!leftOpen);
+
+  // Listen for phase-skip warnings
+  useEffect(() => {
+    const unlisten = onPhaseWarning((payload) => {
+      addToast(payload.warning, "warning");
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [addToast]);
 
   // When the panel is closed, show a combined toggle button
   if (!leftOpen) {

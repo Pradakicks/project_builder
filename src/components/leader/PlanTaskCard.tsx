@@ -39,8 +39,11 @@ export function PlanTaskCard({
   const [expanded, setExpanded] = useState(false);
   const [showOutput, setShowOutput] = useState(true);
   const selectPiece = useProjectStore((s) => s.selectPiece);
+  const pieces = useProjectStore((s) => s.pieces);
   const runTask = useLeaderStore((s) => s.runTask);
   const agentRun = useAgentStore((s) => s.runs[task.pieceId]);
+  const currentPiece = pieces.find((p) => p.id === task.pieceId);
+  const phaseMatches = !task.suggestedPhase || currentPiece?.phase === task.suggestedPhase;
 
   const isRunning = agentRun?.running ?? false;
   const hasOutput = !!agentRun?.output;
@@ -116,7 +119,18 @@ export function PlanTaskCard({
       </div>
 
       {task.suggestedPhase && (
-        <span className="mt-1 inline-block rounded bg-gray-700 px-1 py-0.5 text-[9px] text-gray-400">
+        <span
+          className={`mt-1 inline-block rounded px-1 py-0.5 text-[9px] ${
+            phaseMatches
+              ? "bg-green-900/50 text-green-400"
+              : "bg-amber-900/50 text-amber-400"
+          }`}
+          title={
+            phaseMatches
+              ? `Piece is already in ${task.suggestedPhase} phase`
+              : `Running this task will set the piece to ${task.suggestedPhase}`
+          }
+        >
           Phase: {task.suggestedPhase}
         </span>
       )}

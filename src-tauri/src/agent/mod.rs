@@ -3,6 +3,7 @@ pub mod runner;
 
 use crate::db::Database;
 use crate::llm::Message;
+use crate::models::piece::Phase;
 use crate::models::Piece;
 
 /// Context about connected pieces for prompt building
@@ -58,6 +59,12 @@ pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message>
     if let Some(parent) = &context.parent {
         system_parts.push(format!("Parent piece: {} ({})", parent.name, parent.piece_type));
     }
+
+    system_parts.push(format!(
+        "Current phase: {:?}\n{}",
+        piece.phase,
+        phase_instructions(&piece.phase)
+    ));
 
     messages.push(Message {
         role: "system".to_string(),
@@ -305,6 +312,42 @@ pub fn build_external_prompt(piece: &Piece, context: &PieceContext) -> (String, 
         .collect::<Vec<_>>()
         .join("\n\n");
     (system, user)
+}
+
+/// Phase-specific instructions injected into the agent's system prompt.
+fn phase_instructions(phase: &Phase) -> String {
+    match phase {
+        Phase::Design => "You are in the DESIGN phase. Focus on writing clear specifications, defining interfaces, identifying constraints, and producing a design document. Do NOT write implementation code.".into(),
+        Phase::Review => "You are in the REVIEW phase. Review this piece's design for completeness and consistency with connected pieces. List any problems found and suggest fixes. If the design looks good, say so explicitly.".into(),
+        Phase::Approved => "This piece's design is APPROVED and ready for implementation. Break down the work into specific coding tasks, identify files to create or modify, and list acceptance criteria.".into(),
+        Phase::Implementing => "You are in the IMPLEMENTING phase. Write the actual code to implement this piece according to its design. Be thorough and complete.".into(),
+    }
+}
+
+/// Returns the next phase in the workflow, or None if no auto-advance applies.
+pub fn next_phase(current: &Phase) -> Option<Phase> {
+    match current {
+        Phase::Design => Some(Phase::Review),
+        Phase::Review => Some(Phase::Approved),
+        Phase::Approved => Some(Phase::Implementing),
+        Phase::Implementing => None,
+    }
+}
+
+/// Soft validation: returns a warning if the transition skips phases.
+pub fn validate_phase_transition(from: &Phase, to: &Phase) -> Option<String> {
+    match (from, to) {
+        (Phase::Design, Phase::Approved) => {
+            Some("Skipping Review — design hasn't been checked.".into())
+        }
+        (Phase::Design, Phase::Implementing) => {
+            Some("Skipping Review and Approval — design hasn't been reviewed.".into())
+        }
+        (Phase::Review, Phase::Implementing) => {
+            Some("Skipping Approval — not formally approved yet.".into())
+        }
+        _ => None,
+    }
 }
 
 /// Replace @PieceName references with piece details

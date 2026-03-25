@@ -542,7 +542,16 @@ function AgentTab({
       if (payload.pieceId !== piece.id) return;
       const store = useAgentStore.getState();
       if (payload.done) {
-        store.completeRun(piece.id, payload.usage ?? { input: 0, output: 0 }, payload.exitCode);
+        store.completeRun(piece.id, {
+          usage: payload.usage ?? { input: 0, output: 0 },
+          exitCode: payload.exitCode,
+          phaseProposal: payload.phaseProposal,
+          phaseChanged: payload.phaseChanged,
+        });
+        // If phase was auto-changed (autonomous mode), refresh the piece
+        if (payload.phaseChanged) {
+          useProjectStore.getState().loadProject(piece.projectId);
+        }
         unlisten();
       } else {
         store.appendChunk(piece.id, payload.chunk);
@@ -553,7 +562,7 @@ function AgentTab({
       await runPieceAgent(piece.id);
     } catch (e) {
       useToastStore.getState().addToast(`Agent error: ${e}`);
-      useAgentStore.getState().completeRun(piece.id, { input: 0, output: 0 });
+      useAgentStore.getState().completeRun(piece.id, { usage: { input: 0, output: 0 } });
       unlisten();
     }
   };
@@ -565,6 +574,17 @@ function AgentTab({
   const outputRef = useCallback((el: HTMLPreElement | null) => {
     if (el) el.scrollTop = el.scrollHeight;
   }, [run?.output]);
+
+  const handleAdvancePhase = () => {
+    if (run?.phaseProposal) {
+      onUpdate(piece.id, { phase: run.phaseProposal });
+      useAgentStore.getState().clearPhaseProposal(piece.id);
+    }
+  };
+
+  const handleDismissProposal = () => {
+    useAgentStore.getState().clearPhaseProposal(piece.id);
+  };
 
   return (
     <div className="flex flex-col gap-3">
@@ -738,6 +758,34 @@ function AgentTab({
             <span>Tokens: {run.usage.input} in / {run.usage.output} out</span>
           )}
         </div>
+      )}
+
+      {/* Phase transition banner (gated auto-advance) */}
+      {run?.phaseProposal && !run.running && (
+        <div className="flex items-center gap-2 rounded border border-blue-800 bg-blue-900/30 px-3 py-2 text-xs">
+          <span className="flex-1 text-blue-300">
+            Agent finished. Advance to <strong className="capitalize">{run.phaseProposal}</strong>?
+          </span>
+          <button
+            onClick={handleAdvancePhase}
+            className="rounded bg-blue-600 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-blue-500"
+          >
+            Advance
+          </button>
+          <button
+            onClick={handleDismissProposal}
+            className="text-xs text-gray-400 hover:text-gray-200"
+          >
+            Stay
+          </button>
+        </div>
+      )}
+
+      {/* Phase auto-advanced confirmation (fully autonomous) */}
+      {run?.phaseChanged && !run.running && (
+        <p className="text-[10px] text-green-400">
+          Phase automatically advanced to <span className="capitalize">{run.phaseChanged}</span>
+        </p>
       )}
     </div>
   );

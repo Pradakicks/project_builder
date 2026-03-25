@@ -197,12 +197,27 @@ export interface AgentOutputChunk {
   done: boolean;
   exitCode?: number;
   usage?: { input: number; output: number };
+  phaseProposal?: string;
+  phaseChanged?: string;
 }
 
 export function onAgentOutputChunk(
   callback: (payload: AgentOutputChunk) => void,
 ): Promise<UnlistenFn> {
   return listen<AgentOutputChunk>("agent-output-chunk", (event) => {
+    callback(event.payload);
+  });
+}
+
+export interface PhaseWarning {
+  pieceId: string;
+  warning: string;
+}
+
+export function onPhaseWarning(
+  callback: (payload: PhaseWarning) => void,
+): Promise<UnlistenFn> {
+  return listen<PhaseWarning>("phase-warning", (event) => {
     callback(event.payload);
   });
 }

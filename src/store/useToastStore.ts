@@ -3,12 +3,12 @@ import { create } from "zustand";
 export interface Toast {
   id: string;
   message: string;
-  type: "error" | "info";
+  type: "error" | "info" | "warning";
 }
 
 interface ToastStore {
   toasts: Toast[];
-  addToast: (message: string, type?: "error" | "info") => void;
+  addToast: (message: string, type?: "error" | "info" | "warning") => void;
   removeToast: (id: string) => void;
 }
 
