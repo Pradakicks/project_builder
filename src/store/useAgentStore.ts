@@ -10,6 +10,7 @@ export interface AgentRunState {
   gitBranch?: string;
   gitCommitSha?: string;
   gitDiffStat?: string;
+  iterationCount?: number;
 }
 
 interface CompleteRunOpts {
@@ -25,6 +26,7 @@ interface CompleteRunOpts {
 interface AgentStore {
   runs: Record<string, AgentRunState>;
   startRun: (pieceId: string) => void;
+  startFeedbackRun: (pieceId: string) => void;
   appendChunk: (pieceId: string, chunk: string) => void;
   completeRun: (pieceId: string, opts: CompleteRunOpts) => void;
   clearPhaseProposal: (pieceId: string) => void;
@@ -37,6 +39,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       runs: {
         ...get().runs,
         [pieceId]: { running: true, output: "", usage: null },
+      },
+    });
+  },
+  startFeedbackRun: (pieceId) => {
+    const existing = get().runs[pieceId];
+    const prevOutput = existing?.output ?? "";
+    const iteration = (existing?.iterationCount ?? 1) + 1;
+    set({
+      runs: {
+        ...get().runs,
+        [pieceId]: {
+          running: true,
+          output: prevOutput + "\n\n--- Iteration " + iteration + " ---\n\n",
+          usage: null,
+          iterationCount: iteration,
+        },
       },
     });
   },

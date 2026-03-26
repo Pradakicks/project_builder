@@ -7,6 +7,7 @@ import type {
   PieceUpdate,
   ConnectionUpdate,
   Artifact,
+  CtoDecision,
   WorkPlan,
   PlanStatus,
   TaskStatus,
@@ -157,8 +158,8 @@ export async function validateWorkingDirectory(
 
 // ── Agent ─────────────────────────────────────────────────
 
-export async function runPieceAgent(pieceId: string): Promise<void> {
-  return invoke("run_piece_agent", { pieceId });
+export async function runPieceAgent(pieceId: string, feedback?: string): Promise<void> {
+  return invoke("run_piece_agent", { pieceId, feedback: feedback ?? null });
 }
 
 export interface AgentHistoryEntry {
@@ -245,6 +246,22 @@ export async function getGitStatus(
 
 export async function listArtifacts(pieceId: string): Promise<Artifact[]> {
   return invoke("list_artifacts", { pieceId });
+}
+
+// ── CTO Decisions ───────────────────────────────────────
+
+export async function logCtoDecision(
+  projectId: string,
+  summary: string,
+  actionsJson: string,
+): Promise<CtoDecision> {
+  return invoke("log_cto_decision", { projectId, summary: summary, actionsJson });
+}
+
+export async function listCtoDecisions(
+  projectId: string,
+): Promise<CtoDecision[]> {
+  return invoke("list_cto_decisions", { projectId });
 }
 
 export interface CtoChatChunk {

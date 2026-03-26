@@ -1,7 +1,7 @@
 use crate::agent;
 use crate::db::AgentHistoryEntry;
 use crate::llm::{self, LlmConfig, Message};
-use crate::models::Artifact;
+use crate::models::{Artifact, CtoDecision};
 use crate::AppState;
 use serde::Serialize;
 use serde_json::json;
@@ -13,6 +13,7 @@ pub async fn run_piece_agent(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     piece_id: String,
+    feedback: Option<String>,
 ) -> Result<(), String> {
     // Piece-level run lock — prevent double-runs on the same piece
     {
@@ -24,7 +25,7 @@ pub async fn run_piece_agent(
         }
     }
 
-    let result = agent::runner::run_piece_agent(&piece_id, &state.db, &app_handle).await;
+    let result = agent::runner::run_piece_agent(&piece_id, feedback.as_deref(), &state.db, &app_handle).await;
 
     // Always release the lock
     {
@@ -190,4 +191,24 @@ pub fn list_artifacts(
 ) -> Result<Vec<Artifact>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_artifacts(&piece_id)
+}
+
+#[tauri::command]
+pub fn log_cto_decision(
+    state: State<'_, AppState>,
+    project_id: String,
+    summary: String,
+    actions_json: String,
+) -> Result<CtoDecision, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.insert_cto_decision(&project_id, &summary, &actions_json)
+}
+
+#[tauri::command]
+pub fn list_cto_decisions(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<CtoDecision>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_cto_decisions(&project_id)
 }

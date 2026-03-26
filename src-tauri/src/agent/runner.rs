@@ -76,8 +76,10 @@ enum AgentResult {
 
 /// Run a piece's agent: dispatches to built-in LLM or external tool based on config.
 /// Emits the unified done event with phase transition fields.
+/// Optional `feedback` enables iterative mode: previous output + feedback are injected as context.
 pub async fn run_piece_agent(
     piece_id: &str,
+    feedback: Option<&str>,
     db: &Mutex<Database>,
     app_handle: &AppHandle,
 ) -> Result<TokenUsage, String> {
@@ -91,10 +93,10 @@ pub async fn run_piece_agent(
 
     let result = match engine {
         "built-in" | "" => {
-            run_builtin_agent(&piece, &context, &settings, piece_id, db, app_handle).await
+            run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle).await
         }
         name => {
-            run_external_agent(&piece, &context, &settings, name, piece_id, db, app_handle).await
+            run_external_agent(&piece, &context, &settings, name, piece_id, feedback, db, app_handle).await
         }
     };
 
@@ -230,6 +232,7 @@ async fn run_builtin_agent(
     context: &PieceContext,
     settings: &ProjectSettings,
     piece_id: &str,
+    feedback: Option<&str>,
     db: &Mutex<Database>,
     app_handle: &AppHandle,
 ) -> Result<AgentResult, String> {
@@ -263,7 +266,28 @@ async fn run_builtin_agent(
         ));
     }
 
-    let messages = build_agent_prompt(piece, context);
+    let mut messages = build_agent_prompt(piece, context);
+
+    // Iterative mode: inject previous output + feedback as conversation context
+    if let Some(fb) = feedback {
+        let prev_output = db
+            .lock()
+            .ok()
+            .and_then(|db| db.list_agent_history(piece_id).ok())
+            .and_then(|h| h.into_iter().next().map(|e| e.output_text))
+            .unwrap_or_default();
+        if !prev_output.is_empty() {
+            messages.push(Message {
+                role: "assistant".into(),
+                content: prev_output,
+            });
+        }
+        messages.push(Message {
+            role: "user".into(),
+            content: fb.to_string(),
+        });
+    }
+
     let provider = llm::create_provider(&provider_name);
     let config = LlmConfig {
         api_key,
@@ -331,6 +355,7 @@ async fn run_external_agent(
     settings: &ProjectSettings,
     engine_name: &str,
     piece_id: &str,
+    feedback: Option<&str>,
     db: &Mutex<Database>,
     app_handle: &AppHandle,
 ) -> Result<AgentResult, String> {
@@ -344,7 +369,23 @@ async fn run_external_agent(
                 .to_string()
         })?;
 
-    let (system_prompt, user_prompt) = build_external_prompt(piece, context);
+    let (system_prompt, user_prompt_base) = build_external_prompt(piece, context);
+    let mut user_prompt = user_prompt_base;
+
+    // Iterative mode: append previous output + feedback to the prompt
+    if let Some(fb) = feedback {
+        let prev_output = db
+            .lock()
+            .ok()
+            .and_then(|db| db.list_agent_history(piece_id).ok())
+            .and_then(|h| h.into_iter().next().map(|e| e.output_text))
+            .unwrap_or_default();
+        if !prev_output.is_empty() {
+            user_prompt.push_str(&format!("\n\n--- Previous output ---\n{prev_output}"));
+        }
+        user_prompt.push_str(&format!("\n\n--- Your feedback ---\n{fb}"));
+    }
+
     let timeout_secs = piece.agent_config.timeout.unwrap_or(300);
 
     // For Codex, pass the OpenAI API key from our keyring

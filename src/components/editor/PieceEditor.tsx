@@ -532,6 +532,7 @@ function AgentTab({
   const workingDir = useProjectStore((s) => s.project?.settings.workingDirectory);
 
   const run = useAgentStore((s) => s.runs[piece.id]);
+  const [feedbackText, setFeedbackText] = useState("");
 
   const handleRun = async () => {
     const { runPieceAgent, onAgentOutputChunk } = await import("../../api/tauriApi");
@@ -563,6 +564,44 @@ function AgentTab({
 
     try {
       await runPieceAgent(piece.id);
+    } catch (e) {
+      useToastStore.getState().addToast(`Agent error: ${e}`);
+      useAgentStore.getState().completeRun(piece.id, { usage: { input: 0, output: 0 } });
+      unlisten();
+    }
+  };
+
+  const handleFeedbackRun = async () => {
+    const fb = feedbackText.trim();
+    if (!fb) return;
+    setFeedbackText("");
+    const { runPieceAgent, onAgentOutputChunk } = await import("../../api/tauriApi");
+    useAgentStore.getState().startFeedbackRun(piece.id);
+
+    const unlisten = await onAgentOutputChunk((payload) => {
+      if (payload.pieceId !== piece.id) return;
+      const store = useAgentStore.getState();
+      if (payload.done) {
+        store.completeRun(piece.id, {
+          usage: payload.usage ?? { input: 0, output: 0 },
+          exitCode: payload.exitCode,
+          phaseProposal: payload.phaseProposal,
+          phaseChanged: payload.phaseChanged,
+          gitBranch: payload.gitBranch,
+          gitCommitSha: payload.gitCommitSha,
+          gitDiffStat: payload.gitDiffStat,
+        });
+        if (payload.phaseChanged) {
+          useProjectStore.getState().loadProject(piece.projectId);
+        }
+        unlisten();
+      } else {
+        store.appendChunk(piece.id, payload.chunk);
+      }
+    });
+
+    try {
+      await runPieceAgent(piece.id, fb);
     } catch (e) {
       useToastStore.getState().addToast(`Agent error: ${e}`);
       useAgentStore.getState().completeRun(piece.id, { usage: { input: 0, output: 0 } });
@@ -808,6 +847,26 @@ function AgentTab({
         <p className="text-[10px] text-green-400">
           Phase automatically advanced to <span className="capitalize">{run.phaseChanged}</span>
         </p>
+      )}
+
+      {/* Iterative feedback input */}
+      {run?.output && !run.running && (
+        <div className="flex gap-1.5">
+          <textarea
+            value={feedbackText}
+            onChange={(e) => setFeedbackText(e.target.value)}
+            placeholder="Give feedback for another iteration..."
+            rows={2}
+            className="flex-1 rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none resize-none"
+          />
+          <button
+            onClick={handleFeedbackRun}
+            disabled={!feedbackText.trim()}
+            className="shrink-0 self-end rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Re-run
+          </button>
+        </div>
       )}
     </div>
   );
