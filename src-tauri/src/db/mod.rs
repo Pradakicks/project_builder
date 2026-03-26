@@ -2,6 +2,7 @@ mod queries;
 mod agent_queries;
 mod artifact_queries;
 mod plan_queries;
+mod cto_queries;
 
 pub use queries::*;
 pub use agent_queries::*;
@@ -149,6 +150,16 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_agents_piece ON agents(piece_id);
             CREATE INDEX IF NOT EXISTS idx_artifacts_piece ON artifacts(piece_id);
             CREATE INDEX IF NOT EXISTS idx_work_plans_project ON work_plans(project_id);
+
+            CREATE TABLE IF NOT EXISTS cto_decisions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                actions_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_cto_decisions_project ON cto_decisions(project_id);
             ",
             )
             .map_err(|e| e.to_string())?;

@@ -101,7 +101,7 @@ pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message>
 /// Build a CTO system prompt from full project context
 pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
     let mut system_parts = vec![
-        "You are the CTO Agent for this project. You have full visibility into the project's architecture and can advise on design decisions, implementation strategy, and technical tradeoffs.".to_string(),
+        "You are the CTO of this project. You make decisions — you don't ask permission or suggest options. When something needs to change, you change it. When the architecture needs a new component, you create it. When responsibilities need updating, you update them.\n\nBe direct and assertive. State what you're doing and why, then do it. Your changes are applied automatically.".to_string(),
     ];
 
     if let Ok(project) = db.get_project(project_id) {
@@ -149,10 +149,35 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
         }
     }
 
-    system_parts.push(r#"You can make changes to the project by including action blocks in your response.
+    // Inject current work plan context if one exists
+    if let Ok(Some(plan)) = db.get_latest_work_plan(project_id) {
+        let task_desc: Vec<String> = plan
+            .tasks
+            .iter()
+            .map(|t| {
+                format!(
+                    "  - [taskId={}] \"{}\" for {} (priority: {}, status: {:?}, phase: {})",
+                    t.id, t.title, t.piece_name,
+                    serde_json::to_string(&t.priority).unwrap_or_default().trim_matches('"').to_string(),
+                    t.status, t.suggested_phase
+                )
+            })
+            .collect();
+        let mut plan_section = format!(
+            "Current Work Plan [id={}] (v{}, status: {:?}):\n  Summary: {}",
+            plan.id, plan.version, plan.status, plan.summary
+        );
+        if !task_desc.is_empty() {
+            plan_section.push_str(&format!("\n  Tasks:\n{}", task_desc.join("\n")));
+        }
+        plan_section.push_str("\n\nDo not approve/reject plans that are still generating.");
+        system_parts.push(plan_section);
+    }
+
+    system_parts.push(r#"Make changes by including action blocks in your response. Your changes are applied immediately — no approval step.
 Wrap each action in a fenced code block with the language tag "action".
 
-Available actions:
+Available actions (diagram):
 - {"action": "updatePiece", "pieceId": "<id>", "updates": {...}}
   Fields: name, pieceType, phase (design|review|approved|implementing), responsibilities, notes
 - {"action": "createPiece", "name": "...", "pieceType": "...", "responsibilities": "..."}
@@ -160,10 +185,18 @@ Available actions:
 - {"action": "updateConnection", "connectionId": "<id>", "updates": {...}}
   Fields: label, notes
 
+Available actions (work plan):
+- {"action": "generatePlan", "guidance": "optional guidance text"}
+  Generate a new work plan from the current diagram. Supersedes any existing draft.
+- {"action": "approvePlan", "planId": "<id>"}
+- {"action": "rejectPlan", "planId": "<id>"}
+- {"action": "runAllTasks", "planId": "<id>"}
+  Execute all pending tasks sequentially. Only works on approved plans.
+
 Rules:
-- Explain what you're doing BEFORE each action block
-- Use piece/connection IDs from the list above
-- You may include zero or more action blocks per response"#.to_string());
+- Briefly explain what you're doing, then include the action block
+- Use piece/connection/plan/task IDs from the lists above
+- Take action whenever the conversation calls for it — don't just describe what could be done"#.to_string());
 
     vec![Message {
         role: "system".to_string(),

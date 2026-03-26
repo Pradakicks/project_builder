@@ -144,7 +144,7 @@ export function AppLayout() {
 
           {/* Panel content — render both but show/hide so state persists */}
           <div className={leftTab === "chat" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
-            <ChatPanel open={true} onToggle={togglePanel} embedded />
+            <ChatPanel open={true} onToggle={togglePanel} embedded onSwitchTab={(tab) => setLeftTab(tab as "chat" | "plan")} />
           </div>
           <div className={leftTab === "plan" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
             <LeaderPanel open={true} onToggle={togglePanel} embedded />

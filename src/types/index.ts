@@ -136,6 +136,16 @@ export interface Artifact {
   updatedAt: string;
 }
 
+// ── CTO Decisions ───────────────────────────────────────
+
+export interface CtoDecision {
+  id: string;
+  projectId: string;
+  summary: string;
+  actionsJson: string;
+  createdAt: string;
+}
+
 // ── Work Plans ───────────────────────────────────────────
 
 export type PlanStatus = "generating" | "draft" | "approved" | "rejected" | "superseded";

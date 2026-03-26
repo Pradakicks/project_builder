@@ -1,4 +1,5 @@
 import { useProjectStore } from "../store/useProjectStore";
+import { useLeaderStore } from "../store/useLeaderStore";
 
 export interface CtoAction {
   action: string;
@@ -42,6 +43,16 @@ export function describeAction(action: CtoAction): string {
       return `Connect pieces`;
     case "updateConnection":
       return `Update connection`;
+    case "generatePlan": {
+      const guidance = action.guidance as string | undefined;
+      return guidance ? `Generate work plan: "${guidance.slice(0, 60)}"` : "Generate work plan";
+    }
+    case "approvePlan":
+      return "Approve plan";
+    case "rejectPlan":
+      return "Reject plan";
+    case "runAllTasks":
+      return "Run all plan tasks";
     default:
       return `Unknown action: ${action.action}`;
   }
@@ -50,11 +61,12 @@ export function describeAction(action: CtoAction): string {
 /** Execute parsed CTO actions against the project store */
 export async function executeActions(
   actions: CtoAction[],
-  _projectId: string,
-): Promise<{ executed: number; errors: string[] }> {
+  projectId: string,
+): Promise<{ executed: number; errors: string[]; switchToTab?: string }> {
   const store = useProjectStore.getState();
   let executed = 0;
   const errors: string[] = [];
+  let switchToTab: string | undefined;
 
   for (const action of actions) {
     try {
@@ -98,6 +110,33 @@ export async function executeActions(
           executed++;
           break;
         }
+        case "generatePlan": {
+          useLeaderStore.getState().generatePlan(
+            projectId,
+            (action.guidance as string) || "",
+          );
+          switchToTab = "plan";
+          executed++;
+          break;
+        }
+        case "approvePlan": {
+          await useLeaderStore.getState().approvePlan(action.planId as string);
+          switchToTab = "plan";
+          executed++;
+          break;
+        }
+        case "rejectPlan": {
+          await useLeaderStore.getState().rejectPlan(action.planId as string);
+          switchToTab = "plan";
+          executed++;
+          break;
+        }
+        case "runAllTasks": {
+          useLeaderStore.getState().runAllTasks(action.planId as string);
+          switchToTab = "plan";
+          executed++;
+          break;
+        }
         default:
           errors.push(`Unknown action: ${action.action}`);
       }
@@ -106,5 +145,5 @@ export async function executeActions(
     }
   }
 
-  return { executed, errors };
+  return { executed, errors, switchToTab };
 }
