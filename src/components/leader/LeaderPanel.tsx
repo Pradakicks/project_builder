@@ -28,11 +28,15 @@ export function LeaderPanel({
     currentPlan,
     generating,
     streamOutput,
+    runningAll,
+    runAllProgress,
     generatePlan,
     loadPlans,
     approvePlan,
     rejectPlan,
     updateTaskStatus,
+    runAllTasks,
+    cancelRunAll,
     appendChunk,
   } = useLeaderStore();
 
@@ -177,6 +181,32 @@ export function LeaderPanel({
               </span>
             </div>
 
+            {/* Run All button for approved plans */}
+            {currentPlan.status === "approved" && currentPlan.tasks.length > 0 && (
+              <div className="flex items-center gap-2">
+                {!runningAll ? (
+                  <button
+                    onClick={() => runAllTasks(currentPlan.id)}
+                    className="rounded bg-purple-600 px-3 py-1 text-xs font-medium text-white hover:bg-purple-500 transition-colors"
+                  >
+                    Run All ▶
+                  </button>
+                ) : (
+                  <>
+                    <span className="text-xs text-purple-300 animate-pulse">
+                      Running... ({runAllProgress})
+                    </span>
+                    <button
+                      onClick={cancelRunAll}
+                      className="rounded bg-red-700 px-2 py-0.5 text-xs text-white hover:bg-red-600 transition-colors"
+                    >
+                      Stop
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
             {/* Summary */}
             {currentPlan.summary && (
               <Markdown content={currentPlan.summary} />
@@ -197,6 +227,7 @@ export function LeaderPanel({
                       approved={currentPlan.status === "approved"}
                       planId={currentPlan.id}
                       onStatusChange={handleTaskStatusChange}
+                      runningAll={runningAll}
                     />
                   ))}
               </div>

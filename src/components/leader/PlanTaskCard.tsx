@@ -30,11 +30,13 @@ export function PlanTaskCard({
   approved,
   planId,
   onStatusChange,
+  runningAll,
 }: {
   task: PlanTask;
   approved: boolean;
   planId: string;
   onStatusChange: (taskId: string, status: TaskStatus) => void;
+  runningAll?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [showOutput, setShowOutput] = useState(true);
@@ -47,7 +49,7 @@ export function PlanTaskCard({
 
   const isRunning = agentRun?.running ?? false;
   const hasOutput = !!agentRun?.output;
-  const canRun = approved && !!task.pieceId && !isRunning && task.status !== "complete";
+  const canRun = approved && !!task.pieceId && !isRunning && task.status !== "complete" && !runningAll;
 
   const handleRun = () => {
     runTask(planId, task);

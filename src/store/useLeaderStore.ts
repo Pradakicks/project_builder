@@ -12,11 +12,15 @@ import { useAgentStore } from "./useAgentStore";
 import { useProjectStore } from "./useProjectStore";
 import { useToastStore } from "./useToastStore";
 
+let runAllCancelled = false;
+
 interface LeaderStore {
   currentPlan: WorkPlan | null;
   plans: WorkPlan[];
   generating: boolean;
   streamOutput: string;
+  runningAll: boolean;
+  runAllProgress: string;
 
   generatePlan: (projectId: string, guidance: string) => Promise<void>;
   loadPlans: (projectId: string) => Promise<void>;
@@ -27,7 +31,9 @@ interface LeaderStore {
     taskId: string,
     status: TaskStatus,
   ) => Promise<void>;
-  runTask: (planId: string, task: PlanTask) => Promise<void>;
+  runTask: (planId: string, task: PlanTask) => Promise<boolean>;
+  runAllTasks: (planId: string) => Promise<void>;
+  cancelRunAll: () => void;
   appendChunk: (chunk: string) => void;
   completeGeneration: (plan: WorkPlan) => void;
   reset: () => void;
@@ -38,6 +44,8 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
   plans: [],
   generating: false,
   streamOutput: "",
+  runningAll: false,
+  runAllProgress: "",
 
   generatePlan: async (projectId, guidance) => {
     set({ generating: true, streamOutput: "", currentPlan: null });
@@ -66,7 +74,6 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
     try {
       const plan = await updatePlanStatus(planId, "approved");
       set({ currentPlan: plan });
-      // Update in plans list
       const plans = get().plans.map((p) => (p.id === planId ? plan : p));
       set({ plans });
     } catch (e) {
@@ -96,78 +103,121 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
     }
   },
 
-  runTask: async (planId, task) => {
-    const agentStore = useAgentStore.getState();
-    agentStore.startRun(task.pieceId);
+  runTask: async (planId, task): Promise<boolean> => {
+    return new Promise(async (resolve) => {
+      const agentStore = useAgentStore.getState();
+      agentStore.startRun(task.pieceId);
 
-    // Update task status to in-progress
-    try {
-      const plan = await updatePlanTaskStatus(planId, task.id, "in-progress");
-      set({ currentPlan: plan });
-      const plans = get().plans.map((p) => (p.id === planId ? plan : p));
-      set({ plans });
-    } catch (e) {
-      useToastStore.getState().addToast(`Failed to start task: ${e}`);
-      agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
-      return;
-    }
+      // Update task status to in-progress
+      try {
+        const plan = await updatePlanTaskStatus(planId, task.id, "in-progress");
+        set({ currentPlan: plan });
+        const plans = get().plans.map((p) => (p.id === planId ? plan : p));
+        set({ plans });
+      } catch (e) {
+        useToastStore.getState().addToast(`Failed to start task: ${e}`);
+        agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
+        resolve(false);
+        return;
+      }
 
-    // Apply suggested phase before running (so phase-aware prompt matches leader's intent)
-    if (task.suggestedPhase && task.pieceId) {
-      const projStore = useProjectStore.getState();
-      const piece = projStore.pieces.find((p) => p.id === task.pieceId);
-      if (piece && piece.phase !== task.suggestedPhase) {
-        try {
-          await projStore.updatePiece(task.pieceId, { phase: task.suggestedPhase as Phase });
-        } catch {
-          // Non-fatal: continue with current phase
+      // Apply suggested phase before running (so phase-aware prompt matches leader's intent)
+      if (task.suggestedPhase && task.pieceId) {
+        const projStore = useProjectStore.getState();
+        const piece = projStore.pieces.find((p) => p.id === task.pieceId);
+        if (piece && piece.phase !== task.suggestedPhase) {
+          try {
+            await projStore.updatePiece(task.pieceId, { phase: task.suggestedPhase as Phase });
+          } catch {
+            // Non-fatal: continue with current phase
+          }
         }
       }
-    }
 
-    // Set up chunk listener before calling run
-    const unlisten = await onAgentOutputChunk((payload) => {
-      if (payload.pieceId !== task.pieceId) return;
-      const store = useAgentStore.getState();
-      if (payload.done) {
-        store.completeRun(task.pieceId, {
-          usage: payload.usage ?? { input: 0, output: 0 },
-          exitCode: payload.exitCode,
-          phaseProposal: payload.phaseProposal,
-          phaseChanged: payload.phaseChanged,
-          gitBranch: payload.gitBranch,
-          gitCommitSha: payload.gitCommitSha,
-          gitDiffStat: payload.gitDiffStat,
-        });
+      // Set up chunk listener before calling run
+      const unlisten = await onAgentOutputChunk((payload) => {
+        if (payload.pieceId !== task.pieceId) return;
+        const store = useAgentStore.getState();
+        if (payload.done) {
+          store.completeRun(task.pieceId, {
+            usage: payload.usage ?? { input: 0, output: 0 },
+            exitCode: payload.exitCode,
+            phaseProposal: payload.phaseProposal,
+            phaseChanged: payload.phaseChanged,
+            gitBranch: payload.gitBranch,
+            gitCommitSha: payload.gitCommitSha,
+            gitDiffStat: payload.gitDiffStat,
+          });
+          unlisten();
+          // Mark task as complete
+          updatePlanTaskStatus(planId, task.id, "complete")
+            .then((plan) => {
+              set({ currentPlan: plan });
+              const plans = get().plans.map((p) => (p.id === planId ? plan : p));
+              set({ plans });
+            })
+            .catch(() => {});
+          resolve(true);
+        } else {
+          store.appendChunk(task.pieceId, payload.chunk);
+        }
+      });
+
+      try {
+        await runPieceAgent(task.pieceId);
+      } catch (e) {
+        useToastStore.getState().addToast(`Agent error: ${e}`);
+        agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
         unlisten();
-        // Mark task as complete
-        updatePlanTaskStatus(planId, task.id, "complete")
+        // Revert task status
+        updatePlanTaskStatus(planId, task.id, "pending")
           .then((plan) => {
             set({ currentPlan: plan });
             const plans = get().plans.map((p) => (p.id === planId ? plan : p));
             set({ plans });
           })
           .catch(() => {});
-      } else {
-        store.appendChunk(task.pieceId, payload.chunk);
+        resolve(false);
       }
     });
+  },
 
-    try {
-      await runPieceAgent(task.pieceId);
-    } catch (e) {
-      useToastStore.getState().addToast(`Agent error: ${e}`);
-      agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
-      unlisten();
-      // Revert task status
-      updatePlanTaskStatus(planId, task.id, "pending")
-        .then((plan) => {
-          set({ currentPlan: plan });
-          const plans = get().plans.map((p) => (p.id === planId ? plan : p));
-          set({ plans });
-        })
-        .catch(() => {});
+  runAllTasks: async (planId) => {
+    const plan = get().currentPlan;
+    if (!plan) return;
+    runAllCancelled = false;
+
+    const tasks = [...plan.tasks]
+      .filter((t) => t.status === "pending" && t.pieceId)
+      .sort((a, b) => a.order - b.order);
+
+    if (tasks.length === 0) {
+      useToastStore.getState().addToast("No pending tasks to run");
+      return;
     }
+
+    set({ runningAll: true, runAllProgress: `0/${tasks.length}` });
+
+    let completed = 0;
+    for (const task of tasks) {
+      if (runAllCancelled) {
+        useToastStore.getState().addToast("Run All cancelled");
+        break;
+      }
+      set({ runAllProgress: `${completed + 1}/${tasks.length}` });
+      const success = await get().runTask(planId, task);
+      if (!success) {
+        useToastStore.getState().addToast(`Run All stopped: task "${task.title}" failed`);
+        break;
+      }
+      completed++;
+    }
+
+    set({ runningAll: false, runAllProgress: "" });
+  },
+
+  cancelRunAll: () => {
+    runAllCancelled = true;
   },
 
   appendChunk: (chunk) => {
@@ -184,6 +234,8 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       plans: [],
       generating: false,
       streamOutput: "",
+      runningAll: false,
+      runAllProgress: "",
     });
   },
 }));
