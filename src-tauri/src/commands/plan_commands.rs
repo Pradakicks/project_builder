@@ -2,7 +2,9 @@ use crate::agent;
 use crate::models::{PlanStatus, TaskStatus, WorkPlan, WorkPlanUpdate};
 use crate::AppState;
 use tauri::{AppHandle, State};
+use tracing::{info, debug};
 
+#[tracing::instrument(skip(state, app_handle), fields(project_id = %project_id))]
 #[tauri::command]
 pub async fn generate_work_plan(
     state: State<'_, AppState>,
@@ -10,10 +12,12 @@ pub async fn generate_work_plan(
     project_id: String,
     user_guidance: String,
 ) -> Result<WorkPlan, String> {
+    info!(project_id = %project_id, "IPC: generate_work_plan");
     let db = &state.db;
     agent::runner::run_leader_agent(&project_id, &user_guidance, db, &app_handle).await
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn get_work_plan(
     state: State<'_, AppState>,
@@ -23,6 +27,7 @@ pub fn get_work_plan(
     db.get_work_plan(&plan_id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn list_work_plans(
     state: State<'_, AppState>,
@@ -32,12 +37,14 @@ pub fn list_work_plans(
     db.list_work_plans(&project_id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn update_plan_status(
     state: State<'_, AppState>,
     plan_id: String,
     status: PlanStatus,
 ) -> Result<WorkPlan, String> {
+    info!(plan_id = %plan_id, status = ?status, "IPC: update_plan_status");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.update_work_plan(
         &plan_id,
@@ -48,6 +55,7 @@ pub fn update_plan_status(
     )
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn update_plan_task_status(
     state: State<'_, AppState>,
@@ -55,6 +63,7 @@ pub fn update_plan_task_status(
     task_id: String,
     status: TaskStatus,
 ) -> Result<WorkPlan, String> {
+    debug!(plan_id = %plan_id, task_id = %task_id, status = ?status, "IPC: update_plan_task_status");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let plan = db.get_work_plan(&plan_id)?;
 

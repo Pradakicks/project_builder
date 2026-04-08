@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
 import * as api from "../../api/tauriApi";
-import type { ProjectSettings, LlmConfig, PhaseControlPolicy } from "../../types";
+import type { ProjectSettings, LlmConfig, PhaseControlPolicy, ConflictResolutionPolicy } from "../../types";
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
 import { useDialogStore } from "../../store/useDialogStore";
+import { devLog } from "../../utils/devLog";
 
 const PROVIDERS = ["claude", "openai"] as const;
 
@@ -35,6 +36,8 @@ export function SettingsPage() {
   const [tokenBudget, setTokenBudget] = useState(100_000);
   const [phaseControl, setPhaseControl] = useState<PhaseControlPolicy>("manual");
   const [llmConfigs, setLlmConfigs] = useState<LlmConfig[]>([]);
+  const [defaultExecutionEngine, setDefaultExecutionEngine] = useState<string>("built-in");
+  const [conflictResolution, setConflictResolution] = useState<ConflictResolutionPolicy>("ai-assisted");
 
   // Load API keys
   useEffect(() => {
@@ -67,6 +70,8 @@ export function SettingsPage() {
       setTokenBudget(project.settings.defaultTokenBudget);
       setPhaseControl(project.settings.phaseControl);
       setLlmConfigs(project.settings.llmConfigs);
+      setDefaultExecutionEngine(project.settings.defaultExecutionEngine ?? "built-in");
+      setConflictResolution(project.settings.conflictResolution ?? "ai-assisted");
       setWorkingDirectory(project.settings.workingDirectory ?? "");
       // Validate existing working directory
       if (project.settings.workingDirectory) {
@@ -89,8 +94,10 @@ export function SettingsPage() {
         [provider]: { value: value.trim(), masked, loaded: true },
       }));
       setKeyInputs((prev) => ({ ...prev, [provider]: "" }));
+      devLog("info", "Settings", `API key saved for ${provider}`);
       addToast(`${provider} key saved`, "info");
     } catch (e) {
+      devLog("error", "Settings", `Failed to save API key for ${provider}`, e);
       addToast(`Failed to save key: ${e}`);
     } finally {
       setSavingKey((prev) => ({ ...prev, [provider]: false }));
@@ -120,12 +127,16 @@ export function SettingsPage() {
       const settings: ProjectSettings = {
         defaultTokenBudget: tokenBudget,
         phaseControl,
+        conflictResolution,
         llmConfigs,
         workingDirectory: workingDirectory.trim() || null,
+        defaultExecutionEngine: defaultExecutionEngine === "built-in" ? null : defaultExecutionEngine,
       };
       await api.updateProjectSettings(activeProjectId, settings);
+      devLog("info", "Settings", "Project settings saved", { phaseControl, conflictResolution, workingDirectory });
       addToast("Project settings saved", "info");
     } catch (e) {
+      devLog("error", "Settings", "Failed to save project settings", e);
       addToast(`Failed to save settings: ${e}`);
     } finally {
       setSavingProjectSettings(false);
@@ -272,6 +283,40 @@ export function SettingsPage() {
                     <option value="manual">Manual</option>
                     <option value="gated-auto-advance">Auto-advance with approval</option>
                     <option value="fully-autonomous">Fully automatic</option>
+                  </select>
+                </div>
+
+                {/* Conflict Resolution */}
+                <div className="flex items-center gap-3">
+                  <label className="text-sm text-gray-400 w-40">
+                    Merge conflicts
+                  </label>
+                  <select
+                    value={conflictResolution}
+                    onChange={(e) =>
+                      setConflictResolution(e.target.value as ConflictResolutionPolicy)
+                    }
+                    className="rounded border border-gray-700 bg-gray-800 px-2.5 py-1 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+                  >
+                    <option value="manual">Manual (flag and stop)</option>
+                    <option value="ai-assisted">AI-assisted (offer resolve button)</option>
+                    <option value="auto-resolve">Auto-resolve (AI fixes silently)</option>
+                  </select>
+                </div>
+
+                {/* Default Execution Engine */}
+                <div className="flex items-center gap-3">
+                  <label className="text-sm text-gray-400 w-40">
+                    Default agent engine
+                  </label>
+                  <select
+                    value={defaultExecutionEngine}
+                    onChange={(e) => setDefaultExecutionEngine(e.target.value)}
+                    className="rounded border border-gray-700 bg-gray-800 px-2.5 py-1 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+                  >
+                    <option value="built-in">Built-in LLM (text only)</option>
+                    <option value="claude-code">Claude Code (writes files)</option>
+                    <option value="codex">Codex (writes files)</option>
                   </select>
                 </div>
 

@@ -12,6 +12,7 @@ pub struct WorkPlan {
     pub tasks: Vec<PlanTask>,
     pub raw_output: String,
     pub tokens_used: i64,
+    pub integration_review: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -67,4 +68,5 @@ pub struct WorkPlanUpdate {
     pub tasks: Option<Vec<PlanTask>>,
     pub raw_output: Option<String>,
     pub tokens_used: Option<i64>,
+    pub integration_review: Option<String>,
 }

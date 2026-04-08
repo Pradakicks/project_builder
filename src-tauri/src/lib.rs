@@ -15,6 +15,24 @@ pub struct AppState {
 }
 
 pub fn run() {
+    // Initialize development logging (compiled out in release builds)
+    #[cfg(debug_assertions)]
+    {
+        use tracing_subscriber::{fmt, EnvFilter};
+        fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    EnvFilter::new("project_builder_dashboard_lib=debug,project_builder_dashboard_lib::agent=trace,project_builder_dashboard_lib::llm=trace")
+                }),
+            )
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_file(true)
+            .with_line_number(true)
+            .init();
+        tracing::info!("Development logging initialized");
+    }
+
     let database = Database::new().expect("Failed to initialize database");
 
     tauri::Builder::default()
@@ -59,6 +77,9 @@ pub fn run() {
             commands::plan_commands::list_work_plans,
             commands::plan_commands::update_plan_status,
             commands::plan_commands::update_plan_task_status,
+            commands::merge_commands::merge_plan_branches,
+            commands::merge_commands::resolve_merge_conflict,
+            commands::merge_commands::run_integration_review,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

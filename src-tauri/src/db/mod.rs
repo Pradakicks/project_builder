@@ -10,6 +10,7 @@ pub use plan_queries::*;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
+use tracing::{info, error};
 
 pub struct Database {
     pub conn: Connection,
@@ -18,6 +19,7 @@ pub struct Database {
 impl Database {
     pub fn new() -> Result<Self, String> {
         let db_path = Self::db_path()?;
+        info!(path = %db_path.display(), "Initializing database");
 
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -27,6 +29,7 @@ impl Database {
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
         let db = Database { conn };
         db.init_schema()?;
+        info!("Database schema initialized successfully");
         Ok(db)
     }
 
@@ -139,6 +142,7 @@ impl Database {
                 tasks_json TEXT NOT NULL DEFAULT '[]',
                 raw_output TEXT NOT NULL DEFAULT '',
                 tokens_used INTEGER NOT NULL DEFAULT 0,
+                integration_review TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -162,7 +166,10 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_cto_decisions_project ON cto_decisions(project_id);
             ",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                error!(error = %e, "Failed to initialize database schema");
+                e.to_string()
+            })?;
         Ok(())
     }
 }

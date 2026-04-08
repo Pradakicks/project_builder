@@ -1,5 +1,6 @@
 import { useProjectStore } from "../store/useProjectStore";
 import { useLeaderStore } from "../store/useLeaderStore";
+import { devLog } from "./devLog";
 
 export interface CtoAction {
   action: string;
@@ -17,8 +18,8 @@ export function parseActions(markdown: string): CtoAction[] {
       if (parsed && typeof parsed.action === "string") {
         actions.push(parsed);
       }
-    } catch {
-      // skip invalid JSON
+    } catch (e) {
+      devLog("warn", "CTO", `Failed to parse action block JSON`, e);
     }
   }
   return actions;
@@ -53,6 +54,8 @@ export function describeAction(action: CtoAction): string {
       return "Reject plan";
     case "runAllTasks":
       return "Run all plan tasks";
+    case "mergeBranches":
+      return "Merge all piece branches to main";
     default:
       return `Unknown action: ${action.action}`;
   }
@@ -68,6 +71,7 @@ export async function executeActions(
   const errors: string[] = [];
   let switchToTab: string | undefined;
 
+  devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map(a => a.action));
   for (const action of actions) {
     try {
       switch (action.action) {
@@ -137,13 +141,21 @@ export async function executeActions(
           executed++;
           break;
         }
+        case "mergeBranches": {
+          useLeaderStore.getState().mergeBranches(action.planId as string);
+          switchToTab = "plan";
+          executed++;
+          break;
+        }
         default:
           errors.push(`Unknown action: ${action.action}`);
       }
     } catch (e) {
+      devLog("error", "CTO", `Action "${action.action}" failed`, e);
       errors.push(`${action.action} failed: ${e}`);
     }
   }
 
+  devLog("info", "CTO", `Executed ${executed}/${actions.length} actions`, { errors });
   return { executed, errors, switchToTab };
 }

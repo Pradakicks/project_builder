@@ -18,8 +18,12 @@ pub struct ProjectSettings {
     pub llm_configs: Vec<LlmConfig>,
     pub default_token_budget: i64,
     pub phase_control: PhaseControlPolicy,
+    /// How to handle merge conflicts when combining piece branches
+    pub conflict_resolution: ConflictResolutionPolicy,
     /// Path to a git repository for external tool execution
     pub working_directory: Option<String>,
+    /// Default execution engine for new pieces ("built-in", "claude-code", "codex")
+    pub default_execution_engine: Option<String>,
 }
 
 impl Default for ProjectSettings {
@@ -28,7 +32,9 @@ impl Default for ProjectSettings {
             llm_configs: vec![],
             default_token_budget: 100_000,
             phase_control: PhaseControlPolicy::Manual,
+            conflict_resolution: ConflictResolutionPolicy::AiAssisted,
             working_directory: None,
+            default_execution_engine: None,
         }
     }
 }
@@ -48,6 +54,17 @@ pub enum PhaseControlPolicy {
     Manual,
     GatedAutoAdvance,
     FullyAutonomous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConflictResolutionPolicy {
+    /// Flag conflict, user resolves externally
+    Manual,
+    /// Flag conflict, offer "Resolve with AI" button (default)
+    AiAssisted,
+    /// AI silently resolves conflicts without user approval
+    AutoResolve,
 }
 
 /// Full project export format including all pieces and connections

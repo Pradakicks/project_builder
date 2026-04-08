@@ -1,5 +1,6 @@
 use crate::models::*;
 use rusqlite::params;
+use tracing::{debug, info};
 
 use super::Database;
 
@@ -9,6 +10,7 @@ impl Database {
         project_id: &str,
         user_guidance: &str,
     ) -> Result<WorkPlan, String> {
+        debug!(project_id, "Creating work plan");
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -25,11 +27,12 @@ impl Database {
 
         self.conn
             .execute(
-                "INSERT INTO work_plans (id, project_id, version, status, summary, user_guidance, tasks_json, raw_output, tokens_used, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![id, project_id, version, "generating", "", user_guidance, "[]", "", 0, now, now],
+                "INSERT INTO work_plans (id, project_id, version, status, summary, user_guidance, tasks_json, raw_output, tokens_used, integration_review, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![id, project_id, version, "generating", "", user_guidance, "[]", "", 0, "", now, now],
             )
             .map_err(|e| e.to_string())?;
 
+        info!(plan_id = %id, project_id, version, "Work plan created");
         Ok(WorkPlan {
             id,
             project_id: project_id.to_string(),
@@ -40,15 +43,17 @@ impl Database {
             tasks: vec![],
             raw_output: String::new(),
             tokens_used: 0,
+            integration_review: String::new(),
             created_at: now.clone(),
             updated_at: now,
         })
     }
 
     pub fn get_work_plan(&self, id: &str) -> Result<WorkPlan, String> {
+        debug!(plan_id = id, "Getting work plan");
         self.conn
             .query_row(
-                "SELECT id, project_id, version, status, summary, user_guidance, tasks_json, raw_output, tokens_used, created_at, updated_at FROM work_plans WHERE id = ?1",
+                "SELECT id, project_id, version, status, summary, user_guidance, tasks_json, raw_output, tokens_used, integration_review, created_at, updated_at FROM work_plans WHERE id = ?1",
                 params![id],
                 |row| {
                     let status_str: String = row.get(3)?;
@@ -65,8 +70,9 @@ impl Database {
                         tasks: serde_json::from_str(&tasks_json).unwrap_or_default(),
                         raw_output: row.get(7)?,
                         tokens_used: row.get(8)?,
-                        created_at: row.get(9)?,
-                        updated_at: row.get(10)?,
+                        integration_review: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     })
                 },
             )
@@ -78,6 +84,7 @@ impl Database {
         id: &str,
         updates: &WorkPlanUpdate,
     ) -> Result<WorkPlan, String> {
+        debug!(plan_id = id, has_status = updates.status.is_some(), has_tasks = updates.tasks.is_some(), "Updating work plan");
         let now = chrono::Utc::now().to_rfc3339();
 
         if let Some(ref status) = updates.status {
@@ -89,6 +96,7 @@ impl Database {
                     params![val, now, id],
                 )
                 .map_err(|e| e.to_string())?;
+            info!(plan_id = id, new_status = %val, "Work plan status changed");
         }
         if let Some(ref summary) = updates.summary {
             self.conn
@@ -120,6 +128,14 @@ impl Database {
                 .execute(
                     "UPDATE work_plans SET tokens_used = ?1, updated_at = ?2 WHERE id = ?3",
                     params![tokens_used, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(ref integration_review) = updates.integration_review {
+            self.conn
+                .execute(
+                    "UPDATE work_plans SET integration_review = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![integration_review, now, id],
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -170,6 +186,7 @@ impl Database {
 
     /// Mark all draft plans for a project as superseded
     pub fn supersede_draft_plans(&self, project_id: &str) -> Result<(), String> {
+        info!(project_id, "Superseding draft plans");
         let now = chrono::Utc::now().to_rfc3339();
         self.conn
             .execute(

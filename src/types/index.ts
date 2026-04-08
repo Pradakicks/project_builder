@@ -14,7 +14,9 @@ export interface ProjectSettings {
   llmConfigs: LlmConfig[];
   defaultTokenBudget: number;
   phaseControl: PhaseControlPolicy;
+  conflictResolution: ConflictResolutionPolicy;
   workingDirectory: string | null;
+  defaultExecutionEngine: string | null;
 }
 
 export interface LlmConfig {
@@ -25,6 +27,7 @@ export interface LlmConfig {
 }
 
 export type PhaseControlPolicy = "manual" | "gated-auto-advance" | "fully-autonomous";
+export type ConflictResolutionPolicy = "manual" | "ai-assisted" | "auto-resolve";
 
 export interface Piece {
   id: string;
@@ -162,6 +165,7 @@ export interface WorkPlan {
   tasks: PlanTask[];
   rawOutput: string;
   tokensUsed: number;
+  integrationReview: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -177,4 +181,37 @@ export interface PlanTask {
   dependencies: string[];
   status: TaskStatus;
   order: number;
+}
+
+// ── Branch Merging ──────────────────────────────────────
+
+export interface MergeSummary {
+  merged: string[];
+  skipped: string[];
+  conflict: ConflictInfo | null;
+  combinedDiffStat: string;
+}
+
+export interface ConflictInfo {
+  pieceId: string;
+  pieceName: string;
+  branch: string;
+  conflictingFiles: string[];
+  conflictDiff: string;
+}
+
+export interface MergeProgressEvent {
+  planId: string;
+  pieceName: string;
+  branch: string;
+  status: "merging" | "merged" | "conflict" | "conflict-resolving" | "conflict-resolved" | "failed" | "skipped";
+  message: string;
+  current: number;
+  total: number;
+}
+
+export interface IntegrationReviewChunk {
+  planId: string;
+  chunk: string;
+  done: boolean;
 }

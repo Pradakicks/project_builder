@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { devLog } from "../utils/devLog";
 import type {
   Project,
   Piece,
@@ -13,17 +14,42 @@ import type {
   TaskStatus,
 } from "../types";
 
+async function loggedInvoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  devLog("debug", "IPC", `→ ${cmd}`, args);
+  const start = performance.now();
+  try {
+    const result = await invoke<T>(cmd, args);
+    devLog(
+      "debug",
+      "IPC",
+      `← ${cmd} (${(performance.now() - start).toFixed(0)}ms)`,
+    );
+    return result;
+  } catch (e) {
+    devLog(
+      "error",
+      "IPC",
+      `✗ ${cmd} (${(performance.now() - start).toFixed(0)}ms)`,
+      e,
+    );
+    throw e;
+  }
+}
+
 // ── Projects ──────────────────────────────────────────────
 
 export async function createProject(
   name: string,
   description: string,
 ): Promise<Project> {
-  return invoke("create_project", { name, description });
+  return loggedInvoke("create_project", { name, description });
 }
 
 export async function getProject(id: string): Promise<Project> {
-  return invoke("get_project", { id });
+  return loggedInvoke("get_project", { id });
 }
 
 export async function updateProject(
@@ -31,26 +57,26 @@ export async function updateProject(
   name?: string,
   description?: string,
 ): Promise<Project> {
-  return invoke("update_project", { id, name, description });
+  return loggedInvoke("update_project", { id, name, description });
 }
 
 export async function listProjects(): Promise<Project[]> {
-  return invoke("list_projects");
+  return loggedInvoke("list_projects");
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  return invoke("delete_project", { id });
+  return loggedInvoke("delete_project", { id });
 }
 
 export async function saveProjectToFile(
   id: string,
   path: string,
 ): Promise<void> {
-  return invoke("save_project_to_file", { id, path });
+  return loggedInvoke("save_project_to_file", { id, path });
 }
 
 export async function loadProjectFromFile(path: string): Promise<Project> {
-  return invoke("load_project_from_file", { path });
+  return loggedInvoke("load_project_from_file", { path });
 }
 
 // ── Pieces ────────────────────────────────────────────────
@@ -62,7 +88,7 @@ export async function createPiece(
   positionX: number,
   positionY: number,
 ): Promise<Piece> {
-  return invoke("create_piece", {
+  return loggedInvoke("create_piece", {
     projectId,
     parentId,
     name,
@@ -72,26 +98,26 @@ export async function createPiece(
 }
 
 export async function getPiece(id: string): Promise<Piece> {
-  return invoke("get_piece", { id });
+  return loggedInvoke("get_piece", { id });
 }
 
 export async function updatePiece(
   id: string,
   updates: PieceUpdate,
 ): Promise<Piece> {
-  return invoke("update_piece", { id, updates });
+  return loggedInvoke("update_piece", { id, updates });
 }
 
 export async function deletePiece(id: string): Promise<void> {
-  return invoke("delete_piece", { id });
+  return loggedInvoke("delete_piece", { id });
 }
 
 export async function listPieces(projectId: string): Promise<Piece[]> {
-  return invoke("list_pieces", { projectId });
+  return loggedInvoke("list_pieces", { projectId });
 }
 
 export async function listChildren(pieceId: string): Promise<Piece[]> {
-  return invoke("list_children", { pieceId });
+  return loggedInvoke("list_children", { pieceId });
 }
 
 // ── Connections ───────────────────────────────────────────
@@ -102,7 +128,7 @@ export async function createConnection(
   targetPieceId: string,
   label: string,
 ): Promise<Connection> {
-  return invoke("create_connection", {
+  return loggedInvoke("create_connection", {
     projectId,
     sourcePieceId,
     targetPieceId,
@@ -111,55 +137,55 @@ export async function createConnection(
 }
 
 export async function getConnection(id: string): Promise<Connection> {
-  return invoke("get_connection", { id });
+  return loggedInvoke("get_connection", { id });
 }
 
 export async function updateConnection(
   id: string,
   updates: ConnectionUpdate,
 ): Promise<Connection> {
-  return invoke("update_connection", { id, updates });
+  return loggedInvoke("update_connection", { id, updates });
 }
 
 export async function deleteConnection(id: string): Promise<void> {
-  return invoke("delete_connection", { id });
+  return loggedInvoke("delete_connection", { id });
 }
 
 export async function listConnections(projectId: string): Promise<Connection[]> {
-  return invoke("list_connections", { projectId });
+  return loggedInvoke("list_connections", { projectId });
 }
 
 // ── Settings / Keyring ───────────────────────────────────
 
 export async function getApiKey(provider: string): Promise<string | null> {
-  return invoke("get_api_key", { provider });
+  return loggedInvoke("get_api_key", { provider });
 }
 
 export async function setApiKey(provider: string, key: string): Promise<void> {
-  return invoke("set_api_key", { provider, key });
+  return loggedInvoke("set_api_key", { provider, key });
 }
 
 export async function deleteApiKey(provider: string): Promise<void> {
-  return invoke("delete_api_key", { provider });
+  return loggedInvoke("delete_api_key", { provider });
 }
 
 export async function updateProjectSettings(
   id: string,
   settings: import("../types").ProjectSettings,
 ): Promise<import("../types").Project> {
-  return invoke("update_project_settings", { id, settings });
+  return loggedInvoke("update_project_settings", { id, settings });
 }
 
 export async function validateWorkingDirectory(
   path: string,
 ): Promise<boolean> {
-  return invoke("validate_working_directory", { path });
+  return loggedInvoke("validate_working_directory", { path });
 }
 
 // ── Agent ─────────────────────────────────────────────────
 
 export async function runPieceAgent(pieceId: string, feedback?: string): Promise<void> {
-  return invoke("run_piece_agent", { pieceId, feedback: feedback ?? null });
+  return loggedInvoke("run_piece_agent", { pieceId, feedback: feedback ?? null });
 }
 
 export interface AgentHistoryEntry {
@@ -175,7 +201,7 @@ export interface AgentHistoryEntry {
 export async function getAgentHistory(
   pieceId: string,
 ): Promise<AgentHistoryEntry[]> {
-  return invoke("get_agent_history", { pieceId });
+  return loggedInvoke("get_agent_history", { pieceId });
 }
 
 export interface LlmMessage {
@@ -188,7 +214,7 @@ export async function chatWithCto(
   userMessage: string,
   conversation: LlmMessage[],
 ): Promise<void> {
-  return invoke("chat_with_cto", { projectId, userMessage, conversation });
+  return loggedInvoke("chat_with_cto", { projectId, userMessage, conversation });
 }
 
 // ── Event Listeners ───────────────────────────────────────
@@ -239,13 +265,13 @@ export interface GitStatusInfo {
 export async function getGitStatus(
   pieceId: string,
 ): Promise<GitStatusInfo | null> {
-  return invoke("get_git_status", { pieceId });
+  return loggedInvoke("get_git_status", { pieceId });
 }
 
 // ── Artifacts ────────────────────────────────────────────
 
 export async function listArtifacts(pieceId: string): Promise<Artifact[]> {
-  return invoke("list_artifacts", { pieceId });
+  return loggedInvoke("list_artifacts", { pieceId });
 }
 
 // ── CTO Decisions ───────────────────────────────────────
@@ -255,13 +281,13 @@ export async function logCtoDecision(
   summary: string,
   actionsJson: string,
 ): Promise<CtoDecision> {
-  return invoke("log_cto_decision", { projectId, summary: summary, actionsJson });
+  return loggedInvoke("log_cto_decision", { projectId, summary: summary, actionsJson });
 }
 
 export async function listCtoDecisions(
   projectId: string,
 ): Promise<CtoDecision[]> {
-  return invoke("list_cto_decisions", { projectId });
+  return loggedInvoke("list_cto_decisions", { projectId });
 }
 
 export interface CtoChatChunk {
@@ -284,22 +310,22 @@ export async function generateWorkPlan(
   projectId: string,
   userGuidance: string,
 ): Promise<WorkPlan> {
-  return invoke("generate_work_plan", { projectId, userGuidance });
+  return loggedInvoke("generate_work_plan", { projectId, userGuidance });
 }
 
 export async function getWorkPlan(planId: string): Promise<WorkPlan> {
-  return invoke("get_work_plan", { planId });
+  return loggedInvoke("get_work_plan", { planId });
 }
 
 export async function listWorkPlans(projectId: string): Promise<WorkPlan[]> {
-  return invoke("list_work_plans", { projectId });
+  return loggedInvoke("list_work_plans", { projectId });
 }
 
 export async function updatePlanStatus(
   planId: string,
   status: PlanStatus,
 ): Promise<WorkPlan> {
-  return invoke("update_plan_status", { planId, status });
+  return loggedInvoke("update_plan_status", { planId, status });
 }
 
 export async function updatePlanTaskStatus(
@@ -307,7 +333,7 @@ export async function updatePlanTaskStatus(
   taskId: string,
   status: TaskStatus,
 ): Promise<WorkPlan> {
-  return invoke("update_plan_task_status", { planId, taskId, status });
+  return loggedInvoke("update_plan_task_status", { planId, taskId, status });
 }
 
 export interface LeaderPlanChunk {
@@ -320,6 +346,42 @@ export function onLeaderPlanChunk(
   callback: (payload: LeaderPlanChunk) => void,
 ): Promise<UnlistenFn> {
   return listen<LeaderPlanChunk>("leader-plan-chunk", (event) => {
+    callback(event.payload);
+  });
+}
+
+// ── Branch Merging ──────────────────────────────────────
+
+import type {
+  MergeSummary,
+  MergeProgressEvent,
+  IntegrationReviewChunk,
+} from "../types";
+
+export async function mergePlanBranches(planId: string): Promise<MergeSummary> {
+  return loggedInvoke("merge_plan_branches", { planId });
+}
+
+export async function resolveMergeConflict(planId: string, pieceId: string): Promise<void> {
+  return loggedInvoke("resolve_merge_conflict", { planId, pieceId });
+}
+
+export async function runIntegrationReview(planId: string): Promise<void> {
+  return loggedInvoke("run_integration_review", { planId });
+}
+
+export function onMergeProgress(
+  callback: (payload: MergeProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<MergeProgressEvent>("merge-progress", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onIntegrationReviewChunk(
+  callback: (payload: IntegrationReviewChunk) => void,
+): Promise<UnlistenFn> {
+  return listen<IntegrationReviewChunk>("integration-review-chunk", (event) => {
     callback(event.payload);
   });
 }

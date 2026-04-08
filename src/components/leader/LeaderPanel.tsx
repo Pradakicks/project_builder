@@ -3,6 +3,7 @@ import { useLeaderStore } from "../../store/useLeaderStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { onLeaderPlanChunk } from "../../api/tauriApi";
 import { PlanTaskCard } from "./PlanTaskCard";
+import { MergeSection } from "./MergeSection";
 import { Markdown } from "../ui/Markdown";
 import type { TaskStatus } from "../../types";
 
@@ -232,6 +233,13 @@ export function LeaderPanel({
                   ))}
               </div>
             )}
+
+            {/* Merge & Review section — shown when all tasks are done */}
+            {currentPlan.status === "approved" &&
+              currentPlan.tasks.length > 0 &&
+              currentPlan.tasks.every(
+                (t) => t.status === "complete" || t.status === "skipped",
+              ) && <MergeSection planId={currentPlan.id} />}
 
             {currentPlan.tasks.length === 0 && currentPlan.rawOutput && (
               <div className="rounded border border-gray-700 bg-gray-800/50 p-2">
