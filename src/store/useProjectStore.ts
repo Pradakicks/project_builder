@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import * as api from "../api/tauriApi";
 import { useToastStore } from "./useToastStore";
+import { devLog } from "../utils/devLog";
 
 const toast = (msg: string) => useToastStore.getState().addToast(msg);
 
@@ -57,6 +58,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   breadcrumbs: [],
 
   loadProject: async (id: string) => {
+    devLog("info", "Store:Project", `Loading project ${id}`);
     try {
       const project = await api.getProject(id);
       const pieces = await api.listPieces(id);
@@ -69,12 +71,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         currentParentId: null,
         breadcrumbs: [{ id: project.id, name: project.name }],
       });
+      devLog("info", "Store:Project", `Loaded project "${project.name}" — ${pieces.length} pieces, ${connections.length} connections`);
     } catch (e) {
+      devLog("error", "Store:Project", `Failed to load project ${id}`, e);
       toast(`Failed to load project: ${e}`);
     }
   },
 
   createProject: async (name: string, description: string) => {
+    devLog("info", "Store:Project", `Creating project "${name}"`);
     try {
       const project = await api.createProject(name, description);
       set({
@@ -84,8 +89,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         currentParentId: null,
         breadcrumbs: [{ id: project.id, name: project.name }],
       });
+      devLog("info", "Store:Project", `Created project "${name}" (${project.id})`);
       return project;
     } catch (e) {
+      devLog("error", "Store:Project", `Failed to create project`, e);
       toast(`Failed to create project: ${e}`);
       throw e;
     }
@@ -105,28 +112,34 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addPiece: async (name: string, positionX: number, positionY: number) => {
     const { project, currentParentId, pieces } = get();
     if (!project) throw new Error("No project loaded");
+    devLog("debug", "Store:Project", `Creating piece "${name}"`, { positionX, positionY, parentId: currentParentId });
     try {
       const piece = await api.createPiece(project.id, currentParentId, name, positionX, positionY);
       set({ pieces: [...pieces, piece] });
+      devLog("info", "Store:Project", `Created piece "${name}" (${piece.id})`);
       return piece;
     } catch (e) {
+      devLog("error", "Store:Project", `Failed to create piece`, e);
       toast(`Failed to add piece: ${e}`);
       throw e;
     }
   },
 
   updatePiece: async (id: string, updates: PieceUpdate) => {
+    devLog("debug", "Store:Project", `Updating piece ${id}`, { fields: Object.keys(updates) });
     try {
       const updated = await api.updatePiece(id, updates);
       set({
         pieces: get().pieces.map((p) => (p.id === id ? updated : p)),
       });
     } catch (e) {
+      devLog("error", "Store:Project", `Failed to update piece ${id}`, e);
       toast(`Failed to update piece: ${e}`);
     }
   },
 
   deletePiece: async (id: string) => {
+    devLog("info", "Store:Project", `Deleting piece ${id}`);
     try {
       await api.deletePiece(id);
       const { pieces, connections, selectedPieceId } = get();
@@ -138,6 +151,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         selectedPieceId: selectedPieceId === id ? null : selectedPieceId,
       });
     } catch (e) {
+      devLog("error", "Store:Project", `Failed to delete piece ${id}`, e);
       toast(`Failed to delete piece: ${e}`);
     }
   },

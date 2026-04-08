@@ -1,8 +1,17 @@
 use crate::models::*;
 use rusqlite::params;
 use std::collections::HashMap;
+use tracing::{debug, error};
 
 use super::Database;
+
+/// Parse JSON with error logging. Returns default on failure.
+fn parse_json_logged<T: serde::de::DeserializeOwned + Default>(json_str: &str, field: &str) -> T {
+    serde_json::from_str(json_str).unwrap_or_else(|e| {
+        error!(field, error = %e, "JSON parse failed in DB query — possible data corruption");
+        Default::default()
+    })
+}
 
 impl Database {
     // ── Projects ──────────────────────────────────────────────
@@ -20,6 +29,7 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
+        debug!(project_id = %id, name, "Created project");
         Ok(Project {
             id,
             name: name.to_string(),
@@ -32,6 +42,7 @@ impl Database {
     }
 
     pub fn get_project(&self, id: &str) -> Result<Project, String> {
+        debug!(project_id = id, "Getting project");
         self.conn
             .query_row(
                 "SELECT id, name, description, root_piece_id, settings_json, created_at, updated_at FROM projects WHERE id = ?1",
@@ -43,7 +54,7 @@ impl Database {
                         name: row.get(1)?,
                         description: row.get(2)?,
                         root_piece_id: row.get(3)?,
-                        settings: serde_json::from_str(&settings_json).unwrap_or_default(),
+                        settings: parse_json_logged(&settings_json, "project_settings"),
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
                     })
@@ -53,6 +64,7 @@ impl Database {
     }
 
     pub fn update_project(&self, id: &str, name: Option<&str>, description: Option<&str>, root_piece_id: Option<Option<&str>>, settings: Option<&ProjectSettings>) -> Result<Project, String> {
+        debug!(project_id = id, "Updating project");
         let now = chrono::Utc::now().to_rfc3339();
 
         if let Some(name) = name {
@@ -73,6 +85,7 @@ impl Database {
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>, String> {
+        debug!("Listing projects");
         let mut stmt = self.conn
             .prepare("SELECT id, name, description, root_piece_id, settings_json, created_at, updated_at FROM projects ORDER BY updated_at DESC")
             .map_err(|e| e.to_string())?;
@@ -85,7 +98,7 @@ impl Database {
                     name: row.get(1)?,
                     description: row.get(2)?,
                     root_piece_id: row.get(3)?,
-                    settings: serde_json::from_str(&settings_json).unwrap_or_default(),
+                    settings: parse_json_logged(&settings_json, "project_settings"),
                     created_at: row.get(5)?,
                     updated_at: row.get(6)?,
                 })
@@ -96,6 +109,7 @@ impl Database {
     }
 
     pub fn delete_project(&self, id: &str) -> Result<(), String> {
+        debug!(project_id = id, "Deleting project");
         self.conn.execute("DELETE FROM connections WHERE project_id = ?1", params![id]).map_err(|e| e.to_string())?;
         self.conn.execute("DELETE FROM pieces WHERE project_id = ?1", params![id]).map_err(|e| e.to_string())?;
         self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
@@ -105,6 +119,7 @@ impl Database {
     // ── Pieces ────────────────────────────────────────────────
 
     pub fn create_piece(&self, project_id: &str, parent_id: Option<&str>, name: &str, position_x: f64, position_y: f64) -> Result<Piece, String> {
+        debug!(project_id, name, "Creating piece");
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let agent_config = AgentConfig::default();
@@ -141,6 +156,7 @@ impl Database {
     }
 
     pub fn get_piece(&self, id: &str) -> Result<Piece, String> {
+        debug!(piece_id = id, "Getting piece");
         self.conn
             .query_row(
                 "SELECT id, project_id, parent_id, name, piece_type, color, icon, responsibilities, interfaces_json, constraints_json, notes, agent_prompt, agent_config_json, output_mode, phase, position_x, position_y, created_at, updated_at FROM pieces WHERE id = ?1",
@@ -161,11 +177,11 @@ impl Database {
                         color: row.get(5)?,
                         icon: row.get(6)?,
                         responsibilities: row.get(7)?,
-                        interfaces: serde_json::from_str(&interfaces_json).unwrap_or_default(),
-                        constraints: serde_json::from_str(&constraints_json).unwrap_or_default(),
+                        interfaces: parse_json_logged(&interfaces_json, "interfaces"),
+                        constraints: parse_json_logged(&constraints_json, "constraints"),
                         notes: row.get(10)?,
                         agent_prompt: row.get(11)?,
-                        agent_config: serde_json::from_str(&agent_config_json).unwrap_or_default(),
+                        agent_config: parse_json_logged(&agent_config_json, "agent_config"),
                         output_mode: serde_json::from_str(&format!("\"{}\"", output_mode_str)).unwrap_or(OutputMode::Both),
                         phase: serde_json::from_str(&format!("\"{}\"", phase_str)).unwrap_or(Phase::Design),
                         position_x: row.get(15)?,
@@ -179,6 +195,7 @@ impl Database {
     }
 
     pub fn update_piece(&self, id: &str, updates: &PieceUpdate) -> Result<Piece, String> {
+        debug!(piece_id = id, "Updating piece");
         let now = chrono::Utc::now().to_rfc3339();
 
         if let Some(ref name) = updates.name {
@@ -235,6 +252,7 @@ impl Database {
     }
 
     pub fn delete_piece(&self, id: &str) -> Result<(), String> {
+        debug!(piece_id = id, "Deleting piece");
         self.conn.execute("DELETE FROM connections WHERE source_piece_id = ?1 OR target_piece_id = ?1", params![id]).map_err(|e| e.to_string())?;
         // Reparent children to deleted piece's parent
         let parent_id: Option<String> = self.conn.query_row("SELECT parent_id FROM pieces WHERE id = ?1", params![id], |row| row.get(0)).map_err(|e| e.to_string())?;
@@ -244,6 +262,7 @@ impl Database {
     }
 
     pub fn list_pieces(&self, project_id: &str) -> Result<Vec<Piece>, String> {
+        debug!(project_id, "Listing pieces");
         let mut stmt = self.conn
             .prepare("SELECT id FROM pieces WHERE project_id = ?1")
             .map_err(|e| e.to_string())?;
@@ -274,6 +293,7 @@ impl Database {
     // ── Connections ───────────────────────────────────────────
 
     pub fn create_connection(&self, project_id: &str, source_piece_id: &str, target_piece_id: &str, label: &str) -> Result<Connection, String> {
+        debug!(project_id, source = source_piece_id, target = target_piece_id, label, "Creating connection");
         let id = uuid::Uuid::new_v4().to_string();
 
         self.conn
@@ -299,6 +319,7 @@ impl Database {
     }
 
     pub fn get_connection(&self, id: &str) -> Result<Connection, String> {
+        debug!(connection_id = id, "Getting connection");
         self.conn
             .query_row(
                 "SELECT id, project_id, source_piece_id, target_piece_id, direction, label, data_type, protocol, constraints_json, notes, metadata_json FROM connections WHERE id = ?1",
@@ -317,9 +338,9 @@ impl Database {
                         label: row.get(5)?,
                         data_type: row.get(6)?,
                         protocol: row.get(7)?,
-                        constraints: serde_json::from_str(&constraints_json).unwrap_or_default(),
+                        constraints: parse_json_logged(&constraints_json, "connection_constraints"),
                         notes: row.get(9)?,
-                        metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
+                        metadata: parse_json_logged(&metadata_json, "connection_metadata"),
                     })
                 },
             )
@@ -327,6 +348,7 @@ impl Database {
     }
 
     pub fn update_connection(&self, id: &str, updates: &ConnectionUpdate) -> Result<Connection, String> {
+        debug!(connection_id = id, "Updating connection");
         if let Some(ref label) = updates.label {
             self.conn.execute("UPDATE connections SET label = ?1 WHERE id = ?2", params![label, id]).map_err(|e| e.to_string())?;
         }
@@ -357,11 +379,13 @@ impl Database {
     }
 
     pub fn delete_connection(&self, id: &str) -> Result<(), String> {
+        debug!(connection_id = id, "Deleting connection");
         self.conn.execute("DELETE FROM connections WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn list_connections(&self, project_id: &str) -> Result<Vec<Connection>, String> {
+        debug!(project_id, "Listing connections");
         let mut stmt = self.conn
             .prepare("SELECT id FROM connections WHERE project_id = ?1")
             .map_err(|e| e.to_string())?;
@@ -378,6 +402,7 @@ impl Database {
     // ── Project File I/O ─────────────────────────────────────
 
     pub fn export_project(&self, project_id: &str) -> Result<ProjectFile, String> {
+        debug!(project_id, "Exporting project");
         let project = self.get_project(project_id)?;
         let pieces = self.list_pieces(project_id)?;
         let connections = self.list_connections(project_id)?;
@@ -390,6 +415,7 @@ impl Database {
     }
 
     pub fn import_project(&self, file: &ProjectFile) -> Result<Project, String> {
+        debug!(project_id = %file.project.id, name = %file.project.name, pieces = file.pieces.len(), connections = file.connections.len(), "Importing project");
         // Insert the project
         let now = chrono::Utc::now().to_rfc3339();
         let settings_json = serde_json::to_string(&file.project.settings).map_err(|e| e.to_string())?;

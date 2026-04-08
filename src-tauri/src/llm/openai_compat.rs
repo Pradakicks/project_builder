@@ -4,6 +4,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tracing::{debug, trace, error};
 
 pub struct OpenAICompatProvider;
 
@@ -27,6 +28,8 @@ impl LlmProvider for OpenAICompatProvider {
                 "content": m.content,
             })).collect::<Vec<_>>(),
         });
+            debug!(model = %config.model, msg_count = messages.len(), max_tokens = config.max_tokens, base_url = %base_url, "OpenAI-compat chat call");
+            trace!(messages_count = messages.len(), "OpenAI-compat chat request");
 
         let resp = client
             .post(format!("{base_url}/chat/completions"))
@@ -40,6 +43,7 @@ impl LlmProvider for OpenAICompatProvider {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
+            error!(status = %status, body = %text, "OpenAI-compat API error");
             return Err(format!("OpenAI API error ({status}): {text}"));
         }
 
@@ -50,6 +54,9 @@ impl LlmProvider for OpenAICompatProvider {
             .to_string();
         let input_tokens = data["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
         let output_tokens = data["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+
+            debug!(input_tokens, output_tokens, "OpenAI-compat chat complete");
+            trace!(response_content = %content, "OpenAI-compat chat response");
 
         Ok(LlmResponse {
             content,
@@ -83,6 +90,7 @@ impl LlmProvider for OpenAICompatProvider {
                 "content": m.content,
             })).collect::<Vec<_>>(),
         });
+            debug!(model = %config.model, msg_count = messages.len(), base_url = %base_url, "OpenAI-compat streaming call");
 
         let resp = client
             .post(format!("{base_url}/chat/completions"))
@@ -95,6 +103,7 @@ impl LlmProvider for OpenAICompatProvider {
 
         if !resp.status().is_success() {
             let text = resp.text().await.map_err(|e| e.to_string())?;
+            error!(body = %text, "OpenAI-compat streaming API error");
             return Err(format!("OpenAI API error: {text}"));
         }
 
@@ -131,6 +140,8 @@ impl LlmProvider for OpenAICompatProvider {
                 }
             }
         }
+
+        debug!(input_tokens = usage.input, output_tokens = usage.output, "OpenAI-compat stream complete");
 
         Ok(usage)
     }

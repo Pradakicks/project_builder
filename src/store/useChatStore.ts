@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { devLog } from "../utils/devLog";
 
 export interface ChatMessage {
   id: string;
@@ -21,6 +22,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       content,
       timestamp: Date.now(),
     };
+    devLog("debug", "Store:Chat", `${role} message added (${content.length} chars)`);
     set({ messages: [...get().messages, msg] });
   },
 }));

@@ -5,6 +5,7 @@ use crate::AppState;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn create_piece(
     state: State<AppState>,
@@ -18,12 +19,14 @@ pub fn create_piece(
     db.create_piece(&project_id, parent_id.as_deref(), &name, position_x, position_y)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn get_piece(state: State<AppState>, id: String) -> Result<Piece, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.get_piece(&id)
 }
 
+#[tracing::instrument(skip(state, app_handle, updates), fields(piece_id = %id))]
 #[tauri::command]
 pub fn update_piece(
     state: State<AppState>,
@@ -47,18 +50,21 @@ pub fn update_piece(
     db.update_piece(&id, &updates)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn delete_piece(state: State<AppState>, id: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_piece(&id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn list_pieces(state: State<AppState>, project_id: String) -> Result<Vec<Piece>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_pieces(&project_id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn list_children(state: State<AppState>, piece_id: String) -> Result<Vec<Piece>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;

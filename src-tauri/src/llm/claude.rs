@@ -4,6 +4,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tracing::{debug, trace, error};
 
 pub struct ClaudeProvider;
 
@@ -14,6 +15,8 @@ impl LlmProvider for ClaudeProvider {
     async fn chat(&self, messages: &[Message], config: &LlmConfig) -> Result<LlmResponse, String> {
         let client = Client::new();
         let (system, user_msgs) = split_system(messages);
+            debug!(model = %config.model, msg_count = messages.len(), max_tokens = config.max_tokens, "Claude API chat call");
+            trace!(system_prompt = ?system, user_messages = ?user_msgs.len(), "Claude chat request messages");
 
         let mut body = json!({
             "model": config.model,
@@ -40,6 +43,7 @@ impl LlmProvider for ClaudeProvider {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
+            error!(status = %status, body = %text, "Claude API error");
             return Err(format!("Claude API error ({status}): {text}"));
         }
 
@@ -50,6 +54,9 @@ impl LlmProvider for ClaudeProvider {
             .to_string();
         let input_tokens = data["usage"]["input_tokens"].as_u64().unwrap_or(0);
         let output_tokens = data["usage"]["output_tokens"].as_u64().unwrap_or(0);
+
+            debug!(input_tokens, output_tokens, "Claude chat complete");
+            trace!(response_content = %content, "Claude chat response");
 
         Ok(LlmResponse {
             content,
@@ -68,6 +75,8 @@ impl LlmProvider for ClaudeProvider {
     ) -> Result<TokenUsage, String> {
         let client = Client::new();
         let (system, user_msgs) = split_system(messages);
+            debug!(model = %config.model, msg_count = messages.len(), max_tokens = config.max_tokens, "Claude API streaming call");
+            trace!(system_prompt = ?system, "Claude stream request");
 
         let mut body = json!({
             "model": config.model,
@@ -94,6 +103,7 @@ impl LlmProvider for ClaudeProvider {
 
         if !resp.status().is_success() {
             let text = resp.text().await.map_err(|e| e.to_string())?;
+            error!(body = %text, "Claude streaming API error");
             return Err(format!("Claude API error: {text}"));
         }
 
@@ -135,11 +145,15 @@ impl LlmProvider for ClaudeProvider {
                                 usage.input = inp;
                             }
                         }
-                        _ => {}
+                        other => {
+                            trace!(event_type = ?other, "Claude SSE event (ignored)");
+                        }
                     }
                 }
             }
         }
+
+        debug!(input_tokens = usage.input, output_tokens = usage.output, "Claude stream complete");
 
         Ok(usage)
     }

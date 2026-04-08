@@ -7,6 +7,7 @@ use serde_json::json;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 
 /// Load a piece and its context from the database.
 fn load_piece_context(
@@ -15,6 +16,8 @@ fn load_piece_context(
 ) -> Result<(Piece, PieceContext, ProjectSettings), String> {
     let db = db.lock().map_err(|e| e.to_string())?;
     let piece = db.get_piece(piece_id)?;
+
+    debug!(piece_id, piece_name = %piece.name, project_id = %piece.project_id, "Loading piece context");
 
     let all_pieces = db.list_pieces(&piece.project_id)?;
     let connections = db.list_connections(&piece.project_id)?;
@@ -85,10 +88,13 @@ pub async fn run_piece_agent(
 ) -> Result<TokenUsage, String> {
     let (piece, context, settings) = load_piece_context(piece_id, db)?;
 
+    info!(piece_id, piece_name = %piece.name, engine = piece.agent_config.execution_engine.as_deref().or(settings.default_execution_engine.as_deref()).unwrap_or("built-in"), phase = ?piece.phase, "Starting piece agent run");
+
     let engine = piece
         .agent_config
         .execution_engine
         .as_deref()
+        .or(settings.default_execution_engine.as_deref())
         .unwrap_or("built-in");
 
     let result = match engine {
@@ -172,7 +178,9 @@ pub async fn run_piece_agent(
     if let Some(ref changed) = phase_changed {
         done_payload["phaseChanged"] = json!(changed);
     }
-    let _ = app_handle.emit("agent-output-chunk", done_payload);
+    if let Err(e) = app_handle.emit("agent-output-chunk", done_payload) {
+        warn!(error = %e, "Failed to emit agent-output-chunk event");
+    }
 
     // Fire-and-forget context summarization on success
     if success {
@@ -212,10 +220,12 @@ pub async fn run_piece_agent(
             )
             .await
             {
-                eprintln!("Warning: context summary generation failed: {e}");
+                warn!(piece_id = %piece_id_owned, error = %e, "Context summary generation failed");
             }
         });
     }
+
+    info!(piece_id, success, "Piece agent run complete");
 
     // Convert result to TokenUsage for return
     match result {
@@ -259,6 +269,8 @@ async fn run_builtin_agent(
             }
             (prov, key, mdl, url)
         };
+
+    debug!(piece_id, provider = %provider_name, model = %model, max_tokens, feedback = feedback.is_some(), "Built-in agent config resolved");
 
     if api_key.is_empty() {
         return Err(format!(
@@ -319,17 +331,21 @@ async fn run_builtin_agent(
     let usage = provider.chat_stream(&messages, &config, tx).await?;
     let _ = stream_handle.await;
 
+    debug!(piece_id, input_tokens = usage.input, output_tokens = usage.output, "Built-in agent stream complete");
+
     let output_text = full_output.lock().await.clone();
 
     {
         let db = db.lock().map_err(|e| e.to_string())?;
-        let _ = db.insert_agent_history(
+        if let Err(e) = db.insert_agent_history(
             piece_id,
             "run",
             &piece.agent_prompt,
             &output_text,
             (usage.input + usage.output) as i64,
-        );
+        ) {
+            warn!(piece_id, error = %e, "Failed to insert agent history");
+        }
     }
 
     Ok(AgentResult::Builtin { usage, output: output_text })
@@ -369,6 +385,8 @@ async fn run_external_agent(
                 .to_string()
         })?;
 
+    info!(piece_id, engine = engine_name, working_dir, timeout = piece.agent_config.timeout.unwrap_or(300), "Starting external agent run");
+
     let (system_prompt, user_prompt_base) = build_external_prompt(piece, context);
     let mut user_prompt = user_prompt_base;
 
@@ -404,11 +422,11 @@ async fn run_external_agent(
     // ── Git: pre-execution ──────────────────────────────────
     let branch_name = git_ops::slugify_branch_name(&piece.name);
     let mut git_branch: Option<String> = None;
-    let mut before_sha: Option<String> = None;
+    let mut _before_sha: Option<String> = None;
 
     // Save HEAD SHA before any changes
     match git_ops::get_head_sha(working_dir).await {
-        Ok(sha) => before_sha = Some(sha),
+        Ok(sha) => _before_sha = Some(sha),
         Err(e) => emit_git_info(app_handle, piece_id, &format!("Warning: {e}")),
     }
 
@@ -506,13 +524,15 @@ async fn run_external_agent(
 
             {
                 let db = db.lock().map_err(|e| e.to_string())?;
-                let _ = db.insert_agent_history(
+                if let Err(e) = db.insert_agent_history(
                     piece_id,
                     "external-run",
                     &user_prompt,
                     &run_result.output,
                     0,
-                );
+                ) {
+                    warn!(piece_id, error = %e, "Failed to insert external agent history");
+                }
             }
 
             Ok(AgentResult::External {
@@ -536,6 +556,8 @@ async fn generate_context_summary(
     settings: &ProjectSettings,
     app_handle: &AppHandle,
 ) -> Result<(), String> {
+    debug!(piece_id, piece_name, output_len = agent_output.len(), has_git = git_info.is_some(), "Generating context summary");
+
     if agent_output.is_empty() {
         return Ok(());
     }
@@ -598,6 +620,8 @@ async fn generate_context_summary(
     let title = format!("{piece_name} — Context Summary");
     db.upsert_artifact(piece_id, "context_summary", &title, &summary)?;
 
+    info!(piece_id, summary_len = summary.len(), "Context summary stored");
+
     Ok(())
 }
 
@@ -628,6 +652,8 @@ pub async fn run_leader_agent(
 
         (plan.id, messages, provider_name, api_key, model, base_url)
     };
+
+    info!(project_id, plan_id = %plan_id, provider = %provider_name, "Starting leader agent");
 
     if api_key.is_empty() {
         return Err(format!(
@@ -674,6 +700,8 @@ pub async fn run_leader_agent(
     // Parse the JSON output
     let (summary, tasks) = parse_plan_output(&raw_output);
 
+    debug!(plan_id = %plan_id, task_count = tasks.len(), summary_len = summary.len(), "Leader agent output parsed");
+
     // Update plan row
     let plan = {
         let db = db.lock().map_err(|e| e.to_string())?;
@@ -685,19 +713,24 @@ pub async fn run_leader_agent(
                 tasks: Some(tasks),
                 raw_output: Some(raw_output),
                 tokens_used: Some((usage.input + usage.output) as i64),
+                integration_review: None,
             },
         )?
     };
 
     // Emit done event
-    let _ = app_handle.emit(
+    if let Err(e) = app_handle.emit(
         "leader-plan-chunk",
         json!({
             "planId": plan_id,
             "chunk": "",
             "done": true,
         }),
-    );
+    ) {
+        warn!(error = %e, "Failed to emit leader-plan-chunk event");
+    }
+
+    info!(plan_id = %plan_id, version = plan.version, task_count = plan.tasks.len(), "Leader agent complete");
 
     Ok(plan)
 }
@@ -725,6 +758,7 @@ fn parse_plan_output(raw: &str) -> (String, Vec<PlanTask>) {
     let start = match cleaned.find('{') {
         Some(i) => i,
         None => {
+            warn!("Failed to parse plan JSON output");
             return (
                 "Plan generated but could not be parsed".to_string(),
                 vec![],
@@ -734,6 +768,7 @@ fn parse_plan_output(raw: &str) -> (String, Vec<PlanTask>) {
     let end = match cleaned.rfind('}') {
         Some(i) => i + 1,
         None => {
+            warn!("Failed to parse plan JSON output");
             return (
                 "Plan generated but could not be parsed".to_string(),
                 vec![],
@@ -746,6 +781,7 @@ fn parse_plan_output(raw: &str) -> (String, Vec<PlanTask>) {
     let parsed: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(_) => {
+            warn!("Failed to parse plan JSON output");
             return (
                 "Plan generated but could not be parsed".to_string(),
                 vec![],
@@ -832,6 +868,7 @@ pub fn resolve_api_key(provider_name: &str) -> String {
     if let Ok(entry) = keyring::Entry::new("project-builder-dashboard", provider_name) {
         if let Ok(key) = entry.get_password() {
             if !key.is_empty() {
+                debug!(provider = provider_name, source = "keyring", "API key resolved from keyring");
                 return key;
             }
         }
@@ -842,5 +879,9 @@ pub fn resolve_api_key(provider_name: &str) -> String {
         "openai" => "OPENAI_API_KEY",
         _ => "LLM_API_KEY",
     };
-    std::env::var(env_var).unwrap_or_default()
+    let val = std::env::var(env_var).unwrap_or_default();
+    if !val.is_empty() {
+        debug!(provider = provider_name, source = "env", "API key resolved from environment");
+    }
+    val
 }

@@ -3,6 +3,7 @@ import { useChatStore } from "../../store/useChatStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
 import { Markdown } from "../ui/Markdown";
+import { devLog } from "../../utils/devLog";
 import {
   parseActions,
   stripActionBlocks,
@@ -42,7 +43,7 @@ export function ChatPanel({
   useEffect(() => {
     if (tab === "decisions" && project) {
       import("../../api/tauriApi").then(({ listCtoDecisions }) => {
-        listCtoDecisions(project.id).then(setDecisions).catch(() => {});
+        listCtoDecisions(project.id).then(setDecisions).catch((e: unknown) => devLog("error", "Chat", "Failed to load CTO decisions", e));
       });
     }
   }, [tab, project?.id]);
@@ -50,6 +51,7 @@ export function ChatPanel({
   const send = async () => {
     const text = input.trim();
     if (!text || streaming || !project) return;
+    devLog("info", "Chat", `Sending message (${text.length} chars)`);
     addMessage("user", text);
     setInput("");
     setStreaming(true);
@@ -115,9 +117,10 @@ export function ChatPanel({
                 project.id,
                 summary,
                 JSON.stringify(actions),
-              ).catch(() => {});
+              ).catch((e: unknown) => devLog("error", "Chat", "Failed to log CTO decision", e));
             });
           }
+          devLog("info", "Chat", `CTO response complete (${streamBufferRef.current.length} chars)`);
           unlisten();
         } else {
           streamBufferRef.current += payload.chunk;
@@ -137,6 +140,7 @@ export function ChatPanel({
 
       await chatWithCto(project.id, text, conversation);
     } catch (e) {
+      devLog("error", "Chat", `CTO chat error`, e);
       setStreaming(false);
       useToastStore.getState().addToast(`CTO chat error: ${e}`);
       // Update the placeholder with error

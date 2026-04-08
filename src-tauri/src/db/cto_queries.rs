@@ -1,4 +1,5 @@
 use crate::models::CtoDecision;
+use tracing::debug;
 
 use super::Database;
 
@@ -9,6 +10,7 @@ impl Database {
         summary: &str,
         actions_json: &str,
     ) -> Result<CtoDecision, String> {
+        debug!(project_id, summary, "Logging CTO decision");
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -29,6 +31,7 @@ impl Database {
     }
 
     pub fn list_cto_decisions(&self, project_id: &str) -> Result<Vec<CtoDecision>, String> {
+        debug!(project_id, "Listing CTO decisions");
         let mut stmt = self
             .conn
             .prepare(

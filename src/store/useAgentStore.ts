@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { devLog } from "../utils/devLog";
 
 export interface AgentRunState {
   running: boolean;
@@ -35,6 +36,7 @@ interface AgentStore {
 export const useAgentStore = create<AgentStore>((set, get) => ({
   runs: {},
   startRun: (pieceId) => {
+    devLog("info", "Store:Agent", `Starting agent run for piece ${pieceId}`);
     set({
       runs: {
         ...get().runs,
@@ -46,6 +48,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const existing = get().runs[pieceId];
     const prevOutput = existing?.output ?? "";
     const iteration = (existing?.iterationCount ?? 1) + 1;
+    devLog("info", "Store:Agent", `Starting feedback run #${iteration} for piece ${pieceId}`);
     set({
       runs: {
         ...get().runs,
@@ -70,6 +73,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
   },
   completeRun: (pieceId, opts) => {
+    devLog("info", "Store:Agent", `Agent run complete for piece ${pieceId}`, {
+      exitCode: opts.exitCode,
+      tokens: opts.usage,
+      gitBranch: opts.gitBranch,
+    });
     const runs = get().runs;
     const run = runs[pieceId];
     if (!run) return;

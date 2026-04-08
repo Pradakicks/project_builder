@@ -1,5 +1,6 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use super::Database;
 
@@ -25,6 +26,7 @@ impl Database {
         output_text: &str,
         tokens_used: i64,
     ) -> Result<String, String> {
+        debug!(piece_id, action, tokens_used, "Inserting agent history");
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -51,11 +53,13 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
+        info!(piece_id, history_id = %id, action, tokens_used, "Agent history recorded");
         Ok(id)
     }
 
     /// List history entries for a piece
     pub fn list_agent_history(&self, piece_id: &str) -> Result<Vec<AgentHistoryEntry>, String> {
+        debug!(piece_id, "Listing agent history");
         let mut stmt = self
             .conn
             .prepare(

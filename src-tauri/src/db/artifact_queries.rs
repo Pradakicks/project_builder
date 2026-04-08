@@ -1,4 +1,5 @@
 use rusqlite::params;
+use tracing::{debug, info};
 
 use super::Database;
 use crate::models::Artifact;
@@ -13,6 +14,7 @@ impl Database {
         title: &str,
         content: &str,
     ) -> Result<Artifact, String> {
+        debug!(piece_id, artifact_type, title, "Upserting artifact");
         let now = chrono::Utc::now().to_rfc3339();
 
         // Check if one already exists
@@ -32,6 +34,7 @@ impl Database {
                     params![title, content, version + 1, now, existing_id],
                 )
                 .map_err(|e| e.to_string())?;
+            info!(piece_id, artifact_type, artifact_id = %existing_id, "Artifact upserted");
             existing_id
         } else {
             let new_id = uuid::Uuid::new_v4().to_string();
@@ -41,6 +44,7 @@ impl Database {
                     params![new_id, piece_id, artifact_type, title, content, now, now],
                 )
                 .map_err(|e| e.to_string())?;
+            info!(piece_id, artifact_type, artifact_id = %new_id, "Artifact upserted");
             new_id
         };
 

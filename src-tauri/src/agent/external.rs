@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tracing::{debug, info, warn, error, trace};
 
 /// Result of an external tool run.
 pub struct ExternalRunResult {
@@ -22,6 +23,7 @@ pub struct ExternalRunConfig {
 
 /// Build the command args for a given engine.
 fn build_command(engine: &str, config: &ExternalRunConfig) -> Result<(String, Vec<String>), String> {
+    debug!(engine, working_dir = %config.working_dir, "Building external command");
     match engine {
         "claude-code" => {
             let mut args = vec![
@@ -59,6 +61,7 @@ fn build_command(engine: &str, config: &ExternalRunConfig) -> Result<(String, Ve
 
 /// Check that a binary is available on PATH.
 async fn check_binary(program: &str) -> Result<(), String> {
+    debug!(program, "Checking binary availability");
     match Command::new("which").arg(program).output().await {
         Ok(output) if output.status.success() => Ok(()),
         _ => Err(format!(
@@ -80,6 +83,10 @@ pub async fn run_external(
     // Verify binary exists before spawning
     check_binary(&program).await?;
 
+    info!(engine, program = %program, working_dir = %config.working_dir, timeout = config.timeout_secs, "Spawning external tool");
+    debug!(arg_count = args.len(), env_vars = config.env_vars.len(), "External tool command details");
+    trace!(system_prompt_len = config.system_prompt.len(), user_prompt_len = config.user_prompt.len(), "External tool prompt sizes");
+
     let start = Instant::now();
 
     let mut cmd = Command::new(&program);
@@ -92,7 +99,10 @@ pub async fn run_external(
         cmd.env(key, val);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn {program}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        error!(program = %program, error = %e, "Failed to spawn external tool");
+        format!("Failed to spawn {program}: {e}")
+    })?;
 
     let stdout = child
         .stdout
@@ -148,16 +158,28 @@ pub async fn run_external(
                 full_output.push_str(&stderr_output);
             }
 
+            let exit_code = status.code().unwrap_or(-1);
+            if exit_code != 0 {
+                warn!(engine, exit_code, duration_secs, "External tool exited with non-zero code");
+            } else {
+                info!(engine, exit_code, duration_secs, "External tool completed successfully");
+            }
             Ok(ExternalRunResult {
-                exit_code: status.code().unwrap_or(-1),
+                exit_code,
                 output: full_output,
                 duration_secs,
             })
         }
-        Ok(Err(e)) => Err(format!("Process error: {e}")),
+        Ok(Err(e)) => {
+            error!(error = %e, "External tool process error");
+            Err(format!("Process error: {e}"))
+        }
         Err(_) => {
             // Timeout — kill the child
-            let _ = child.kill().await;
+            if let Err(e) = child.kill().await {
+                warn!(error = %e, "Failed to kill timed-out process");
+            }
+            warn!(engine, timeout_secs = config.timeout_secs, "External tool timed out");
             let stdout_output = stdout_handle.await.unwrap_or_default();
 
             // Send timeout message through the channel

@@ -1,11 +1,13 @@
 pub mod external;
 pub mod git_ops;
+pub mod merge;
 pub mod runner;
 
 use crate::db::Database;
 use crate::llm::Message;
 use crate::models::piece::Phase;
 use crate::models::Piece;
+use tracing::{debug, trace};
 
 /// Context about connected pieces for prompt building
 pub struct PieceContext {
@@ -18,6 +20,16 @@ pub struct PieceContext {
 /// Build the LLM messages from a piece's configuration
 pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message> {
     let mut messages = Vec::new();
+
+    debug!(
+        piece = %piece.name,
+        phase = ?piece.phase,
+        interfaces = piece.interfaces.len(),
+        constraints = piece.constraints.len(),
+        connected = context.connected_pieces.len(),
+        summaries = context.connected_summaries.len(),
+        "Building piece agent prompt"
+    );
 
     // Build system message from piece metadata
     let mut system_parts = Vec::new();
@@ -95,11 +107,16 @@ pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message>
         });
     }
 
+    trace!(system_prompt = %messages.iter().find(|m| m.role == "system").map(|m| m.content.as_str()).unwrap_or(""), "Piece agent system prompt");
+    trace!(user_prompt = %messages.iter().find(|m| m.role == "user").map(|m| m.content.as_str()).unwrap_or(""), "Piece agent user prompt");
+
     messages
 }
 
 /// Build a CTO system prompt from full project context
 pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
+    debug!(project_id, "Building CTO prompt");
+
     let mut system_parts = vec![
         "You are the CTO of this project. You make decisions — you don't ask permission or suggest options. When something needs to change, you change it. When the architecture needs a new component, you create it. When responsibilities need updating, you update them.\n\nBe direct and assertive. State what you're doing and why, then do it. Your changes are applied automatically.".to_string(),
     ];
@@ -192,11 +209,15 @@ Available actions (work plan):
 - {"action": "rejectPlan", "planId": "<id>"}
 - {"action": "runAllTasks", "planId": "<id>"}
   Execute all pending tasks sequentially. Only works on approved plans.
+- {"action": "mergeBranches", "planId": "<id>"}
+  Merge all piece branches back to main. Only after all tasks are complete.
 
 Rules:
 - Briefly explain what you're doing, then include the action block
 - Use piece/connection/plan/task IDs from the lists above
 - Take action whenever the conversation calls for it — don't just describe what could be done"#.to_string());
+
+    trace!(prompt_length = system_parts.join("\n\n").len(), "CTO prompt built");
 
     vec![Message {
         role: "system".to_string(),
@@ -206,6 +227,8 @@ Rules:
 
 /// Build the Leader Agent prompt with full diagram context
 pub fn build_leader_prompt(db: &Database, project_id: &str, user_guidance: &str) -> Vec<Message> {
+    debug!(project_id, guidance_len = user_guidance.len(), "Building leader prompt");
+
     let mut system_parts = vec![
         "You are the Leader Agent for this project. Your job is to analyze the full project diagram and produce a structured work plan. You have complete visibility into every piece, connection, interface, and constraint.".to_string(),
         "You must output ONLY valid JSON — no markdown fences, no explanation, no text before or after the JSON object.".to_string(),
@@ -339,6 +362,8 @@ Rules:
         content: user_content,
     });
 
+    trace!(system_length = messages[0].content.len(), "Leader prompt built");
+
     messages
 }
 
@@ -346,6 +371,7 @@ Rules:
 /// Reuses the same context as `build_agent_prompt` but returns plain strings
 /// instead of LLM Message structs.
 pub fn build_external_prompt(piece: &Piece, context: &PieceContext) -> (String, String) {
+    debug!(piece = %piece.name, "Building external prompt");
     let messages = build_agent_prompt(piece, context);
     let system = messages
         .iter()

@@ -7,7 +7,9 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
+use tracing::{info, warn};
 
+#[tracing::instrument(skip(state, app_handle))]
 #[tauri::command]
 pub async fn run_piece_agent(
     state: State<'_, AppState>,
@@ -15,6 +17,8 @@ pub async fn run_piece_agent(
     piece_id: String,
     feedback: Option<String>,
 ) -> Result<(), String> {
+    info!(piece_id = %piece_id, feedback = feedback.is_some(), "IPC: run_piece_agent");
+
     // Piece-level run lock — prevent double-runs on the same piece
     {
         let mut running = state.running_pieces.lock().map_err(|e| e.to_string())?;
@@ -36,6 +40,7 @@ pub async fn run_piece_agent(
     result.map(|_| ())
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn get_agent_history(
     state: State<'_, AppState>,
@@ -45,6 +50,7 @@ pub fn get_agent_history(
     db.list_agent_history(&piece_id)
 }
 
+#[tracing::instrument(skip(state, app_handle, conversation), fields(project_id = %project_id, msg_len = user_message.len()))]
 #[tauri::command]
 pub async fn chat_with_cto(
     state: State<'_, AppState>,
@@ -53,6 +59,8 @@ pub async fn chat_with_cto(
     user_message: String,
     conversation: Vec<Message>,
 ) -> Result<(), String> {
+    info!(project_id = %project_id, conversation_len = conversation.len(), "IPC: chat_with_cto");
+
     // Build CTO context and combine with conversation
     let (mut messages, provider_name, api_key, model, base_url) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -108,7 +116,7 @@ pub async fn chat_with_cto(
 
     let _ = stream_handle.await;
 
-    let _ = app_handle.emit(
+    if let Err(e) = app_handle.emit(
         "cto-chat-chunk",
         json!({
             "chunk": "",
@@ -118,7 +126,9 @@ pub async fn chat_with_cto(
                 "output": usage.output,
             }
         }),
-    );
+    ) {
+        warn!(error = %e, "Failed to emit cto-chat-chunk done event");
+    }
 
     Ok(())
 }
@@ -132,6 +142,7 @@ pub struct GitStatusInfo {
     pub last_commit_sha: Option<String>,
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub async fn get_git_status(
     state: State<'_, AppState>,
@@ -184,6 +195,7 @@ pub async fn get_git_status(
     }))
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn list_artifacts(
     state: State<'_, AppState>,
@@ -193,6 +205,7 @@ pub fn list_artifacts(
     db.list_artifacts(&piece_id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn log_cto_decision(
     state: State<'_, AppState>,
@@ -204,6 +217,7 @@ pub fn log_cto_decision(
     db.insert_cto_decision(&project_id, &summary, &actions_json)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn list_cto_decisions(
     state: State<'_, AppState>,

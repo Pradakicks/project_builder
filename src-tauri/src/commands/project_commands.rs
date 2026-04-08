@@ -2,18 +2,21 @@ use crate::models::{Project, ProjectFile};
 use crate::AppState;
 use tauri::State;
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn create_project(state: State<AppState>, name: String, description: String) -> Result<Project, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.create_project(&name, &description)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn get_project(state: State<AppState>, id: String) -> Result<Project, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.get_project(&id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn update_project(
     state: State<AppState>,
@@ -25,18 +28,21 @@ pub fn update_project(
     db.update_project(&id, name.as_deref(), description.as_deref(), None, None)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_projects()
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn delete_project(state: State<AppState>, id: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_project(&id)
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn save_project_to_file(state: State<AppState>, id: String, path: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -46,6 +52,7 @@ pub fn save_project_to_file(state: State<AppState>, id: String, path: String) ->
     Ok(())
 }
 
+#[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn load_project_from_file(state: State<AppState>, path: String) -> Result<Project, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
