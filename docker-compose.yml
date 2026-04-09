@@ -1,0 +1,45 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    working_dir: /workspaces/project_builder
+    user: root
+    command:
+      - /bin/sh
+      - -lc
+      - >
+        mkdir -p /workspaces/project_builder/node_modules
+        /workspaces/project_builder/src-tauri/target
+        /usr/local/cargo/registry
+        /usr/local/cargo/git &&
+        chown -R vscode:vscode
+        /workspaces/project_builder/node_modules
+        /workspaces/project_builder/src-tauri/target
+        /usr/local/cargo/registry
+        /usr/local/cargo/git &&
+        exec sleep infinity
+    volumes:
+      - .:/workspaces/project_builder
+      - project-builder-node-modules:/workspaces/project_builder/node_modules
+      - project-builder-cargo-registry:/usr/local/cargo/registry
+      - project-builder-cargo-git:/usr/local/cargo/git
+      - project-builder-target:/workspaces/project_builder/src-tauri/target
+    ports:
+      - "5174:5174"
+      - "1421:1421"
+    environment:
+      CARGO_TARGET_DIR: /workspaces/project_builder/src-tauri/target
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+      TAURI_DEV_HOST: 0.0.0.0
+      DISPLAY: ${DISPLAY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+
+volumes:
+  project-builder-node-modules:
+  project-builder-cargo-registry:
+  project-builder-cargo-git:
+  project-builder-target:

@@ -1,0 +1,30 @@
+{
+  "name": "project-builder",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/project_builder",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "vscode",
+  "features": {},
+  "forwardPorts": [5174, 1421],
+  "postCreateCommand": "npm install && cd src-tauri && cargo fetch",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "files.watcherExclude": {
+          "**/src-tauri/target/**": true,
+          "**/node_modules/**": true
+        },
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  }
+}

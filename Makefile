@@ -4,7 +4,7 @@
 SHELL := /bin/zsh
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: dev build check clean setup icons
+.PHONY: dev build check clean setup icons container-up container-shell container-frontend check-container host-tauri-dev
 
 # ── Primary commands ──────────────────────────────────────
 
@@ -61,6 +61,28 @@ build-rust:
 ## Run clippy lints
 lint-rust:
 	cd src-tauri && cargo clippy -- -W clippy::all
+
+# ── Container workflow ───────────────────────────────────
+
+## Build and start the dev container in the background
+container-up:
+	docker compose up -d --build
+
+## Open a shell in the running dev container
+container-shell:
+	docker compose exec -u vscode dev zsh
+
+## Run the Vite frontend inside the dev container
+container-frontend:
+	docker compose exec -u vscode dev zsh -lc "npm install && npm run dev -- --host 0.0.0.0"
+
+## Run repo checks inside the dev container
+check-container:
+	docker compose run --rm -u vscode dev zsh -lc "npm install && make check"
+
+## Run the native Tauri shell on the host against the container frontend
+host-tauri-dev:
+	./scripts/tauri-host-dev.sh
 
 # ── Help ──────────────────────────────────────────────────
 
