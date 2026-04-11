@@ -6,11 +6,24 @@ import { useProjectStore } from "../../store/useProjectStore";
 import { useDialogStore } from "../../store/useDialogStore";
 import { useToastStore } from "../../store/useToastStore";
 
+function slugifyProjectName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createName, setCreateName] = useState("New Project");
+  const [createDescription, setCreateDescription] = useState("");
+  const [parentDirectory, setParentDirectory] = useState("");
+  const [creating, setCreating] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const openProject = useAppStore((s) => s.openProject);
   const goToSettings = useAppStore((s) => s.goToSettings);
@@ -37,14 +50,44 @@ export function ProjectsPage() {
     if (editingId) inputRef.current?.focus();
   }, [editingId]);
 
+  const resetCreateForm = () => {
+    setCreateName("New Project");
+    setCreateDescription("");
+    setParentDirectory("");
+    setCreating(false);
+  };
+
+  const openCreateModal = () => {
+    resetCreateForm();
+    setCreateOpen(true);
+  };
+
+  const closeCreateModal = () => {
+    if (creating) return;
+    setCreateOpen(false);
+  };
+
   const handleCreate = async () => {
+    const trimmedName = createName.trim();
+    const trimmedDescription = createDescription.trim();
+    const trimmedParent = parentDirectory.trim();
+    if (!trimmedName || !trimmedParent) return;
+
+    setCreating(true);
     try {
-      const project = await api.createProject("New Project", "");
+      const project = await api.createProject(
+        trimmedName,
+        trimmedDescription,
+        trimmedParent,
+      );
       setProjects((prev) => [project, ...prev]);
+      setCreateOpen(false);
+      resetCreateForm();
       await loadProject(project.id);
       openProject(project.id);
     } catch (e) {
       addToast(`Failed to create project: ${e}`);
+      setCreating(false);
     }
   };
 
@@ -96,8 +139,14 @@ export function ProjectsPage() {
     }
   };
 
+  const folderName = slugifyProjectName(createName);
+  const previewPath =
+    parentDirectory.trim() && folderName
+      ? `${parentDirectory.replace(/\/+$/, "")}/${folderName}`
+      : "";
+
   return (
-    <div className="flex h-full flex-col bg-gray-950 text-gray-100">
+    <div className="relative flex h-full flex-col bg-gray-950 text-gray-100">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-gray-800 bg-gray-900 px-6 py-3">
         <h1 className="text-lg font-semibold">Projects</h1>
@@ -109,7 +158,7 @@ export function ProjectsPage() {
             Settings
           </button>
           <button
-            onClick={handleCreate}
+            onClick={openCreateModal}
             className="rounded bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
           >
             + New Project
@@ -128,7 +177,7 @@ export function ProjectsPage() {
           <div className="text-center mt-20">
             <p className="text-gray-500 mb-4">No projects yet</p>
             <button
-              onClick={handleCreate}
+              onClick={openCreateModal}
               className="rounded bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
             >
               Create your first project
@@ -199,6 +248,109 @@ export function ProjectsPage() {
           </div>
         )}
       </div>
+
+      {createOpen && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-xl rounded-xl border border-gray-800 bg-gray-900 shadow-2xl">
+            <div className="border-b border-gray-800 px-5 py-4">
+              <h2 className="text-base font-semibold text-gray-100">
+                Create Project
+              </h2>
+              <p className="mt-1 text-xs text-gray-500">
+                A new folder and git repository will be created for this
+                project. You can change the working directory later in
+                Settings.
+              </p>
+            </div>
+
+            <div className="space-y-4 px-5 py-4">
+              <div>
+                <label className="mb-1 block text-sm text-gray-400">
+                  Project Name
+                </label>
+                <input
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  placeholder="Simple Web App"
+                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm text-gray-400">
+                  Description
+                </label>
+                <textarea
+                  value={createDescription}
+                  onChange={(e) => setCreateDescription(e.target.value)}
+                  rows={3}
+                  placeholder="Optional project description"
+                  className="w-full resize-none rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm text-gray-400">
+                  Parent Folder
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    value={parentDirectory}
+                    onChange={(e) => setParentDirectory(e.target.value)}
+                    placeholder="/Users/adrianth/Projects"
+                    className="flex-1 rounded border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={async () => {
+                      try {
+                        const { open } = await import("@tauri-apps/plugin-dialog");
+                        const selected = await open({
+                          directory: true,
+                          multiple: false,
+                        });
+                        if (selected && typeof selected === "string") {
+                          setParentDirectory(selected);
+                        }
+                      } catch (e) {
+                        addToast(`Browse failed: ${e}`);
+                      }
+                    }}
+                    className="rounded border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
+                  >
+                    Browse
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded border border-gray-800 bg-gray-950/70 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">
+                  Working Directory Preview
+                </p>
+                <p className="mt-1 font-mono text-xs text-gray-300">
+                  {previewPath || "Choose a parent folder and project name"}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-5 py-4">
+              <button
+                onClick={closeCreateModal}
+                disabled={creating}
+                className="rounded border border-gray-700 px-4 py-2 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreate}
+                disabled={creating || !createName.trim() || !parentDirectory.trim() || !folderName}
+                className="rounded bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {creating ? "Creating..." : "Create Project"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,10 +1,43 @@
 import { useProjectStore } from "../store/useProjectStore";
 import { useLeaderStore } from "../store/useLeaderStore";
 import { devLog } from "./devLog";
+import * as api from "../api/tauriApi";
 
 export interface CtoAction {
   action: string;
   [key: string]: unknown;
+}
+
+async function resolvePieceReference(
+  projectId: string,
+  reference: unknown,
+  createdPieceRefs: Map<string, string>,
+): Promise<string> {
+  const value = String(reference ?? "").trim();
+  if (!value) {
+    throw new Error("Missing piece reference");
+  }
+
+  const createdId = createdPieceRefs.get(value);
+  if (createdId) {
+    return createdId;
+  }
+
+  const pieces = await api.listPieces(projectId);
+  if (pieces.some((piece) => piece.id === value)) {
+    return value;
+  }
+
+  const exactNameMatches = pieces.filter((piece) => piece.name === value);
+  if (exactNameMatches.length === 1) {
+    return exactNameMatches[0].id;
+  }
+
+  if (exactNameMatches.length > 1) {
+    throw new Error(`Ambiguous piece reference: ${value}`);
+  }
+
+  throw new Error(`Piece reference not found: ${value}`);
 }
 
 /** Extract action blocks from CTO markdown response */
@@ -66,10 +99,10 @@ export async function executeActions(
   actions: CtoAction[],
   projectId: string,
 ): Promise<{ executed: number; errors: string[]; switchToTab?: string }> {
-  const store = useProjectStore.getState();
   let executed = 0;
   const errors: string[] = [];
   let switchToTab: string | undefined;
+  const createdPieceRefs = new Map<string, string>();
 
   devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map(a => a.action));
   for (const action of actions) {
@@ -77,32 +110,48 @@ export async function executeActions(
       switch (action.action) {
         case "updatePiece": {
           const updates = action.updates as Record<string, unknown>;
-          await store.updatePiece(action.pieceId as string, updates);
+          await useProjectStore
+            .getState()
+            .updatePiece(action.pieceId as string, updates);
           executed++;
           break;
         }
         case "createPiece": {
           const randomX = 200 + Math.random() * 400;
           const randomY = 150 + Math.random() * 300;
-          const piece = await store.addPiece(
+          const piece = await useProjectStore.getState().addPiece(
             (action.name as string) || "New Component",
             randomX,
             randomY,
           );
+          if (typeof action.ref === "string" && action.ref.trim()) {
+            createdPieceRefs.set(action.ref.trim(), piece.id);
+          }
           // Apply additional fields
           const extraUpdates: Record<string, unknown> = {};
           if (action.pieceType) extraUpdates.pieceType = action.pieceType;
           if (action.responsibilities) extraUpdates.responsibilities = action.responsibilities;
           if (Object.keys(extraUpdates).length > 0) {
-            await store.updatePiece(piece.id, extraUpdates);
+            await useProjectStore.getState().updatePiece(piece.id, extraUpdates);
           }
           executed++;
           break;
         }
         case "createConnection": {
-          await store.addConnection(
-            action.sourcePieceId as string,
-            action.targetPieceId as string,
+          const sourcePieceId = await resolvePieceReference(
+            projectId,
+            action.sourceRef ?? action.sourcePieceId,
+            createdPieceRefs,
+          );
+          const targetPieceId = await resolvePieceReference(
+            projectId,
+            action.targetRef ?? action.targetPieceId,
+            createdPieceRefs,
+          );
+
+          await useProjectStore.getState().addConnection(
+            sourcePieceId,
+            targetPieceId,
             (action.label as string) || "",
           );
           executed++;
@@ -110,7 +159,9 @@ export async function executeActions(
         }
         case "updateConnection": {
           const updates = action.updates as Record<string, unknown>;
-          await store.updateConnection(action.connectionId as string, updates);
+          await useProjectStore
+            .getState()
+            .updateConnection(action.connectionId as string, updates);
           executed++;
           break;
         }

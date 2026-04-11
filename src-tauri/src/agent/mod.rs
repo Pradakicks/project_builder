@@ -197,8 +197,11 @@ Wrap each action in a fenced code block with the language tag "action".
 Available actions (diagram):
 - {"action": "updatePiece", "pieceId": "<id>", "updates": {...}}
   Fields: name, pieceType, phase (design|review|approved|implementing), responsibilities, notes
-- {"action": "createPiece", "name": "...", "pieceType": "...", "responsibilities": "..."}
-- {"action": "createConnection", "sourcePieceId": "<id>", "targetPieceId": "<id>", "label": "..."}
+- {"action": "createPiece", "ref": "frontend", "name": "...", "pieceType": "...", "responsibilities": "..."}
+- {"action": "createConnection", "sourceRef": "frontend", "targetRef": "api", "label": "..."}
+  Use sourceRef/targetRef for pieces created earlier in the same response.
+- {"action": "createConnection", "sourcePieceId": "<existing id>", "targetPieceId": "<existing id>", "label": "..."}
+  Use existing piece IDs only for pieces already listed above.
 - {"action": "updateConnection", "connectionId": "<id>", "updates": {...}}
   Fields: label, notes
 
@@ -214,7 +217,8 @@ Available actions (work plan):
 
 Rules:
 - Briefly explain what you're doing, then include the action block
-- Use piece/connection/plan/task IDs from the lists above
+- When you create multiple pieces and then connect them in the same response, give each new piece a unique ref and connect them with sourceRef/targetRef. Do not invent UUIDs.
+- Use piece/connection/plan/task IDs from the lists above only for entities that already exist
 - Take action whenever the conversation calls for it — don't just describe what could be done"#.to_string());
 
     trace!(prompt_length = system_parts.join("\n\n").len(), "CTO prompt built");

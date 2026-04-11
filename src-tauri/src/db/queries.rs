@@ -17,9 +17,17 @@ impl Database {
     // ── Projects ──────────────────────────────────────────────
 
     pub fn create_project(&self, name: &str, description: &str) -> Result<Project, String> {
+        self.create_project_with_settings(name, description, ProjectSettings::default())
+    }
+
+    pub fn create_project_with_settings(
+        &self,
+        name: &str,
+        description: &str,
+        settings: ProjectSettings,
+    ) -> Result<Project, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
-        let settings = ProjectSettings::default();
         let settings_json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
 
         self.conn
@@ -294,6 +302,13 @@ impl Database {
 
     pub fn create_connection(&self, project_id: &str, source_piece_id: &str, target_piece_id: &str, label: &str) -> Result<Connection, String> {
         debug!(project_id, source = source_piece_id, target = target_piece_id, label, "Creating connection");
+        let source_piece = self.get_piece(source_piece_id).map_err(|_| "Source piece not found".to_string())?;
+        let target_piece = self.get_piece(target_piece_id).map_err(|_| "Target piece not found".to_string())?;
+
+        if source_piece.project_id != project_id || target_piece.project_id != project_id {
+            return Err("Pieces must belong to the current project".to_string());
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
 
         self.conn

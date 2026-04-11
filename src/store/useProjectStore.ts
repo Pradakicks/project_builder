@@ -24,7 +24,11 @@ interface ProjectStore {
 
   // Project actions
   loadProject: (id: string) => Promise<void>;
-  createProject: (name: string, description: string) => Promise<Project>;
+  createProject: (
+    name: string,
+    description: string,
+    parentDirectory?: string | null,
+  ) => Promise<Project>;
   updateProject: (name?: string, description?: string) => Promise<void>;
 
   // Piece actions
@@ -78,10 +82,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
   },
 
-  createProject: async (name: string, description: string) => {
+  createProject: async (
+    name: string,
+    description: string,
+    parentDirectory?: string | null,
+  ) => {
     devLog("info", "Store:Project", `Creating project "${name}"`);
     try {
-      const project = await api.createProject(name, description);
+      const project = await api.createProject(
+        name,
+        description,
+        parentDirectory,
+      );
       set({
         project,
         pieces: [],

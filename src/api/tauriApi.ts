@@ -46,8 +46,13 @@ async function loggedInvoke<T>(
 export async function createProject(
   name: string,
   description: string,
+  parentDirectory?: string | null,
 ): Promise<Project> {
-  return loggedInvoke("create_project", { name, description });
+  return loggedInvoke("create_project", {
+    name,
+    description,
+    parentDirectory: parentDirectory ?? null,
+  });
 }
 
 export async function getProject(id: string): Promise<Project> {
