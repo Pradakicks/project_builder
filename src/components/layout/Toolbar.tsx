@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
+import { useLeaderStore } from "../../store/useLeaderStore";
 import { useAppStore } from "../../store/useAppStore";
 import { useToastStore } from "../../store/useToastStore";
 
 export function Toolbar() {
-  const { project, addPiece, updateProject, saveToFile, loadFromFile } =
+  const { project, addPiece, updateProject, saveToFile, loadFromFile, reset } =
     useProjectStore();
   const goToProjects = useAppStore((s) => s.goToProjects);
+  const openProject = useAppStore((s) => s.openProject);
   const goToSettings = useAppStore((s) => s.goToSettings);
   const addToast = useToastStore((s) => s.addToast);
   const [editing, setEditing] = useState(false);
@@ -62,7 +64,8 @@ export function Toolbar() {
         directory: false,
       });
       if (path) {
-        await loadFromFile(path as string);
+        const importedProject = await loadFromFile(path as string);
+        openProject(importedProject.id);
         addToast("Project loaded", "info");
       }
     } catch (e) {
@@ -70,10 +73,16 @@ export function Toolbar() {
     }
   };
 
+  const handleBackToProjects = () => {
+    reset();
+    useLeaderStore.getState().reset();
+    goToProjects();
+  };
+
   return (
     <div className="flex items-center gap-3 border-b border-gray-800 bg-gray-900 px-4 py-2">
       <button
-        onClick={goToProjects}
+        onClick={handleBackToProjects}
         className="rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
         title="Back to projects"
       >

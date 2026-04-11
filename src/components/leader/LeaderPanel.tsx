@@ -46,6 +46,7 @@ export function LeaderPanel({
 
   // Load plans when project changes
   useEffect(() => {
+    useLeaderStore.getState().reset();
     if (project) {
       loadPlans(project.id);
     }
@@ -56,7 +57,7 @@ export function LeaderPanel({
     let unlistenFn: (() => void) | null = null;
 
     onLeaderPlanChunk((payload) => {
-      if (!payload.done) {
+      if (!payload.done && payload.projectId === useLeaderStore.getState().projectId) {
         appendChunk(payload.chunk);
       }
     }).then((fn) => {

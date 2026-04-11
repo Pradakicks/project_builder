@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../../store/useChatStore";
+import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
 import { Markdown } from "../ui/Markdown";
@@ -25,139 +26,148 @@ export function ChatPanel({
   embedded?: boolean;
   onSwitchTab?: (tab: string) => void;
 }) {
-  const { messages, addMessage } = useChatStore();
   const project = useProjectStore((s) => s.project);
+  const projectId = project?.id ?? null;
+  const thread = useChatStore((s) =>
+    projectId ? s.threads[projectId] : undefined,
+  );
   const [input, setInput] = useState("");
-  const [streaming, setStreaming] = useState(false);
   const [tab, setTab] = useState<Tab>("chat");
   const [decisions, setDecisions] = useState<CtoDecision[]>([]);
   const [expandedDecision, setExpandedDecision] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const streamBufferRef = useRef("");
+  const messages = thread?.messages ?? [];
+  const streaming = thread?.streaming ?? false;
 
   useEffect(() => {
     listRef.current?.scrollTo(0, listRef.current.scrollHeight);
   }, [messages.length, streaming]);
 
+  useEffect(() => {
+    setInput("");
+    setDecisions([]);
+    setExpandedDecision(null);
+  }, [projectId]);
+
   // Load decisions when switching to decisions tab
   useEffect(() => {
+    let cancelled = false;
     if (tab === "decisions" && project) {
       import("../../api/tauriApi").then(({ listCtoDecisions }) => {
-        listCtoDecisions(project.id).then(setDecisions).catch((e: unknown) => devLog("error", "Chat", "Failed to load CTO decisions", e));
+        listCtoDecisions(project.id)
+          .then((items) => {
+            if (!cancelled) setDecisions(items);
+          })
+          .catch((e: unknown) => devLog("error", "Chat", "Failed to load CTO decisions", e));
       });
+    } else {
+      setDecisions([]);
     }
+    return () => {
+      cancelled = true;
+    };
   }, [tab, project?.id]);
 
   const send = async () => {
     const text = input.trim();
     if (!text || streaming || !project) return;
     devLog("info", "Chat", `Sending message (${text.length} chars)`);
-    addMessage("user", text);
+    const conversation = messages
+      .filter((m) => m.content)
+      .map((m) => ({
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content,
+      }));
+    const requestId = crypto.randomUUID();
+    useChatStore.getState().startRequest(project.id, text, requestId);
     setInput("");
-    setStreaming(true);
-    streamBufferRef.current = "";
 
-    // Add a placeholder agent message
-    addMessage("agent", "");
+    const originProjectId = project.id;
+    const originProjectName = project.name;
+    let streamBuffer = "";
 
     try {
       const { chatWithCto, onCtoChatChunk, logCtoDecision } = await import(
         "../../api/tauriApi"
       );
 
-      // Build conversation history (exclude the empty placeholder)
-      const conversation = messages
-        .filter((m) => m.content)
-        .map((m) => ({
-          role: m.role === "user" ? "user" : "assistant",
-          content: m.content,
-        }));
-
       const unlisten = await onCtoChatChunk((payload) => {
-        if (payload.done) {
-          setStreaming(false);
-          // Parse and auto-execute actions
-          const actions = parseActions(streamBufferRef.current);
-          if (actions.length > 0) {
-            // Strip action blocks from displayed message
-            const cleaned = stripActionBlocks(streamBufferRef.current);
-            const store = useChatStore.getState();
-            const msgs = [...store.messages];
-            const lastIdx = msgs.length - 1;
-            if (lastIdx >= 0 && msgs[lastIdx].role === "agent") {
-              msgs[lastIdx] = { ...msgs[lastIdx], content: cleaned };
-              useChatStore.setState({ messages: msgs });
-            }
+        if (
+          payload.projectId !== originProjectId ||
+          payload.requestId !== requestId
+        ) {
+          return;
+        }
 
-            // Auto-execute immediately
-            executeActions(actions, project.id).then(async (result) => {
+        if (payload.done) {
+          // Parse and auto-execute actions
+          const actions = parseActions(streamBuffer);
+          const cleaned = actions.length > 0
+            ? stripActionBlocks(streamBuffer)
+            : streamBuffer;
+          useChatStore
+            .getState()
+            .finalizeRequest(originProjectId, requestId, cleaned);
+
+          if (actions.length > 0) {
+            executeActions(actions, originProjectId).then(async (result) => {
               const addToast = useToastStore.getState().addToast;
+              const isOriginProjectActive =
+                useAppStore.getState().activeProjectId === originProjectId &&
+                useProjectStore.getState().project?.id === originProjectId;
+
               if (result.executed > 0) {
                 addToast(
-                  `CTO applied ${result.executed} change${result.executed > 1 ? "s" : ""}`,
+                  isOriginProjectActive
+                    ? `CTO applied ${result.executed} change${result.executed > 1 ? "s" : ""}`
+                    : `CTO applied ${result.executed} change${result.executed > 1 ? "s" : ""} to "${originProjectName}"`,
                   "info",
                 );
               }
               for (const err of result.errors) {
-                addToast(err);
+                addToast(
+                  isOriginProjectActive ? err : `${originProjectName}: ${err}`,
+                );
               }
-              // Reload project to reflect changes
-              await useProjectStore.getState().loadProject(project.id);
+              if (isOriginProjectActive && result.reloadCurrentProject) {
+                await useProjectStore.getState().loadProject(originProjectId);
+              }
 
-              // Switch to plan tab if a plan action was executed
-              if (result.switchToTab) {
+              if (isOriginProjectActive && result.switchToTab) {
                 onSwitchTab?.(result.switchToTab);
               }
 
-              // Log decision to DB
               const summary =
                 cleaned.slice(0, 500) ||
                 actions.map((a) => describeAction(a)).join("; ");
               logCtoDecision(
-                project.id,
+                originProjectId,
                 summary,
                 JSON.stringify(actions),
               ).catch((e: unknown) => devLog("error", "Chat", "Failed to log CTO decision", e));
             });
           }
-          devLog("info", "Chat", `CTO response complete (${streamBufferRef.current.length} chars)`);
+          devLog("info", "Chat", `CTO response complete (${streamBuffer.length} chars)`);
           unlisten();
         } else {
-          streamBufferRef.current += payload.chunk;
-          // Update the last agent message
-          const store = useChatStore.getState();
-          const msgs = [...store.messages];
-          const lastIdx = msgs.length - 1;
-          if (lastIdx >= 0 && msgs[lastIdx].role === "agent") {
-            msgs[lastIdx] = {
-              ...msgs[lastIdx],
-              content: streamBufferRef.current,
-            };
-            useChatStore.setState({ messages: msgs });
-          }
+          streamBuffer += payload.chunk;
+          useChatStore
+            .getState()
+            .appendChunk(originProjectId, requestId, payload.chunk);
         }
       });
 
-      await chatWithCto(project.id, text, conversation);
+      await chatWithCto(originProjectId, text, conversation, requestId);
     } catch (e) {
       devLog("error", "Chat", `CTO chat error`, e);
-      setStreaming(false);
-      useToastStore.getState().addToast(`CTO chat error: ${e}`);
-      // Update the placeholder with error
-      const store = useChatStore.getState();
-      const msgs = [...store.messages];
-      const lastIdx = msgs.length - 1;
-      if (
-        lastIdx >= 0 &&
-        msgs[lastIdx].role === "agent" &&
-        !msgs[lastIdx].content
-      ) {
-        msgs[lastIdx] = {
-          ...msgs[lastIdx],
-          content: "(Failed to connect to LLM)",
-        };
-        useChatStore.setState({ messages: msgs });
-      }
+      useChatStore
+        .getState()
+        .failRequest(originProjectId, requestId, "(Failed to connect to LLM)");
+      useToastStore.getState().addToast(
+        useAppStore.getState().activeProjectId === originProjectId
+          ? `CTO chat error: ${e}`
+          : `CTO chat error for "${originProjectName}": ${e}`,
+      );
     }
   };
 

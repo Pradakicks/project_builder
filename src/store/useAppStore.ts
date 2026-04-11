@@ -25,7 +25,7 @@ export const useAppStore = create<AppStore>((set) => ({
   },
   goToProjects: () => {
     devLog("debug", "Store:App", "Navigating to projects");
-    set({ view: "projects" });
+    set({ view: "projects", activeProjectId: null });
   },
   goToSettings: () => {
     devLog("debug", "Store:App", "Navigating to settings");

@@ -221,8 +221,14 @@ export async function chatWithCto(
   projectId: string,
   userMessage: string,
   conversation: LlmMessage[],
+  requestId: string,
 ): Promise<void> {
-  return loggedInvoke("chat_with_cto", { projectId, userMessage, conversation });
+  return loggedInvoke("chat_with_cto", {
+    projectId,
+    userMessage,
+    conversation,
+    requestId,
+  });
 }
 
 // ── Event Listeners ───────────────────────────────────────
@@ -303,6 +309,8 @@ export async function listCtoDecisions(
 }
 
 export interface CtoChatChunk {
+  projectId: string;
+  requestId: string;
   chunk: string;
   done: boolean;
   usage?: { input: number; output: number };
@@ -348,7 +356,12 @@ export async function updatePlanTaskStatus(
   return loggedInvoke("update_plan_task_status", { planId, taskId, status });
 }
 
+export async function runAllPlanTasks(planId: string): Promise<void> {
+  return loggedInvoke("run_all_plan_tasks", { planId });
+}
+
 export interface LeaderPlanChunk {
+  projectId: string;
   planId: string;
   chunk: string;
   done: boolean;

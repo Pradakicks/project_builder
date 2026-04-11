@@ -3,6 +3,7 @@ import * as api from "../../api/tauriApi";
 import type { Project } from "../../types";
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
+import { useLeaderStore } from "../../store/useLeaderStore";
 import { useDialogStore } from "../../store/useDialogStore";
 import { useToastStore } from "../../store/useToastStore";
 
@@ -28,6 +29,7 @@ export function ProjectsPage() {
   const openProject = useAppStore((s) => s.openProject);
   const goToSettings = useAppStore((s) => s.goToSettings);
   const loadProject = useProjectStore((s) => s.loadProject);
+  const resetProject = useProjectStore((s) => s.reset);
   const showConfirm = useDialogStore((s) => s.showConfirm);
   const addToast = useToastStore((s) => s.addToast);
 
@@ -43,8 +45,10 @@ export function ProjectsPage() {
   };
 
   useEffect(() => {
+    resetProject();
+    useLeaderStore.getState().reset();
     fetchProjects();
-  }, []);
+  }, [resetProject]);
 
   useEffect(() => {
     if (editingId) inputRef.current?.focus();

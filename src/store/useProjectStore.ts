@@ -49,10 +49,11 @@ interface ProjectStore {
 
   // File I/O
   saveToFile: (path: string) => Promise<void>;
-  loadFromFile: (path: string) => Promise<void>;
+  loadFromFile: (path: string) => Promise<Project>;
+  reset: () => void;
 }
 
-export const useProjectStore = create<ProjectStore>((set, get) => ({
+const emptyProjectState = {
   project: null,
   pieces: [],
   connections: [],
@@ -60,13 +61,28 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   selectedConnectionId: null,
   currentParentId: null,
   breadcrumbs: [],
+};
+
+let projectLoadRequestId = 0;
+
+export const useProjectStore = create<ProjectStore>((set, get) => ({
+  ...emptyProjectState,
 
   loadProject: async (id: string) => {
     devLog("info", "Store:Project", `Loading project ${id}`);
+    const requestId = ++projectLoadRequestId;
+    set({
+      ...emptyProjectState,
+      project: get().project?.id === id ? get().project : null,
+    });
     try {
       const project = await api.getProject(id);
       const pieces = await api.listPieces(id);
       const connections = await api.listConnections(id);
+      if (requestId !== projectLoadRequestId) {
+        devLog("debug", "Store:Project", `Discarding stale load for project ${id}`);
+        return;
+      }
       const topLevelPieces = pieces.filter((p) => p.parentId === null);
       set({
         project,
@@ -77,6 +93,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
       devLog("info", "Store:Project", `Loaded project "${project.name}" — ${pieces.length} pieces, ${connections.length} connections`);
     } catch (e) {
+      if (requestId !== projectLoadRequestId) return;
       devLog("error", "Store:Project", `Failed to load project ${id}`, e);
       toast(`Failed to load project: ${e}`);
     }
@@ -95,10 +112,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         parentDirectory,
       );
       set({
+        ...emptyProjectState,
         project,
-        pieces: [],
-        connections: [],
-        currentParentId: null,
         breadcrumbs: [{ id: project.id, name: project.name }],
       });
       devLog("info", "Store:Project", `Created project "${name}" (${project.id})`);
@@ -293,10 +308,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   loadFromFile: async (path: string) => {
+    const requestId = ++projectLoadRequestId;
+    set(emptyProjectState);
     try {
       const project = await api.loadProjectFromFile(path);
       const pieces = await api.listPieces(project.id);
       const connections = await api.listConnections(project.id);
+      if (requestId !== projectLoadRequestId) {
+        devLog("debug", "Store:Project", `Discarding stale imported project ${project.id}`);
+        return project;
+      }
       const topLevelPieces = pieces.filter((p) => p.parentId === null);
       set({
         project,
@@ -305,8 +326,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         currentParentId: null,
         breadcrumbs: [{ id: project.id, name: project.name }],
       });
+      return project;
     } catch (e) {
       toast(`Failed to load file: ${e}`);
+      throw e;
     }
+  },
+
+  reset: () => {
+    projectLoadRequestId++;
+    devLog("debug", "Store:Project", "Resetting active project state");
+    set(emptyProjectState);
   },
 }));

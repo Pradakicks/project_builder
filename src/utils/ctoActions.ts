@@ -1,5 +1,6 @@
 import { useProjectStore } from "../store/useProjectStore";
 import { useLeaderStore } from "../store/useLeaderStore";
+import { useAppStore } from "../store/useAppStore";
 import { devLog } from "./devLog";
 import * as api from "../api/tauriApi";
 
@@ -98,11 +99,20 @@ export function describeAction(action: CtoAction): string {
 export async function executeActions(
   actions: CtoAction[],
   projectId: string,
-): Promise<{ executed: number; errors: string[]; switchToTab?: string }> {
+): Promise<{
+  executed: number;
+  errors: string[];
+  switchToTab?: string;
+  reloadCurrentProject: boolean;
+}> {
   let executed = 0;
   const errors: string[] = [];
   let switchToTab: string | undefined;
+  let reloadCurrentProject = false;
   const createdPieceRefs = new Map<string, string>();
+  const isActiveProject =
+    useAppStore.getState().activeProjectId === projectId &&
+    useProjectStore.getState().project?.id === projectId;
 
   devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map(a => a.action));
   for (const action of actions) {
@@ -110,16 +120,17 @@ export async function executeActions(
       switch (action.action) {
         case "updatePiece": {
           const updates = action.updates as Record<string, unknown>;
-          await useProjectStore
-            .getState()
-            .updatePiece(action.pieceId as string, updates);
+          await api.updatePiece(action.pieceId as string, updates);
           executed++;
+          reloadCurrentProject = true;
           break;
         }
         case "createPiece": {
           const randomX = 200 + Math.random() * 400;
           const randomY = 150 + Math.random() * 300;
-          const piece = await useProjectStore.getState().addPiece(
+          const piece = await api.createPiece(
+            projectId,
+            null,
             (action.name as string) || "New Component",
             randomX,
             randomY,
@@ -132,9 +143,10 @@ export async function executeActions(
           if (action.pieceType) extraUpdates.pieceType = action.pieceType;
           if (action.responsibilities) extraUpdates.responsibilities = action.responsibilities;
           if (Object.keys(extraUpdates).length > 0) {
-            await useProjectStore.getState().updatePiece(piece.id, extraUpdates);
+            await api.updatePiece(piece.id, extraUpdates);
           }
           executed++;
+          reloadCurrentProject = true;
           break;
         }
         case "createConnection": {
@@ -149,51 +161,74 @@ export async function executeActions(
             createdPieceRefs,
           );
 
-          await useProjectStore.getState().addConnection(
+          await api.createConnection(
+            projectId,
             sourcePieceId,
             targetPieceId,
             (action.label as string) || "",
           );
           executed++;
+          reloadCurrentProject = true;
           break;
         }
         case "updateConnection": {
           const updates = action.updates as Record<string, unknown>;
-          await useProjectStore
-            .getState()
-            .updateConnection(action.connectionId as string, updates);
+          await api.updateConnection(action.connectionId as string, updates);
           executed++;
+          reloadCurrentProject = true;
           break;
         }
         case "generatePlan": {
-          useLeaderStore.getState().generatePlan(
-            projectId,
-            (action.guidance as string) || "",
-          );
+          if (isActiveProject) {
+            useLeaderStore
+              .getState()
+              .generatePlan(projectId, (action.guidance as string) || "");
+          } else {
+            await api.generateWorkPlan(projectId, (action.guidance as string) || "");
+          }
           switchToTab = "plan";
           executed++;
           break;
         }
         case "approvePlan": {
-          await useLeaderStore.getState().approvePlan(action.planId as string);
+          if (isActiveProject) {
+            await useLeaderStore.getState().approvePlan(action.planId as string);
+          } else {
+            await api.updatePlanStatus(action.planId as string, "approved");
+          }
           switchToTab = "plan";
           executed++;
           break;
         }
         case "rejectPlan": {
-          await useLeaderStore.getState().rejectPlan(action.planId as string);
+          if (isActiveProject) {
+            await useLeaderStore.getState().rejectPlan(action.planId as string);
+          } else {
+            await api.updatePlanStatus(action.planId as string, "rejected");
+          }
           switchToTab = "plan";
           executed++;
           break;
         }
         case "runAllTasks": {
-          useLeaderStore.getState().runAllTasks(action.planId as string);
+          if (isActiveProject) {
+            useLeaderStore.getState().runAllTasks(action.planId as string);
+          } else {
+            await api.runAllPlanTasks(action.planId as string);
+          }
           switchToTab = "plan";
           executed++;
           break;
         }
         case "mergeBranches": {
-          useLeaderStore.getState().mergeBranches(action.planId as string);
+          if (isActiveProject) {
+            useLeaderStore.getState().mergeBranches(action.planId as string);
+          } else {
+            const summary = await api.mergePlanBranches(action.planId as string);
+            if (!summary.conflict) {
+              await api.runIntegrationReview(action.planId as string);
+            }
+          }
           switchToTab = "plan";
           executed++;
           break;
@@ -208,5 +243,5 @@ export async function executeActions(
   }
 
   devLog("info", "CTO", `Executed ${executed}/${actions.length} actions`, { errors });
-  return { executed, errors, switchToTab };
+  return { executed, errors, switchToTab, reloadCurrentProject };
 }

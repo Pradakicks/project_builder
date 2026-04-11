@@ -21,6 +21,7 @@ import { devLog } from "../utils/devLog";
 let runAllCancelled = false;
 
 interface LeaderStore {
+  projectId: string | null;
   currentPlan: WorkPlan | null;
   plans: WorkPlan[];
   generating: boolean;
@@ -60,6 +61,7 @@ interface LeaderStore {
 }
 
 export const useLeaderStore = create<LeaderStore>((set, get) => ({
+  projectId: null,
   currentPlan: null,
   plans: [],
   generating: false,
@@ -76,12 +78,17 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
 
   generatePlan: async (projectId, guidance) => {
     devLog("info", "Store:Leader", `Generating plan for project ${projectId}`, { guidance: guidance.slice(0, 100) });
-    set({ generating: true, streamOutput: "", currentPlan: null });
+    set({ projectId, generating: true, streamOutput: "", currentPlan: null });
     try {
       const plan = await generateWorkPlan(projectId, guidance);
+      if (get().projectId !== projectId) {
+        devLog("debug", "Store:Leader", `Discarding stale generated plan for project ${projectId}`);
+        return;
+      }
       set({ currentPlan: plan, generating: false });
       devLog("info", "Store:Leader", `Plan generated: ${plan.tasks.length} tasks`, { planId: plan.id });
     } catch (e) {
+      if (get().projectId !== projectId) return;
       set({ generating: false });
       devLog("error", "Store:Leader", `Plan generation failed`, e);
       useToastStore.getState().addToast(`Leader agent error: ${e}`);
@@ -89,8 +96,13 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
   },
 
   loadPlans: async (projectId) => {
+    set({ projectId });
     try {
       const plans = await listWorkPlans(projectId);
+      if (get().projectId !== projectId) {
+        devLog("debug", "Store:Leader", `Discarding stale plans for project ${projectId}`);
+        return;
+      }
       set({
         plans,
         currentPlan: plans.length > 0 ? plans[0] : null,
@@ -380,6 +392,7 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
 
   reset: () => {
     set({
+      projectId: null,
       currentPlan: null,
       plans: [],
       generating: false,

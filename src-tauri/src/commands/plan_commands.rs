@@ -82,3 +82,20 @@ pub fn update_plan_task_status(
         },
     )
 }
+
+#[tracing::instrument(skip(state, app_handle))]
+#[tauri::command]
+pub async fn run_all_plan_tasks(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    plan_id: String,
+) -> Result<(), String> {
+    info!(plan_id = %plan_id, "IPC: run_all_plan_tasks");
+    agent::runner::run_all_plan_tasks(
+        &plan_id,
+        &state.db,
+        &state.running_pieces,
+        &app_handle,
+    )
+    .await
+}

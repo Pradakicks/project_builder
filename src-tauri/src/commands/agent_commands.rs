@@ -58,6 +58,7 @@ pub async fn chat_with_cto(
     project_id: String,
     user_message: String,
     conversation: Vec<Message>,
+    request_id: String,
 ) -> Result<(), String> {
     info!(project_id = %project_id, conversation_len = conversation.len(), "IPC: chat_with_cto");
 
@@ -99,12 +100,16 @@ pub async fn chat_with_cto(
 
     let (tx, mut rx) = mpsc::channel::<String>(256);
     let app = app_handle.clone();
+    let project_id_for_stream = project_id.clone();
+    let request_id_for_stream = request_id.clone();
 
     let stream_handle = tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
             let _ = app.emit(
                 "cto-chat-chunk",
                 json!({
+                    "projectId": project_id_for_stream,
+                    "requestId": request_id_for_stream,
                     "chunk": chunk,
                     "done": false,
                 }),
@@ -119,6 +124,8 @@ pub async fn chat_with_cto(
     if let Err(e) = app_handle.emit(
         "cto-chat-chunk",
         json!({
+            "projectId": project_id,
+            "requestId": request_id,
             "chunk": "",
             "done": true,
             "usage": {

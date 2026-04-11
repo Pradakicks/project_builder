@@ -77,6 +77,7 @@ pub fn run() {
             commands::plan_commands::list_work_plans,
             commands::plan_commands::update_plan_status,
             commands::plan_commands::update_plan_task_status,
+            commands::plan_commands::run_all_plan_tasks,
             commands::merge_commands::merge_plan_branches,
             commands::merge_commands::resolve_merge_conflict,
             commands::merge_commands::run_integration_review,

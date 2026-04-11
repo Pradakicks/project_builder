@@ -4,6 +4,7 @@ use crate::llm::{self, LlmConfig, Message, TokenUsage};
 use crate::models::*;
 use crate::AppState;
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -341,6 +342,114 @@ pub async fn run_piece_agent(
         Ok(AgentResult::External { .. }) => Ok(TokenUsage { input: 0, output: 0 }),
         Err(e) => Err(e),
     }
+}
+
+fn update_plan_task_status_in_db(
+    db: &Mutex<Database>,
+    plan_id: &str,
+    task_id: &str,
+    status: TaskStatus,
+) -> Result<(), String> {
+    let db = db.lock().map_err(|e| e.to_string())?;
+    let plan = db.get_work_plan(plan_id)?;
+    let mut tasks = plan.tasks;
+    if let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) {
+        task.status = status;
+    } else {
+        return Err(format!("Task '{}' not found in plan", task_id));
+    }
+    db.update_work_plan(
+        plan_id,
+        &WorkPlanUpdate {
+            tasks: Some(tasks),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+pub async fn run_all_plan_tasks(
+    plan_id: &str,
+    db: &Mutex<Database>,
+    running_pieces: &Mutex<HashSet<String>>,
+    app_handle: &AppHandle,
+) -> Result<(), String> {
+    let plan = {
+        let db = db.lock().map_err(|e| e.to_string())?;
+        db.get_work_plan(plan_id)?
+    };
+
+    if !matches!(plan.status, PlanStatus::Approved) {
+        return Err("Plan must be approved before running all tasks.".to_string());
+    }
+
+    let tasks: Vec<PlanTask> = plan
+        .tasks
+        .iter()
+        .filter(|task| matches!(task.status, TaskStatus::Pending) && !task.piece_id.is_empty())
+        .cloned()
+        .collect();
+
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    for task in tasks {
+        update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::InProgress)?;
+
+        if !task.suggested_phase.is_empty() {
+            let phase = match task.suggested_phase.as_str() {
+                "design" => Some(Phase::Design),
+                "review" => Some(Phase::Review),
+                "approved" => Some(Phase::Approved),
+                "implementing" => Some(Phase::Implementing),
+                _ => None,
+            };
+            if let Some(phase) = phase {
+                let db = db.lock().map_err(|e| e.to_string())?;
+                let _ = db.update_piece(
+                    &task.piece_id,
+                    &PieceUpdate {
+                        phase: Some(phase),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
+        {
+            let mut running = running_pieces.lock().map_err(|e| e.to_string())?;
+            if !running.insert(task.piece_id.clone()) {
+                update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::Pending)?;
+                return Err(format!(
+                    "An agent is already running for piece '{}'.",
+                    task.piece_name
+                ));
+            }
+        }
+
+        let result = run_piece_agent(&task.piece_id, None, db, app_handle).await;
+
+        {
+            let mut running = running_pieces.lock().map_err(|e| e.to_string())?;
+            running.remove(&task.piece_id);
+        }
+
+        match result {
+            Ok(_) => update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::Complete)?,
+            Err(error) => {
+                update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::Pending)?;
+                return Err(format!("Task '{}' failed: {}", task.title, error));
+            }
+        }
+    }
+
+    let merge_summary = super::merge::merge_plan_branches(plan_id, db, app_handle).await?;
+    if merge_summary.conflict.is_none() {
+      let _ = super::merge::run_integration_review(plan_id, db, app_handle).await?;
+    }
+
+    Ok(())
 }
 
 /// Run the built-in LLM agent. Streams chunks but does NOT emit the done event
@@ -824,6 +933,7 @@ pub async fn run_leader_agent(
 
     // Stream via channel -> Tauri events
     let (tx, mut rx) = mpsc::channel::<String>(256);
+    let project_id_for_stream = project_id.to_string();
     let plan_id_for_stream = plan_id.clone();
     let app = app_handle.clone();
     let full_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
@@ -835,6 +945,7 @@ pub async fn run_leader_agent(
             let _ = app.emit(
                 "leader-plan-chunk",
                 json!({
+                    "projectId": project_id_for_stream,
                     "planId": plan_id_for_stream,
                     "chunk": chunk,
                     "done": false,
@@ -875,6 +986,7 @@ pub async fn run_leader_agent(
     if let Err(e) = app_handle.emit(
         "leader-plan-chunk",
         json!({
+            "projectId": project_id,
             "planId": plan_id,
             "chunk": "",
             "done": true,

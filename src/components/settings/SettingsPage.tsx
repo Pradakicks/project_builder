@@ -80,7 +80,20 @@ export function SettingsPage() {
         api.validateWorkingDirectory(project.settings.workingDirectory)
           .then(() => { setWorkingDirValid(true); setWorkingDirError(""); })
           .catch((e) => { setWorkingDirValid(false); setWorkingDirError(String(e)); });
+      } else {
+        setWorkingDirValid(null);
+        setWorkingDirError("");
       }
+    } else {
+      setTokenBudget(100_000);
+      setPhaseControl("manual");
+      setLlmConfigs([]);
+      setDefaultExecutionEngine("built-in");
+      setConflictResolution("ai-assisted");
+      setWorkingDirectory("");
+      setPostRunValidationCommand("");
+      setWorkingDirValid(null);
+      setWorkingDirError("");
     }
   }, [project]);
 
@@ -123,7 +136,7 @@ export function SettingsPage() {
   };
 
   const handleSaveProjectSettings = async () => {
-    if (!activeProjectId) return;
+    if (!project || !activeProjectId || project.id !== activeProjectId) return;
     setSavingProjectSettings(true);
     try {
       const settings: ProjectSettings = {
@@ -135,7 +148,7 @@ export function SettingsPage() {
         defaultExecutionEngine: defaultExecutionEngine === "built-in" ? null : defaultExecutionEngine,
         postRunValidationCommand: postRunValidationCommand.trim() || null,
       };
-      await api.updateProjectSettings(activeProjectId, settings);
+      await api.updateProjectSettings(project.id, settings);
       devLog("info", "Settings", "Project settings saved", { phaseControl, conflictResolution, workingDirectory });
       addToast("Project settings saved", "info");
     } catch (e) {
@@ -249,7 +262,7 @@ export function SettingsPage() {
           </section>
 
           {/* Project Settings Section */}
-          {activeProjectId && project && (
+          {activeProjectId && project && project.id === activeProjectId && (
             <section>
               <h2 className="text-sm font-semibold text-gray-300 mb-3">
                 Project Settings
