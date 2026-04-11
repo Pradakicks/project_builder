@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import type { PlanTask, TaskStatus } from "../../types";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useLeaderStore } from "../../store/useLeaderStore";
@@ -50,6 +50,46 @@ export function PlanTaskCard({
   const isRunning = agentRun?.running ?? false;
   const hasOutput = !!agentRun?.output;
   const canRun = approved && !!task.pieceId && !isRunning && task.status !== "complete" && !runningAll;
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHistory = async () => {
+      if (!task.pieceId) return;
+      const existing = useAgentStore.getState().runs[task.pieceId];
+      if (existing?.running || existing?.output) return;
+
+      const { getAgentHistory } = await import("../../api/tauriApi");
+      try {
+        const history = await getAgentHistory(task.pieceId);
+        const latest = history[0];
+        if (!latest || cancelled) return;
+        const metadata = latest.metadata ?? {};
+        const validation = metadata.validation ?? undefined;
+        useAgentStore.getState().restoreRun(task.pieceId, {
+          running: false,
+          output: latest.outputText,
+          usage: metadata.usage ?? { input: 0, output: 0 },
+          success: metadata.success ?? true,
+          exitCode: metadata.exitCode ?? undefined,
+          phaseProposal: metadata.phaseProposal ?? undefined,
+          phaseChanged: metadata.phaseChanged ?? undefined,
+          gitBranch: metadata.gitBranch ?? undefined,
+          gitCommitSha: metadata.gitCommitSha ?? undefined,
+          gitDiffStat: metadata.gitDiffStat ?? undefined,
+          iterationCount: 1,
+          validation,
+          validationOutput: validation?.output ?? "",
+        });
+      } catch {
+        // Best-effort recovery only.
+      }
+    };
+
+    loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [task.pieceId]);
 
   const handleRun = () => {
     runTask(planId, task);
@@ -168,6 +208,11 @@ export function PlanTaskCard({
           {agentRun.usage && !isRunning && (
             <p className="text-[9px] text-gray-600 mt-0.5">
               Tokens: {agentRun.usage.input} in / {agentRun.usage.output} out
+            </p>
+          )}
+          {agentRun.validation && !isRunning && (
+            <p className={`text-[9px] mt-0.5 ${agentRun.validation.passed ? "text-green-500" : "text-red-400"}`}>
+              Validation: {agentRun.validation.passed ? "passed" : `failed (exit ${agentRun.validation.exitCode})`}
             </p>
           )}
         </div>

@@ -174,28 +174,46 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
         if (payload.pieceId !== task.pieceId) return;
         const store = useAgentStore.getState();
         if (payload.done) {
+          const success = payload.success ?? (payload.exitCode ?? 0) === 0;
           store.completeRun(task.pieceId, {
             usage: payload.usage ?? { input: 0, output: 0 },
+            success,
             exitCode: payload.exitCode,
             phaseProposal: payload.phaseProposal,
             phaseChanged: payload.phaseChanged,
             gitBranch: payload.gitBranch,
             gitCommitSha: payload.gitCommitSha,
             gitDiffStat: payload.gitDiffStat,
+            validation: payload.validation,
           });
           unlisten();
-          // Mark task as complete
-          updatePlanTaskStatus(planId, task.id, "complete")
-            .then((plan) => {
-              set({ currentPlan: plan });
-              const plans = get().plans.map((p) => (p.id === planId ? plan : p));
-              set({ plans });
-            })
-            .catch((e: unknown) => devLog("error", "Store:Leader", `Failed to mark task complete`, e));
-          devLog("info", "Store:Leader", `Task "${task.title}" completed successfully`);
-          resolve(true);
+          if (success) {
+            // Mark task as complete
+            updatePlanTaskStatus(planId, task.id, "complete")
+              .then((plan) => {
+                set({ currentPlan: plan });
+                const plans = get().plans.map((p) => (p.id === planId ? plan : p));
+                set({ plans });
+              })
+              .catch((e: unknown) => devLog("error", "Store:Leader", `Failed to mark task complete`, e));
+            devLog("info", "Store:Leader", `Task "${task.title}" completed successfully`);
+            resolve(true);
+          } else {
+            updatePlanTaskStatus(planId, task.id, "pending")
+              .then((plan) => {
+                set({ currentPlan: plan });
+                const plans = get().plans.map((p) => (p.id === planId ? plan : p));
+                set({ plans });
+              })
+              .catch((e: unknown) => devLog("error", "Store:Leader", `Failed to revert task status`, e));
+            resolve(false);
+          }
         } else {
-          store.appendChunk(task.pieceId, payload.chunk);
+          if (payload.streamKind === "validation") {
+            store.appendValidationChunk(task.pieceId, payload.chunk);
+          } else {
+            store.appendChunk(task.pieceId, payload.chunk);
+          }
         }
       });
 

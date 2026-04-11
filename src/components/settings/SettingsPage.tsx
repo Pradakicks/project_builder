@@ -38,6 +38,7 @@ export function SettingsPage() {
   const [llmConfigs, setLlmConfigs] = useState<LlmConfig[]>([]);
   const [defaultExecutionEngine, setDefaultExecutionEngine] = useState<string>("built-in");
   const [conflictResolution, setConflictResolution] = useState<ConflictResolutionPolicy>("ai-assisted");
+  const [postRunValidationCommand, setPostRunValidationCommand] = useState("");
 
   // Load API keys
   useEffect(() => {
@@ -73,6 +74,7 @@ export function SettingsPage() {
       setDefaultExecutionEngine(project.settings.defaultExecutionEngine ?? "built-in");
       setConflictResolution(project.settings.conflictResolution ?? "ai-assisted");
       setWorkingDirectory(project.settings.workingDirectory ?? "");
+      setPostRunValidationCommand(project.settings.postRunValidationCommand ?? "");
       // Validate existing working directory
       if (project.settings.workingDirectory) {
         api.validateWorkingDirectory(project.settings.workingDirectory)
@@ -131,6 +133,7 @@ export function SettingsPage() {
         llmConfigs,
         workingDirectory: workingDirectory.trim() || null,
         defaultExecutionEngine: defaultExecutionEngine === "built-in" ? null : defaultExecutionEngine,
+        postRunValidationCommand: postRunValidationCommand.trim() || null,
       };
       await api.updateProjectSettings(activeProjectId, settings);
       devLog("info", "Settings", "Project settings saved", { phaseControl, conflictResolution, workingDirectory });
@@ -379,6 +382,22 @@ export function SettingsPage() {
                   {workingDirError && (
                     <p className="text-[10px] text-red-400 mt-1">{workingDirError}</p>
                   )}
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">
+                    Post-run validation command
+                  </label>
+                  <p className="text-[10px] text-gray-600 mb-1.5">
+                    Optional shell command run in the working directory after successful external implementation runs.
+                  </p>
+                  <input
+                    type="text"
+                    value={postRunValidationCommand}
+                    onChange={(e) => setPostRunValidationCommand(e.target.value)}
+                    placeholder="npm test"
+                    className="w-full rounded border border-gray-700 bg-gray-800 px-2.5 py-1 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none font-mono"
+                  />
                 </div>
 
                 {/* LLM Configs */}

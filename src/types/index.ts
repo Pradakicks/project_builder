@@ -17,6 +17,7 @@ export interface ProjectSettings {
   conflictResolution: ConflictResolutionPolicy;
   workingDirectory: string | null;
   defaultExecutionEngine: string | null;
+  postRunValidationCommand: string | null;
 }
 
 export interface LlmConfig {
@@ -137,6 +138,30 @@ export interface Artifact {
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
+
+export interface ValidationResult {
+  command: string;
+  passed: boolean;
+  exitCode: number;
+  output: string;
+}
+
+export interface AgentHistoryMetadata {
+  usage?: TokenUsage | null;
+  success?: boolean | null;
+  exitCode?: number | null;
+  phaseProposal?: string | null;
+  phaseChanged?: string | null;
+  gitBranch?: string | null;
+  gitCommitSha?: string | null;
+  gitDiffStat?: string | null;
+  validation?: ValidationResult | null;
 }
 
 // ── CTO Decisions ───────────────────────────────────────

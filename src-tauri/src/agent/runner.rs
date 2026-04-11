@@ -6,7 +6,9 @@ use crate::AppState;
 use serde_json::json;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
+use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 /// Load a piece and its context from the database.
@@ -71,10 +73,109 @@ enum AgentResult {
     Builtin { usage: TokenUsage, output: String },
     External {
         exit_code: i32,
+        success: bool,
         git_branch: Option<String>,
         git_commit_sha: Option<String>,
         git_diff_stat: Option<String>,
+        validation: Option<crate::db::ValidationResult>,
     },
+}
+
+async fn run_validation_command(
+    command: &str,
+    working_dir: &str,
+    piece_id: &str,
+    app_handle: &AppHandle,
+) -> Result<crate::db::ValidationResult, String> {
+    let mut child = if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    } else {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-lc", command]);
+        cmd
+    };
+
+    child
+        .current_dir(working_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = child
+        .spawn()
+        .map_err(|e| format!("Failed to start validation command: {e}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture validation stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture validation stderr".to_string())?;
+
+    let piece_id_stdout = piece_id.to_string();
+    let app_stdout = app_handle.clone();
+    let stdout_handle = tokio::spawn(async move {
+        let mut output = String::new();
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            output.push_str(&line);
+            output.push('\n');
+            let _ = app_stdout.emit(
+                "agent-output-chunk",
+                json!({
+                    "pieceId": piece_id_stdout,
+                    "chunk": line + "\n",
+                    "streamKind": "validation",
+                    "done": false,
+                }),
+            );
+        }
+        output
+    });
+
+    let piece_id_stderr = piece_id.to_string();
+    let app_stderr = app_handle.clone();
+    let stderr_handle = tokio::spawn(async move {
+        let mut output = String::new();
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            output.push_str(&line);
+            output.push('\n');
+            let _ = app_stderr.emit(
+                "agent-output-chunk",
+                json!({
+                    "pieceId": piece_id_stderr,
+                    "chunk": line + "\n",
+                    "streamKind": "validation",
+                    "done": false,
+                }),
+            );
+        }
+        output
+    });
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Validation command failed to run: {e}"))?;
+    let stdout_output = stdout_handle.await.unwrap_or_default();
+    let stderr_output = stderr_handle.await.unwrap_or_default();
+
+    let mut output = stdout_output;
+    if !stderr_output.is_empty() {
+        output.push_str(&stderr_output);
+    }
+
+    let exit_code = status.code().unwrap_or(-1);
+    Ok(crate::db::ValidationResult {
+        command: command.to_string(),
+        passed: status.success(),
+        exit_code,
+        output,
+    })
 }
 
 /// Run a piece's agent: dispatches to built-in LLM or external tool based on config.
@@ -109,7 +210,7 @@ pub async fn run_piece_agent(
     // Determine if the run was successful
     let success = match &result {
         Ok(AgentResult::Builtin { .. }) => true,
-        Ok(AgentResult::External { exit_code, .. }) => *exit_code == 0,
+        Ok(AgentResult::External { success, .. }) => *success,
         Err(_) => false,
     };
 
@@ -152,10 +253,12 @@ pub async fn run_piece_agent(
     match &result {
         Ok(AgentResult::Builtin { usage, .. }) => {
             done_payload["usage"] = json!({"input": usage.input, "output": usage.output});
+            done_payload["success"] = json!(true);
         }
-        Ok(AgentResult::External { exit_code, git_branch, git_commit_sha, git_diff_stat }) => {
+        Ok(AgentResult::External { exit_code, success, git_branch, git_commit_sha, git_diff_stat, validation }) => {
             done_payload["usage"] = json!({"input": 0, "output": 0});
             done_payload["exitCode"] = json!(exit_code);
+            done_payload["success"] = json!(success);
             if let Some(ref branch) = git_branch {
                 done_payload["gitBranch"] = json!(branch);
             }
@@ -165,10 +268,15 @@ pub async fn run_piece_agent(
             if let Some(ref stat) = git_diff_stat {
                 done_payload["gitDiffStat"] = json!(stat);
             }
+            if let Some(ref validation_result) = validation {
+                done_payload["validation"] = json!(validation_result);
+            }
         }
-        Err(_) => {
+        Err(e) => {
             done_payload["usage"] = json!({"input": 0, "output": 0});
             done_payload["exitCode"] = json!(-1);
+            done_payload["success"] = json!(false);
+            done_payload["error"] = json!(e);
         }
     }
 
@@ -337,11 +445,17 @@ async fn run_builtin_agent(
 
     {
         let db = db.lock().map_err(|e| e.to_string())?;
+        let metadata = crate::db::AgentHistoryMetadata {
+            usage: Some(usage.clone()),
+            success: Some(true),
+            ..Default::default()
+        };
         if let Err(e) = db.insert_agent_history(
             piece_id,
             "run",
             &piece.agent_prompt,
             &output_text,
+            Some(&metadata),
             (usage.input + usage.output) as i64,
         ) {
             warn!(piece_id, error = %e, "Failed to insert agent history");
@@ -491,6 +605,7 @@ async fn run_external_agent(
             let exit_code = run_result.exit_code;
             let mut git_commit_sha: Option<String> = None;
             let mut git_diff_stat: Option<String> = None;
+            let mut validation: Option<crate::db::ValidationResult> = None;
 
             if exit_code == 0 {
                 // Auto-commit changes on success
@@ -520,7 +635,42 @@ async fn run_external_agent(
                         }
                     }
                 }
+
+                if piece.phase == Phase::Implementing {
+                    if let Some(command) = settings.post_run_validation_command.as_deref() {
+                        let trimmed = command.trim();
+                        if !trimmed.is_empty() {
+                            emit_git_info(app_handle, piece_id, &format!("Running validation: {trimmed}"));
+                            validation = Some(match run_validation_command(trimmed, working_dir, piece_id, app_handle).await {
+                                Ok(result) => result,
+                                Err(error) => crate::db::ValidationResult {
+                                    command: trimmed.to_string(),
+                                    passed: false,
+                                    exit_code: -1,
+                                    output: error,
+                                },
+                            });
+                        }
+                    }
+                }
             }
+
+            let success = exit_code == 0
+                && validation
+                    .as_ref()
+                    .map(|result| result.passed)
+                    .unwrap_or(true);
+
+            let metadata = crate::db::AgentHistoryMetadata {
+                usage: Some(TokenUsage::default()),
+                success: Some(success),
+                exit_code: Some(exit_code),
+                git_branch: git_branch.clone(),
+                git_commit_sha: git_commit_sha.clone(),
+                git_diff_stat: git_diff_stat.clone(),
+                validation: validation.clone(),
+                ..Default::default()
+            };
 
             {
                 let db = db.lock().map_err(|e| e.to_string())?;
@@ -529,6 +679,7 @@ async fn run_external_agent(
                     "external-run",
                     &user_prompt,
                     &run_result.output,
+                    Some(&metadata),
                     0,
                 ) {
                     warn!(piece_id, error = %e, "Failed to insert external agent history");
@@ -537,9 +688,11 @@ async fn run_external_agent(
 
             Ok(AgentResult::External {
                 exit_code,
+                success,
                 git_branch,
                 git_commit_sha,
                 git_diff_stat,
+                validation,
             })
         }
         Err(err) => Err(err),

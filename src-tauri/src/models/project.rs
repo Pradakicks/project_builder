@@ -24,6 +24,8 @@ pub struct ProjectSettings {
     pub working_directory: Option<String>,
     /// Default execution engine for new pieces ("built-in", "claude-code", "codex")
     pub default_execution_engine: Option<String>,
+    /// Optional shell command run after successful external implementation runs
+    pub post_run_validation_command: Option<String>,
 }
 
 impl Default for ProjectSettings {
@@ -35,6 +37,7 @@ impl Default for ProjectSettings {
             conflict_resolution: ConflictResolutionPolicy::AiAssisted,
             working_directory: None,
             default_execution_engine: None,
+            post_run_validation_command: None,
         }
     }
 }

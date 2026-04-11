@@ -4,6 +4,29 @@ use tracing::{debug, info};
 
 use super::Database;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationResult {
+    pub command: String,
+    pub passed: bool,
+    pub exit_code: i32,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHistoryMetadata {
+    pub usage: Option<crate::llm::TokenUsage>,
+    pub success: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub phase_proposal: Option<String>,
+    pub phase_changed: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub git_diff_stat: Option<String>,
+    pub validation: Option<ValidationResult>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHistoryEntry {
@@ -12,6 +35,8 @@ pub struct AgentHistoryEntry {
     pub action: String,
     pub input_text: String,
     pub output_text: String,
+    #[serde(default)]
+    pub metadata: AgentHistoryMetadata,
     pub tokens_used: i64,
     pub created_at: String,
 }
@@ -24,11 +49,14 @@ impl Database {
         action: &str,
         input_text: &str,
         output_text: &str,
+        metadata: Option<&AgentHistoryMetadata>,
         tokens_used: i64,
     ) -> Result<String, String> {
         debug!(piece_id, action, tokens_used, "Inserting agent history");
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
+        let metadata_json = serde_json::to_string(metadata.unwrap_or(&AgentHistoryMetadata::default()))
+            .map_err(|e| e.to_string())?;
 
         // Ensure an agent row exists for this piece
         self.conn
@@ -48,8 +76,8 @@ impl Database {
 
         self.conn
             .execute(
-                "INSERT INTO agent_history (id, agent_id, action, input_text, output_text, tokens_used, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, piece_id, action, input_text, output_text, tokens_used, now],
+                "INSERT INTO agent_history (id, agent_id, action, input_text, output_text, metadata_json, tokens_used, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![id, piece_id, action, input_text, output_text, metadata_json, tokens_used, now],
             )
             .map_err(|e| e.to_string())?;
 
@@ -63,20 +91,22 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, agent_id, action, input_text, output_text, tokens_used, created_at FROM agent_history WHERE agent_id = ?1 ORDER BY created_at DESC",
+                "SELECT id, agent_id, action, input_text, output_text, metadata_json, tokens_used, created_at FROM agent_history WHERE agent_id = ?1 ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
             .query_map(params![piece_id], |row| {
+                let metadata_json: String = row.get(5)?;
                 Ok(AgentHistoryEntry {
                     id: row.get(0)?,
                     agent_id: row.get(1)?,
                     action: row.get(2)?,
                     input_text: row.get(3)?,
                     output_text: row.get(4)?,
-                    tokens_used: row.get(5)?,
-                    created_at: row.get(6)?,
+                    metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
+                    tokens_used: row.get(6)?,
+                    created_at: row.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?;

@@ -12,6 +12,8 @@ import type {
   WorkPlan,
   PlanStatus,
   TaskStatus,
+  AgentHistoryMetadata,
+  ValidationResult,
 } from "../types";
 
 async function loggedInvoke<T>(
@@ -194,6 +196,7 @@ export interface AgentHistoryEntry {
   action: string;
   inputText: string;
   outputText: string;
+  metadata: AgentHistoryMetadata;
   tokensUsed: number;
   createdAt: string;
 }
@@ -223,6 +226,8 @@ export interface AgentOutputChunk {
   pieceId: string;
   chunk: string;
   done: boolean;
+  streamKind?: "agent" | "validation";
+  success?: boolean;
   exitCode?: number;
   usage?: { input: number; output: number };
   phaseProposal?: string;
@@ -230,6 +235,8 @@ export interface AgentOutputChunk {
   gitBranch?: string;
   gitCommitSha?: string;
   gitDiffStat?: string;
+  validation?: ValidationResult;
+  error?: string;
 }
 
 export function onAgentOutputChunk(

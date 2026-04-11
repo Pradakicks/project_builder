@@ -534,6 +534,47 @@ function AgentTab({
   const run = useAgentStore((s) => s.runs[piece.id]);
   const [feedbackText, setFeedbackText] = useState("");
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      const existing = useAgentStore.getState().runs[piece.id];
+      if (existing?.running) return;
+
+      const { getAgentHistory } = await import("../../api/tauriApi");
+      try {
+        const history = await getAgentHistory(piece.id);
+        const latest = history[0];
+        if (!latest || cancelled) return;
+
+        const metadata = latest.metadata ?? {};
+        const validation = metadata.validation ?? undefined;
+        useAgentStore.getState().restoreRun(piece.id, {
+          running: false,
+          output: latest.outputText,
+          usage: metadata.usage ?? { input: 0, output: 0 },
+          success: metadata.success ?? true,
+          exitCode: metadata.exitCode ?? undefined,
+          phaseProposal: metadata.phaseProposal ?? undefined,
+          phaseChanged: metadata.phaseChanged ?? undefined,
+          gitBranch: metadata.gitBranch ?? undefined,
+          gitCommitSha: metadata.gitCommitSha ?? undefined,
+          gitDiffStat: metadata.gitDiffStat ?? undefined,
+          iterationCount: 1,
+          validation,
+          validationOutput: validation?.output ?? "",
+        });
+      } catch {
+        // Non-fatal: recovery is best-effort.
+      }
+    };
+
+    loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [piece.id]);
+
   const handleRun = async () => {
     const { runPieceAgent, onAgentOutputChunk } = await import("../../api/tauriApi");
     const agentStore = useAgentStore.getState();
@@ -545,12 +586,14 @@ function AgentTab({
       if (payload.done) {
         store.completeRun(piece.id, {
           usage: payload.usage ?? { input: 0, output: 0 },
+          success: payload.success ?? (payload.exitCode ?? 0) === 0,
           exitCode: payload.exitCode,
           phaseProposal: payload.phaseProposal,
           phaseChanged: payload.phaseChanged,
           gitBranch: payload.gitBranch,
           gitCommitSha: payload.gitCommitSha,
           gitDiffStat: payload.gitDiffStat,
+          validation: payload.validation,
         });
         // If phase was auto-changed (autonomous mode), refresh the piece
         if (payload.phaseChanged) {
@@ -558,7 +601,11 @@ function AgentTab({
         }
         unlisten();
       } else {
-        store.appendChunk(piece.id, payload.chunk);
+        if (payload.streamKind === "validation") {
+          store.appendValidationChunk(piece.id, payload.chunk);
+        } else {
+          store.appendChunk(piece.id, payload.chunk);
+        }
       }
     });
 
@@ -584,19 +631,25 @@ function AgentTab({
       if (payload.done) {
         store.completeRun(piece.id, {
           usage: payload.usage ?? { input: 0, output: 0 },
+          success: payload.success ?? (payload.exitCode ?? 0) === 0,
           exitCode: payload.exitCode,
           phaseProposal: payload.phaseProposal,
           phaseChanged: payload.phaseChanged,
           gitBranch: payload.gitBranch,
           gitCommitSha: payload.gitCommitSha,
           gitDiffStat: payload.gitDiffStat,
+          validation: payload.validation,
         });
         if (payload.phaseChanged) {
           useProjectStore.getState().loadProject(piece.projectId);
         }
         unlisten();
       } else {
-        store.appendChunk(piece.id, payload.chunk);
+        if (payload.streamKind === "validation") {
+          store.appendValidationChunk(piece.id, payload.chunk);
+        } else {
+          store.appendChunk(piece.id, payload.chunk);
+        }
       }
     });
 
@@ -785,6 +838,11 @@ function AgentTab({
 
       {run && !run.running && (
         <div className="flex items-center gap-2 text-[10px] text-gray-500">
+          {run.success === false && run.validation?.passed === false && (
+            <span className="rounded bg-red-900/50 px-1.5 py-0.5 font-medium text-red-400">
+              Validation failed
+            </span>
+          )}
           {run.exitCode !== undefined && (
             <span
               className={`rounded px-1.5 py-0.5 font-medium ${
@@ -798,6 +856,26 @@ function AgentTab({
           )}
           {run.usage && (run.usage.input > 0 || run.usage.output > 0) && (
             <span>Tokens: {run.usage.input} in / {run.usage.output} out</span>
+          )}
+        </div>
+      )}
+
+      {run?.validation && !run.running && (
+        <div className="rounded border border-gray-800 bg-gray-900 px-3 py-2 text-[10px] text-gray-400 space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500">validation</span>
+            <span className={run.validation.passed ? "text-green-400" : "text-red-400"}>
+              {run.validation.passed ? "Passed" : `Failed (exit ${run.validation.exitCode})`}
+            </span>
+          </div>
+          <div className="text-gray-500">
+            <span className="mr-2">command</span>
+            <span className="font-mono text-gray-300">{run.validation.command}</span>
+          </div>
+          {!!run.validation.output && (
+            <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-gray-950 p-2 text-gray-500">
+              {run.validation.output}
+            </pre>
           )}
         </div>
       )}

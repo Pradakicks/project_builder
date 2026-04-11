@@ -113,6 +113,7 @@ impl Database {
                 action TEXT NOT NULL,
                 input_text TEXT NOT NULL DEFAULT '',
                 output_text TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 tokens_used INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
@@ -170,6 +171,36 @@ impl Database {
                 error!(error = %e, "Failed to initialize database schema");
                 e.to_string()
             })?;
+        self.ensure_agent_history_metadata_column()?;
+        Ok(())
+    }
+
+    fn ensure_agent_history_metadata_column(&self) -> Result<(), String> {
+        let mut stmt = self
+            .conn
+            .prepare("PRAGMA table_info(agent_history)")
+            .map_err(|e| e.to_string())?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?;
+
+        let mut has_metadata_json = false;
+        for column in columns {
+            if column.map_err(|e| e.to_string())? == "metadata_json" {
+                has_metadata_json = true;
+                break;
+            }
+        }
+
+        if !has_metadata_json {
+            self.conn
+                .execute(
+                    "ALTER TABLE agent_history ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
         Ok(())
     }
 }
