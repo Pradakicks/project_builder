@@ -3,6 +3,7 @@ export {
   getAgentHistory,
   listCtoDecisions,
   logCtoDecision,
+  rollbackCtoDecision,
   onAgentOutputChunk,
   onCtoChatChunk,
   runPieceAgent,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import * as api from "../../api/tauriApi";
+import * as api from "../../api/projectApi";
 import type { Project } from "../../types";
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";

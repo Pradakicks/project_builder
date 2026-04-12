@@ -6,7 +6,7 @@ import type {
   PieceUpdate,
   ConnectionUpdate,
 } from "../types";
-import * as api from "../api/tauriApi";
+import * as api from "../api/projectApi";
 import { useToastStore } from "./useToastStore";
 import { devLog } from "../utils/devLog";
 

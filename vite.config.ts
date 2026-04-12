@@ -7,6 +7,27 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("@xyflow/react")) return "xyflow";
+          if (id.includes("react-markdown") || id.includes("remark-gfm")) {
+            return "markdown";
+          }
+          if (id.includes("@tauri-apps")) return "tauri";
+          if (
+            id.includes("/react-dom/") ||
+            id.includes("/react/") ||
+            id.includes("/react-is/")
+          ) {
+            return "react";
+          }
+        },
+      },
+    },
+  },
   server: {
     port: 5174,
     strictPort: true,

@@ -1,17 +1,67 @@
-import { useState, useEffect } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { DiagramCanvas } from "../canvas/DiagramCanvas";
-import { PieceEditor } from "../editor/PieceEditor";
-import { ConnectionEditor } from "../editor/ConnectionEditor";
-import { ChatPanel } from "../chat/ChatPanel";
-import { LeaderPanel } from "../leader/LeaderPanel";
 import { Toolbar } from "./Toolbar";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
-import { onPhaseWarning } from "../../api/tauriApi";
+import { onPhaseWarning } from "../../api/projectApi";
 
 type LeftTab = "chat" | "plan";
+
+const DiagramCanvas = lazy(() =>
+  import("../canvas/DiagramCanvas").then((module) => ({
+    default: module.DiagramCanvas,
+  })),
+);
+const PieceEditor = lazy(() =>
+  import("../editor/PieceEditor").then((module) => ({
+    default: module.PieceEditor,
+  })),
+);
+const ConnectionEditor = lazy(() =>
+  import("../editor/ConnectionEditor").then((module) => ({
+    default: module.ConnectionEditor,
+  })),
+);
+const ChatPanel = lazy(() =>
+  import("../chat/ChatPanel").then((module) => ({
+    default: module.ChatPanel,
+  })),
+);
+const LeaderPanel = lazy(() =>
+  import("../leader/LeaderPanel").then((module) => ({
+    default: module.LeaderPanel,
+  })),
+);
+
+function LoadingPane({ label }: { label: string }) {
+  return (
+    <div className="flex h-full items-center justify-center text-xs text-gray-500">
+      <div className="flex items-center gap-2">
+        <svg
+          className="h-4 w-4 animate-spin"
+          viewBox="0 0 24 24"
+          fill="none"
+        >
+          <circle
+            className="opacity-25"
+            cx="12"
+            cy="12"
+            r="10"
+            stroke="currentColor"
+            strokeWidth="4"
+          />
+          <path
+            className="opacity-75"
+            fill="currentColor"
+            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+          />
+        </svg>
+        <span>{label}</span>
+      </div>
+    </div>
+  );
+}
 
 export function AppLayout() {
   const { project, selectedPieceId, selectedConnectionId } = useProjectStore();
@@ -21,22 +71,58 @@ export function AppLayout() {
 
   const togglePanel = () => setLeftOpen(!leftOpen);
 
-  // Listen for phase-skip warnings
   useEffect(() => {
     const unlisten = onPhaseWarning((payload) => {
       addToast(payload.warning, "warning");
     });
-    return () => { unlisten.then((fn) => fn()); };
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, [addToast]);
 
-  // When the panel is closed, show a combined toggle button
+  const renderCanvas = () => (
+    <Suspense fallback={<LoadingPane label="Loading canvas..." />}>
+      <ReactFlowProvider>
+        <DiagramCanvas />
+      </ReactFlowProvider>
+    </Suspense>
+  );
+
+  const renderPieceEditor = () => (
+    <Suspense fallback={<LoadingPane label="Loading piece editor..." />}>
+      <PieceEditor pieceId={selectedPieceId ?? ""} />
+    </Suspense>
+  );
+
+  const renderConnectionEditor = () => (
+    <Suspense fallback={<LoadingPane label="Loading connection editor..." />}>
+      <ConnectionEditor connectionId={selectedConnectionId ?? ""} />
+    </Suspense>
+  );
+
+  const renderChatPanel = () => (
+    <Suspense fallback={<LoadingPane label="Loading CTO chat..." />}>
+      <ChatPanel
+        open={true}
+        onToggle={togglePanel}
+        embedded
+        onSwitchTab={(tab) => setLeftTab(tab as LeftTab)}
+      />
+    </Suspense>
+  );
+
+  const renderLeaderPanel = () => (
+    <Suspense fallback={<LoadingPane label="Loading work plan..." />}>
+      <LeaderPanel open={true} onToggle={togglePanel} embedded />
+    </Suspense>
+  );
+
   if (!leftOpen) {
     return (
       <div className="flex h-full flex-col bg-gray-950 text-gray-100">
         <Toolbar />
         <Breadcrumbs />
         <div className="relative flex flex-1 overflow-hidden">
-          {/* Collapsed: show tab-aware toggle */}
           <div className="absolute left-2 top-14 z-10 flex flex-col gap-1">
             <button
               onClick={() => {
@@ -83,26 +169,40 @@ export function AppLayout() {
               </svg>
             </button>
           </div>
-          <div className="flex-1">
-            <ReactFlowProvider>
-              <DiagramCanvas />
-            </ReactFlowProvider>
-          </div>
+          <div className="flex-1">{renderCanvas()}</div>
           {selectedPieceId && (
-            <div className="w-96 shrink-0 border-l border-gray-800 overflow-y-auto">
-              <PieceEditor pieceId={selectedPieceId} />
+            <div className="w-96 shrink-0 overflow-y-auto border-l border-gray-800">
+              {renderPieceEditor()}
             </div>
           )}
           {selectedConnectionId && !selectedPieceId && (
-            <div className="w-96 shrink-0 border-l border-gray-800 overflow-y-auto">
-              <ConnectionEditor connectionId={selectedConnectionId} />
+            <div className="w-96 shrink-0 overflow-y-auto border-l border-gray-800">
+              {renderConnectionEditor()}
             </div>
           )}
         </div>
         {!project && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-950/80">
             <div className="flex items-center gap-2 text-gray-400">
-              <svg className="h-5 w-5 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+              <svg
+                className="h-5 w-5 animate-spin"
+                viewBox="0 0 24 24"
+                fill="none"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
               <p>Loading project...</p>
             </div>
           </div>
@@ -116,15 +216,13 @@ export function AppLayout() {
       <Toolbar />
       <Breadcrumbs />
       <div className="relative flex flex-1 overflow-hidden">
-        {/* Left panel with tab switcher */}
         <div className="flex w-72 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
-          {/* Tab bar */}
           <div className="flex border-b border-gray-800">
             <button
               onClick={() => setLeftTab("chat")}
               className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
                 leftTab === "chat"
-                  ? "text-blue-400 border-b-2 border-blue-400"
+                  ? "border-b-2 border-blue-400 text-blue-400"
                   : "text-gray-500 hover:text-gray-300"
               }`}
             >
@@ -134,7 +232,7 @@ export function AppLayout() {
               onClick={() => setLeftTab("plan")}
               className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
                 leftTab === "plan"
-                  ? "text-purple-400 border-b-2 border-purple-400"
+                  ? "border-b-2 border-purple-400 text-purple-400"
                   : "text-gray-500 hover:text-gray-300"
               }`}
             >
@@ -142,35 +240,48 @@ export function AppLayout() {
             </button>
           </div>
 
-          {/* Panel content — render both but show/hide so state persists */}
-          <div className={leftTab === "chat" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
-            <ChatPanel open={true} onToggle={togglePanel} embedded onSwitchTab={(tab) => setLeftTab(tab as "chat" | "plan")} />
+          <div className={leftTab === "chat" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
+            {renderChatPanel()}
           </div>
-          <div className={leftTab === "plan" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
-            <LeaderPanel open={true} onToggle={togglePanel} embedded />
+          <div className={leftTab === "plan" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
+            {renderLeaderPanel()}
           </div>
         </div>
 
-        <div className="flex-1">
-          <ReactFlowProvider>
-            <DiagramCanvas />
-          </ReactFlowProvider>
-        </div>
+        <div className="flex-1">{renderCanvas()}</div>
         {selectedPieceId && (
-          <div className="w-96 shrink-0 border-l border-gray-800 overflow-y-auto">
-            <PieceEditor pieceId={selectedPieceId} />
+          <div className="w-96 shrink-0 overflow-y-auto border-l border-gray-800">
+            {renderPieceEditor()}
           </div>
         )}
         {selectedConnectionId && !selectedPieceId && (
-          <div className="w-96 shrink-0 border-l border-gray-800 overflow-y-auto">
-            <ConnectionEditor connectionId={selectedConnectionId} />
+          <div className="w-96 shrink-0 overflow-y-auto border-l border-gray-800">
+            {renderConnectionEditor()}
           </div>
         )}
       </div>
       {!project && (
         <div className="absolute inset-0 flex items-center justify-center bg-gray-950/80">
           <div className="flex items-center gap-2 text-gray-400">
-            <svg className="h-5 w-5 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+            <svg
+              className="h-5 w-5 animate-spin"
+              viewBox="0 0 24 24"
+              fill="none"
+            >
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
+            </svg>
             <p>Loading project...</p>
           </div>
         </div>

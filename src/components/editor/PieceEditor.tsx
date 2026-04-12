@@ -541,7 +541,7 @@ function AgentTab({
       const existing = useAgentStore.getState().runs[piece.id];
       if (existing?.running) return;
 
-      const { getAgentHistory } = await import("../../api/tauriApiAsync");
+      const { getAgentHistory } = await import("../../api/leaderApi");
       try {
         const history = await getAgentHistory(piece.id);
         const latest = history[0];
@@ -576,7 +576,7 @@ function AgentTab({
   }, [piece.id]);
 
   const handleRun = async () => {
-    const { runPieceAgent, onAgentOutputChunk } = await import("../../api/tauriApiAsync");
+      const { runPieceAgent, onAgentOutputChunk } = await import("../../api/leaderApi");
     const agentStore = useAgentStore.getState();
     agentStore.startRun(piece.id);
 
@@ -622,7 +622,7 @@ function AgentTab({
     const fb = feedbackText.trim();
     if (!fb) return;
     setFeedbackText("");
-    const { runPieceAgent, onAgentOutputChunk } = await import("../../api/tauriApiAsync");
+    const { runPieceAgent, onAgentOutputChunk } = await import("../../api/leaderApi");
     useAgentStore.getState().startFeedbackRun(piece.id);
 
     const unlisten = await onAgentOutputChunk((payload) => {

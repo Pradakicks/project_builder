@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import * as api from "../../api/tauriApi";
+import * as api from "../../api/projectApi";
 import type { ProjectSettings, LlmConfig, PhaseControlPolicy, ConflictResolutionPolicy } from "../../types";
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
