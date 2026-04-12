@@ -14,38 +14,76 @@ const statusColors: Record<string, string> = {
 export function MergeSection({ planId }: { planId: string }) {
   const {
     merging,
+    mergeStatus,
+    mergeError,
     mergeProgress,
     mergeSummary,
     conflictInfo,
     resolvingConflict,
     reviewStreaming,
+    reviewStatus,
+    reviewError,
     reviewOutput,
     mergeBranches,
     resolveConflict,
     runReview,
   } = useLeaderStore();
 
-  const hasReview = reviewOutput || reviewStreaming;
+  const hasReview =
+    reviewOutput || reviewStreaming || reviewError || reviewStatus === "complete";
+  const mergeActionLabel = mergeError && !conflictInfo ? "Retry merge" : "Merge All";
+  const reviewActionLabel = reviewError ? "Retry review" : "Run review";
+  const lifecycleLabel =
+    merging
+      ? "Merging"
+      : mergeStatus === "conflict"
+        ? "Merge paused"
+        : mergeStatus === "failed"
+          ? "Merge failed"
+          : reviewStreaming
+            ? "Reviewing"
+            : reviewStatus === "failed"
+              ? "Review failed"
+              : reviewStatus === "complete"
+                ? "Review complete"
+                : mergeSummary
+                  ? "Merged"
+                  : "Ready";
 
   return (
     <div className="space-y-2 border-t border-gray-700 pt-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
           Merge & Review
         </p>
-        {!merging && !mergeSummary && (
-          <button
-            onClick={() => mergeBranches(planId)}
-            className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-emerald-500 transition-colors"
+        <div className="flex items-center gap-2">
+          <span
+            className={`rounded px-1.5 py-0.5 text-[9px] font-medium text-white ${
+              lifecycleLabel === "Merged" || lifecycleLabel === "Review complete"
+                ? "bg-green-600"
+                : lifecycleLabel === "Reviewing" || lifecycleLabel === "Merging"
+                  ? "bg-blue-600"
+                  : lifecycleLabel === "Merge paused" || lifecycleLabel === "Merge failed" || lifecycleLabel === "Review failed"
+                    ? "bg-red-600"
+                    : "bg-gray-600"
+            }`}
           >
-            Merge All
-          </button>
-        )}
-        {merging && (
-          <span className="text-[10px] text-emerald-300 animate-pulse">
-            Merging...
+            {lifecycleLabel}
           </span>
-        )}
+          {!merging && !mergeSummary && (
+            <button
+              onClick={() => mergeBranches(planId)}
+              className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-emerald-500 transition-colors"
+            >
+              {mergeActionLabel}
+            </button>
+          )}
+          {merging && (
+            <span className="text-[10px] text-emerald-300 animate-pulse">
+              Merging...
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Branch status cards */}
@@ -92,6 +130,17 @@ export function MergeSection({ planId }: { planId: string }) {
               {mergeSummary.combinedDiffStat}
             </pre>
           )}
+        </div>
+      )}
+
+      {mergeError && !conflictInfo && (
+        <div className="rounded border border-red-800 bg-red-900/20 p-2 space-y-1">
+          <p className="text-[10px] font-semibold text-red-300">
+            Merge failure
+          </p>
+          <p className="text-[10px] text-gray-300 leading-relaxed">
+            {mergeError}
+          </p>
         </div>
       )}
 
@@ -146,14 +195,31 @@ export function MergeSection({ planId }: { planId: string }) {
                 Reviewing integration...
               </span>
             )}
+            {reviewError && !reviewStreaming && (
+              <div className="space-y-1">
+                <p className="text-[10px] font-semibold text-red-300">
+                  Review failure
+                </p>
+                <p className="text-[10px] text-gray-300 leading-relaxed">
+                  {reviewError}
+                </p>
+              </div>
+            )}
             {reviewOutput && <Markdown content={reviewOutput} />}
+            {!reviewStreaming && !reviewOutput && !reviewError && (
+              <p className="text-[10px] text-gray-500">
+                {reviewStatus === "complete"
+                  ? "Integration review completed without markdown output."
+                  : "Review output will appear here after the merge completes."}
+              </p>
+            )}
           </div>
-          {!reviewStreaming && reviewOutput && (
+          {!reviewStreaming && (reviewOutput || reviewError) && (
             <button
               onClick={() => runReview(planId)}
               className="text-[9px] text-gray-500 hover:text-gray-300"
             >
-              Re-run review
+              {reviewActionLabel}
             </button>
           )}
         </div>

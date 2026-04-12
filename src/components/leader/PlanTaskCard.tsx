@@ -40,6 +40,7 @@ export function PlanTaskCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [showOutput, setShowOutput] = useState(true);
+  const [showValidationOutput, setShowValidationOutput] = useState(false);
   const selectPiece = useProjectStore((s) => s.selectPiece);
   const pieces = useProjectStore((s) => s.pieces);
   const runTask = useLeaderStore((s) => s.runTask);
@@ -48,8 +49,16 @@ export function PlanTaskCard({
   const phaseMatches = !task.suggestedPhase || currentPiece?.phase === task.suggestedPhase;
 
   const isRunning = agentRun?.running ?? false;
-  const hasOutput = !!agentRun?.output;
+  const hasAgentOutput = !!agentRun?.output;
+  const hasValidationOutput = !!agentRun?.validationOutput;
+  const hasOutput = hasAgentOutput || hasValidationOutput;
   const canRun = approved && !!task.pieceId && !isRunning && task.status !== "complete" && !runningAll;
+  const runLabel = agentRun?.success === false ? "Retry ▶" : "Run ▶";
+
+  useEffect(() => {
+    if (!agentRun?.validationOutput) return;
+    setShowValidationOutput(agentRun.validation?.passed === false);
+  }, [agentRun?.validation?.passed, agentRun?.validationOutput]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +67,7 @@ export function PlanTaskCard({
       const existing = useAgentStore.getState().runs[task.pieceId];
       if (existing?.running || existing?.output) return;
 
-      const { getAgentHistory } = await import("../../api/tauriApiAsync");
+      const { getAgentHistory } = await import("../../api/leaderApi");
       try {
         const history = await getAgentHistory(task.pieceId);
         const latest = history[0];
@@ -130,9 +139,9 @@ export function PlanTaskCard({
             <button
               onClick={handleRun}
               className="rounded bg-purple-600 px-1.5 py-0.5 text-[9px] font-medium text-white hover:bg-purple-500 transition-colors"
-              title="Run agent for this task"
+              title={agentRun?.success === false ? "Retry the failed task" : "Run agent for this task"}
             >
-              Run ▶
+              {runLabel}
             </button>
           )}
           {isRunning && (
@@ -188,6 +197,33 @@ export function PlanTaskCard({
         </div>
       )}
 
+      {agentRun && !isRunning && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5 text-[9px]">
+          <span
+            className={`rounded px-1.5 py-0.5 font-medium ${
+              agentRun.success === false
+                ? "bg-red-900/50 text-red-300"
+                : "bg-green-900/40 text-green-300"
+            }`}
+          >
+            {agentRun.success === false
+              ? `Last run failed${typeof agentRun.exitCode === "number" ? ` (exit ${agentRun.exitCode})` : ""}`
+              : "Last run succeeded"}
+          </span>
+          {agentRun.validation && (
+            <span
+              className={`rounded px-1.5 py-0.5 font-medium ${
+                agentRun.validation.passed
+                  ? "bg-green-900/40 text-green-300"
+                  : "bg-red-900/50 text-red-300"
+              }`}
+            >
+              Validation: {agentRun.validation.passed ? "passed" : `failed (exit ${agentRun.validation.exitCode})`}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Inline agent output */}
       {hasOutput && (
         <div className="mt-1.5 border-t border-gray-700 pt-1.5">
@@ -195,9 +231,9 @@ export function PlanTaskCard({
             onClick={() => setShowOutput(!showOutput)}
             className="text-[9px] text-gray-500 hover:text-gray-400 mb-1"
           >
-            {showOutput ? "▾ Hide output" : "▸ Show output"}
+            {showOutput ? "▾ Hide task output" : "▸ Show task output"}
           </button>
-          {showOutput && (
+          {showOutput && hasAgentOutput && (
             <pre
               ref={outputRef}
               className="max-h-32 overflow-y-auto rounded bg-gray-900 p-1.5 text-[10px] text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed"
@@ -205,15 +241,34 @@ export function PlanTaskCard({
               {agentRun.output}
             </pre>
           )}
+          {showOutput && !hasAgentOutput && hasValidationOutput && (
+            <p className="text-[9px] text-gray-500">
+              No agent output was captured for this run.
+            </p>
+          )}
           {agentRun.usage && !isRunning && (
             <p className="text-[9px] text-gray-600 mt-0.5">
               Tokens: {agentRun.usage.input} in / {agentRun.usage.output} out
             </p>
           )}
           {agentRun.validation && !isRunning && (
-            <p className={`text-[9px] mt-0.5 ${agentRun.validation.passed ? "text-green-500" : "text-red-400"}`}>
-              Validation: {agentRun.validation.passed ? "passed" : `failed (exit ${agentRun.validation.exitCode})`}
-            </p>
+            <div className="mt-0.5 space-y-0.5">
+              {hasValidationOutput && (
+                <>
+                  <button
+                    onClick={() => setShowValidationOutput((value) => !value)}
+                    className="text-[9px] text-gray-500 hover:text-gray-400"
+                  >
+                    {showValidationOutput ? "▾ Hide validation log" : "▸ Show validation log"}
+                  </button>
+                  {showValidationOutput && (
+                    <pre className="max-h-28 overflow-y-auto rounded bg-gray-950 p-1.5 text-[9px] text-gray-400 font-mono whitespace-pre-wrap break-words leading-relaxed">
+                      {agentRun.validationOutput}
+                    </pre>
+                  )}
+                </>
+              )}
+            </div>
           )}
         </div>
       )}

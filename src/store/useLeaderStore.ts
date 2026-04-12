@@ -1,24 +1,19 @@
 import { create } from "zustand";
 import type { WorkPlan, PlanTask, TaskStatus, Phase, MergeProgressEvent, MergeSummary, ConflictInfo } from "../types";
-import {
-  generateWorkPlan,
-  listWorkPlans,
-  updatePlanStatus,
-  updatePlanTaskStatus,
-  runPieceAgent,
-  onAgentOutputChunk,
-  mergePlanBranches,
-  resolveMergeConflict,
-  runIntegrationReview,
-  onMergeProgress,
-  onIntegrationReviewChunk,
-} from "../api/tauriApi";
 import { useAgentStore } from "./useAgentStore";
 import { useProjectStore } from "./useProjectStore";
 import { useToastStore } from "./useToastStore";
 import { devLog } from "../utils/devLog";
 
 let runAllCancelled = false;
+
+async function loadLeaderApi() {
+  return import("../api/leaderApi");
+}
+
+type RunAllStatus = "idle" | "running" | "complete" | "failed" | "cancelled";
+type MergeStatus = "idle" | "merging" | "complete" | "conflict" | "failed";
+type ReviewStatus = "idle" | "running" | "complete" | "failed";
 
 interface LeaderStore {
   projectId: string | null;
@@ -28,9 +23,13 @@ interface LeaderStore {
   streamOutput: string;
   runningAll: boolean;
   runAllProgress: string;
+  runAllStatus: RunAllStatus;
+  runAllError: string | null;
 
   // Merge state
   merging: boolean;
+  mergeStatus: MergeStatus;
+  mergeError: string | null;
   mergeProgress: MergeProgressEvent[];
   mergeSummary: MergeSummary | null;
   conflictInfo: ConflictInfo | null;
@@ -38,6 +37,8 @@ interface LeaderStore {
 
   // Integration review state
   reviewStreaming: boolean;
+  reviewStatus: ReviewStatus;
+  reviewError: string | null;
   reviewOutput: string;
 
   generatePlan: (projectId: string, guidance: string) => Promise<void>;
@@ -68,19 +69,26 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
   streamOutput: "",
   runningAll: false,
   runAllProgress: "",
+  runAllStatus: "idle",
+  runAllError: null,
   merging: false,
+  mergeStatus: "idle",
+  mergeError: null,
   mergeProgress: [],
   mergeSummary: null,
   conflictInfo: null,
   resolvingConflict: false,
   reviewStreaming: false,
+  reviewStatus: "idle",
+  reviewError: null,
   reviewOutput: "",
 
   generatePlan: async (projectId, guidance) => {
     devLog("info", "Store:Leader", `Generating plan for project ${projectId}`, { guidance: guidance.slice(0, 100) });
     set({ projectId, generating: true, streamOutput: "", currentPlan: null });
     try {
-      const plan = await generateWorkPlan(projectId, guidance);
+      const api = await loadLeaderApi();
+      const plan = await api.generateWorkPlan(projectId, guidance);
       if (get().projectId !== projectId) {
         devLog("debug", "Store:Leader", `Discarding stale generated plan for project ${projectId}`);
         return;
@@ -98,7 +106,8 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
   loadPlans: async (projectId) => {
     set({ projectId });
     try {
-      const plans = await listWorkPlans(projectId);
+      const api = await loadLeaderApi();
+      const plans = await api.listWorkPlans(projectId);
       if (get().projectId !== projectId) {
         devLog("debug", "Store:Leader", `Discarding stale plans for project ${projectId}`);
         return;
@@ -115,7 +124,8 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
   approvePlan: async (planId) => {
     devLog("info", "Store:Leader", `Approving plan ${planId}`);
     try {
-      const plan = await updatePlanStatus(planId, "approved");
+      const api = await loadLeaderApi();
+      const plan = await api.updatePlanStatus(planId, "approved");
       set({ currentPlan: plan });
       const plans = get().plans.map((p) => (p.id === planId ? plan : p));
       set({ plans });
@@ -128,7 +138,8 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
   rejectPlan: async (planId) => {
     devLog("info", "Store:Leader", `Rejecting plan ${planId}`);
     try {
-      const plan = await updatePlanStatus(planId, "rejected");
+      const api = await loadLeaderApi();
+      const plan = await api.updatePlanStatus(planId, "rejected");
       set({ currentPlan: plan });
       const plans = get().plans.map((p) => (p.id === planId ? plan : p));
       set({ plans });
@@ -140,7 +151,8 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
 
   updateTaskStatus: async (planId, taskId, status) => {
     try {
-      const plan = await updatePlanTaskStatus(planId, taskId, status);
+      const api = await loadLeaderApi();
+      const plan = await api.updatePlanTaskStatus(planId, taskId, status);
       set({ currentPlan: plan });
       const plans = get().plans.map((p) => (p.id === planId ? plan : p));
       set({ plans });
@@ -154,10 +166,11 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       devLog("info", "Store:Leader", `Running task "${task.title}" for piece ${task.pieceId}`, { planId, taskId: task.id });
       const agentStore = useAgentStore.getState();
       agentStore.startRun(task.pieceId);
+      const api = await loadLeaderApi();
 
       // Update task status to in-progress
       try {
-        const plan = await updatePlanTaskStatus(planId, task.id, "in-progress");
+        const plan = await api.updatePlanTaskStatus(planId, task.id, "in-progress");
         set({ currentPlan: plan });
         const plans = get().plans.map((p) => (p.id === planId ? plan : p));
         set({ plans });
@@ -182,7 +195,7 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       }
 
       // Set up chunk listener before calling run
-      const unlisten = await onAgentOutputChunk((payload) => {
+      const unlisten = await api.onAgentOutputChunk((payload) => {
         if (payload.pieceId !== task.pieceId) return;
         const store = useAgentStore.getState();
         if (payload.done) {
@@ -201,7 +214,7 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
           unlisten();
           if (success) {
             // Mark task as complete
-            updatePlanTaskStatus(planId, task.id, "complete")
+            api.updatePlanTaskStatus(planId, task.id, "complete")
               .then((plan) => {
                 set({ currentPlan: plan });
                 const plans = get().plans.map((p) => (p.id === planId ? plan : p));
@@ -211,7 +224,7 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
             devLog("info", "Store:Leader", `Task "${task.title}" completed successfully`);
             resolve(true);
           } else {
-            updatePlanTaskStatus(planId, task.id, "pending")
+            api.updatePlanTaskStatus(planId, task.id, "pending")
               .then((plan) => {
                 set({ currentPlan: plan });
                 const plans = get().plans.map((p) => (p.id === planId ? plan : p));
@@ -230,13 +243,13 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       });
 
       try {
-        await runPieceAgent(task.pieceId);
+        await api.runPieceAgent(task.pieceId);
       } catch (e) {
         useToastStore.getState().addToast(`Agent error: ${e}`);
         agentStore.completeRun(task.pieceId, { usage: { input: 0, output: 0 } });
         unlisten();
         // Revert task status
-        updatePlanTaskStatus(planId, task.id, "pending")
+        api.updatePlanTaskStatus(planId, task.id, "pending")
           .then((plan) => {
             set({ currentPlan: plan });
             const plans = get().plans.map((p) => (p.id === planId ? plan : p));
@@ -259,34 +272,57 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       .sort((a, b) => a.order - b.order);
 
     if (tasks.length === 0) {
+      set({ runAllStatus: "idle", runAllError: null });
       useToastStore.getState().addToast("No pending tasks to run");
       return;
     }
 
     devLog("info", "Store:Leader", `Running all ${tasks.length} pending tasks`, { planId });
-    set({ runningAll: true, runAllProgress: `0/${tasks.length}` });
+    set({
+      runningAll: true,
+      runAllProgress: `0/${tasks.length}`,
+      runAllStatus: "running",
+      runAllError: null,
+    });
 
     let completed = 0;
+    let failedMessage: string | null = null;
+    let cancelled = false;
     for (const task of tasks) {
       if (runAllCancelled) {
+        cancelled = true;
         useToastStore.getState().addToast("Run All cancelled");
         break;
       }
       set({ runAllProgress: `${completed + 1}/${tasks.length}` });
       const success = await get().runTask(planId, task);
       if (!success) {
-        useToastStore.getState().addToast(`Run All stopped: task "${task.title}" failed`);
+        failedMessage = `Run All stopped: task "${task.title}" failed`;
+        set({
+          runAllStatus: "failed",
+          runAllError: failedMessage,
+        });
+        useToastStore.getState().addToast(failedMessage);
         break;
       }
       completed++;
     }
 
-    set({ runningAll: false, runAllProgress: "" });
+    set({
+      runningAll: false,
+      runAllProgress: "",
+      runAllStatus: cancelled
+        ? "cancelled"
+        : failedMessage
+          ? "failed"
+          : "complete",
+      runAllError: failedMessage,
+    });
 
     devLog("info", "Store:Leader", `Run All complete: ${completed}/${tasks.length} tasks`);
 
     // Auto-trigger merge if all tasks completed successfully
-    if (completed === tasks.length && !runAllCancelled) {
+    if (completed === tasks.length && !runAllCancelled && !failedMessage) {
       get().mergeBranches(planId);
     }
   },
@@ -299,14 +335,19 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
     devLog("info", "Store:Leader", `Starting branch merge`, { planId });
     set({
       merging: true,
+      mergeStatus: "merging",
+      mergeError: null,
       mergeProgress: [],
       mergeSummary: null,
       conflictInfo: null,
       reviewStreaming: false,
+      reviewStatus: "idle",
+      reviewError: null,
       reviewOutput: "",
     });
 
-    const unlisten = await onMergeProgress((payload) => {
+    const api = await loadLeaderApi();
+    const unlisten = await api.onMergeProgress((payload) => {
       if (payload.planId !== planId) return;
       set((state) => ({
         mergeProgress: [...state.mergeProgress.filter(
@@ -316,11 +357,12 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
     });
 
     try {
-      const summary = await mergePlanBranches(planId);
+      const summary = await api.mergePlanBranches(planId);
       set({ mergeSummary: summary, conflictInfo: summary.conflict });
       unlisten();
 
       if (!summary.conflict) {
+        set({ mergeStatus: "complete", mergeError: null });
         useToastStore.getState().addToast(
           `Merged ${summary.merged.length} branch${summary.merged.length !== 1 ? "es" : ""} to main`,
           "info",
@@ -328,6 +370,7 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
         // Auto-trigger integration review
         get().runReview(planId);
       } else {
+        set({ mergeStatus: "conflict", mergeError: null });
         useToastStore.getState().addToast(
           `Merge conflict in ${summary.conflict.pieceName}`,
           "warning",
@@ -335,7 +378,9 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       }
     } catch (e) {
       devLog("error", "Store:Leader", `Merge failed`, e);
-      useToastStore.getState().addToast(`Merge failed: ${e}`);
+      const message = `Merge failed: ${e}`;
+      set({ mergeStatus: "failed", mergeError: message });
+      useToastStore.getState().addToast(message);
       unlisten();
     } finally {
       set({ merging: false });
@@ -344,9 +389,10 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
 
   resolveConflict: async (planId, pieceId) => {
     devLog("info", "Store:Leader", `Resolving conflict for piece ${pieceId}`);
-    set({ resolvingConflict: true });
+    set({ resolvingConflict: true, mergeStatus: "merging", mergeError: null });
     try {
-      await resolveMergeConflict(planId, pieceId);
+      const api = await loadLeaderApi();
+      await api.resolveMergeConflict(planId, pieceId);
       set({ conflictInfo: null, resolvingConflict: false });
       useToastStore.getState().addToast("Conflict resolved — resuming merge", "info");
       // Resume merging remaining branches
@@ -354,18 +400,26 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
     } catch (e) {
       set({ resolvingConflict: false });
       devLog("error", "Store:Leader", `Conflict resolution failed`, e);
-      useToastStore.getState().addToast(`Conflict resolution failed: ${e}`);
+      const message = `Conflict resolution failed: ${e}`;
+      set({ mergeStatus: "failed", mergeError: message });
+      useToastStore.getState().addToast(message);
     }
   },
 
   runReview: async (planId) => {
     devLog("info", "Store:Leader", `Starting integration review`, { planId });
-    set({ reviewStreaming: true, reviewOutput: "" });
+    set({
+      reviewStreaming: true,
+      reviewStatus: "running",
+      reviewError: null,
+      reviewOutput: "",
+    });
 
-    const unlisten = await onIntegrationReviewChunk((payload) => {
+    const api = await loadLeaderApi();
+    const unlisten = await api.onIntegrationReviewChunk((payload) => {
       if (payload.planId !== planId) return;
       if (payload.done) {
-        set({ reviewStreaming: false });
+        set({ reviewStreaming: false, reviewStatus: "complete", reviewError: null });
         unlisten();
       } else {
         set((state) => ({ reviewOutput: state.reviewOutput + payload.chunk }));
@@ -373,12 +427,13 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
     });
 
     try {
-      await runIntegrationReview(planId);
+      await api.runIntegrationReview(planId);
     } catch (e) {
-      set({ reviewStreaming: false });
+      const message = `Integration review error: ${e}`;
+      set({ reviewStreaming: false, reviewStatus: "failed", reviewError: message });
       unlisten();
       devLog("error", "Store:Leader", `Integration review failed`, e);
-      useToastStore.getState().addToast(`Integration review error: ${e}`);
+      useToastStore.getState().addToast(message);
     }
   },
 
@@ -399,12 +454,18 @@ export const useLeaderStore = create<LeaderStore>((set, get) => ({
       streamOutput: "",
       runningAll: false,
       runAllProgress: "",
+      runAllStatus: "idle",
+      runAllError: null,
       merging: false,
+      mergeStatus: "idle",
+      mergeError: null,
       mergeProgress: [],
       mergeSummary: null,
       conflictInfo: null,
       resolvingConflict: false,
       reviewStreaming: false,
+      reviewStatus: "idle",
+      reviewError: null,
       reviewOutput: "",
     });
   },

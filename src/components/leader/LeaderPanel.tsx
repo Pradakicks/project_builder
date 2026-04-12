@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useLeaderStore } from "../../store/useLeaderStore";
 import { useProjectStore } from "../../store/useProjectStore";
-import { onLeaderPlanChunk } from "../../api/tauriApi";
+import { onLeaderPlanChunk } from "../../api/leaderApi";
 import { PlanTaskCard } from "./PlanTaskCard";
 import { MergeSection } from "./MergeSection";
 import { Markdown } from "../ui/Markdown";
@@ -31,6 +31,12 @@ export function LeaderPanel({
     streamOutput,
     runningAll,
     runAllProgress,
+    runAllStatus,
+    runAllError,
+    mergeStatus,
+    mergeError,
+    reviewStatus,
+    reviewError,
     generatePlan,
     loadPlans,
     approvePlan,
@@ -114,6 +120,127 @@ export function LeaderPanel({
   const badge = currentPlan
     ? statusBadge[currentPlan.status] ?? statusBadge.draft
     : null;
+  const taskCounts = currentPlan
+    ? currentPlan.tasks.reduce(
+        (acc, task) => {
+          acc[task.status] += 1;
+          return acc;
+        },
+        { pending: 0, "in-progress": 0, complete: 0, skipped: 0 } as Record<string, number>,
+      )
+    : null;
+
+  const posture = (() => {
+    if (!currentPlan) {
+      return {
+        bg: "bg-gray-600",
+        label: "No plan loaded",
+        message: "Create or open a plan to see task, merge, and review progress.",
+      };
+    }
+
+    if (runningAll) {
+      return {
+        bg: "bg-purple-600",
+        label: "Running tasks",
+        message: `Batch execution is active${runAllProgress ? ` (${runAllProgress})` : ""}. Tasks stop on the first failure.`,
+      };
+    }
+
+    if (runAllStatus === "failed" && runAllError) {
+      return {
+        bg: "bg-red-600",
+        label: "Task run stopped",
+        message: runAllError,
+      };
+    }
+
+    if (runAllStatus === "cancelled") {
+      return {
+        bg: "bg-amber-600",
+        label: "Run cancelled",
+        message: "The batch was stopped before all pending tasks completed.",
+      };
+    }
+
+    if (mergeStatus === "merging") {
+      return {
+        bg: "bg-emerald-600",
+        label: "Merging branches",
+        message: "Piece branches are being merged back to main in task order.",
+      };
+    }
+
+    if (mergeStatus === "conflict") {
+      return {
+        bg: "bg-red-600",
+        label: "Merge paused",
+        message: mergeError ?? "A merge conflict needs operator attention before the plan can continue.",
+      };
+    }
+
+    if (mergeStatus === "failed") {
+      return {
+        bg: "bg-red-600",
+        label: "Merge failed",
+        message: mergeError ?? "Merge failed before completion.",
+      };
+    }
+
+    if (reviewStatus === "running") {
+      return {
+        bg: "bg-blue-600",
+        label: "Reviewing",
+        message: "Integration review is checking the merged result for compatibility issues.",
+      };
+    }
+
+    if (reviewStatus === "failed") {
+      return {
+        bg: "bg-red-600",
+        label: "Review failed",
+        message: reviewError ?? "Integration review failed before completion.",
+      };
+    }
+
+    if (reviewStatus === "complete") {
+      return {
+        bg: "bg-green-600",
+        label: "Review complete",
+        message: "The merged plan has been reviewed. Check the review output below for any follow-up work.",
+      };
+    }
+
+    if (currentPlan.status === "approved" && (taskCounts?.pending ?? 0) > 0) {
+      return {
+        bg: "bg-blue-600",
+        label: "Ready to run",
+        message: "Approved tasks are queued. Balanced mode keeps execution visible and review-gated.",
+      };
+    }
+
+    if (currentPlan.status === "draft") {
+      return {
+        bg: "bg-yellow-600",
+        label: "Plan draft",
+        message: "Review the plan, then approve it before task execution begins.",
+      };
+    }
+
+    if (currentPlan.status === "rejected") {
+      return {
+        bg: "bg-red-600",
+        label: "Plan rejected",
+        message: "The current plan was rejected and will not execute until a new draft is generated.",
+      };
+    }
+
+    return {
+      bg: "bg-gray-600",
+      label: "Idle",
+      message: "Use the plan controls to move the project forward.",
+    };
+  })();
 
   const content = (
     <>
@@ -181,6 +308,38 @@ export function LeaderPanel({
               <span className="text-[10px] text-gray-500">
                 v{currentPlan.version}
               </span>
+            </div>
+
+            <div className="rounded border border-gray-700 bg-gray-800/50 p-2 space-y-1.5 text-[10px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold uppercase tracking-wider text-gray-400">
+                  Execution posture
+                </span>
+                <span className={`rounded px-1.5 py-0.5 font-medium text-white ${posture.bg}`}>
+                  {posture.label}
+                </span>
+              </div>
+              <p className="text-gray-300 leading-relaxed">{posture.message}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {taskCounts && (
+                  <span className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-gray-400">
+                    Tasks: {taskCounts.complete + taskCounts.skipped}/{currentPlan.tasks.length} done
+                  </span>
+                )}
+                <span className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-gray-400">
+                  Merge: {mergeStatus === "idle" ? "waiting" : mergeStatus}
+                </span>
+                <span className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-gray-400">
+                  Review: {reviewStatus === "idle" ? "waiting" : reviewStatus}
+                </span>
+              </div>
+              {(runAllError || mergeError || reviewError) && (
+                <div className="space-y-0.5 rounded border border-gray-700 bg-gray-950/70 px-2 py-1 text-[10px]">
+                  {runAllError && <p className="text-red-300">{runAllError}</p>}
+                  {mergeError && <p className="text-red-300">{mergeError}</p>}
+                  {reviewError && <p className="text-red-300">{reviewError}</p>}
+                </div>
+              )}
             </div>
 
             {/* Run All button for approved plans */}
