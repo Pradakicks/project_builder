@@ -82,11 +82,11 @@ enum AgentResult {
     },
 }
 
-async fn run_validation_command(
+async fn run_validation_command<R: tauri::Runtime>(
     command: &str,
     working_dir: &str,
     piece_id: &str,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<crate::db::ValidationResult, String> {
     let mut child = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
@@ -182,11 +182,11 @@ async fn run_validation_command(
 /// Run a piece's agent: dispatches to built-in LLM or external tool based on config.
 /// Emits the unified done event with phase transition fields.
 /// Optional `feedback` enables iterative mode: previous output + feedback are injected as context.
-pub async fn run_piece_agent(
+pub async fn run_piece_agent<R: tauri::Runtime>(
     piece_id: &str,
     feedback: Option<&str>,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<TokenUsage, String> {
     let (piece, context, settings) = load_piece_context(piece_id, db)?;
 
@@ -368,11 +368,11 @@ fn update_plan_task_status_in_db(
     Ok(())
 }
 
-pub async fn run_all_plan_tasks(
+pub async fn run_all_plan_tasks<R: tauri::Runtime>(
     plan_id: &str,
     db: &Mutex<Database>,
     running_pieces: &Mutex<HashSet<String>>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<(), String> {
     let plan = {
         let db = db.lock().map_err(|e| e.to_string())?;
@@ -454,14 +454,14 @@ pub async fn run_all_plan_tasks(
 
 /// Run the built-in LLM agent. Streams chunks but does NOT emit the done event
 /// (that's handled by run_piece_agent).
-async fn run_builtin_agent(
+async fn run_builtin_agent<R: tauri::Runtime>(
     piece: &Piece,
     context: &PieceContext,
     settings: &ProjectSettings,
     piece_id: &str,
     feedback: Option<&str>,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<AgentResult, String> {
     let max_tokens = piece.agent_config.token_budget.unwrap_or(4096) as u32;
 
@@ -575,7 +575,7 @@ async fn run_builtin_agent(
 }
 
 /// Emit a git-related info line through the agent output stream.
-fn emit_git_info(app_handle: &AppHandle, piece_id: &str, message: &str) {
+fn emit_git_info<R: tauri::Runtime>(app_handle: &AppHandle<R>, piece_id: &str, message: &str) {
     let _ = app_handle.emit(
         "agent-output-chunk",
         json!({
@@ -588,7 +588,7 @@ fn emit_git_info(app_handle: &AppHandle, piece_id: &str, message: &str) {
 
 /// Run an external tool (Claude Code, Codex, etc.) with git branch/commit lifecycle.
 /// Streams chunks but does NOT emit the done event (that's handled by run_piece_agent).
-async fn run_external_agent(
+async fn run_external_agent<R: tauri::Runtime>(
     piece: &Piece,
     context: &PieceContext,
     settings: &ProjectSettings,
@@ -596,7 +596,7 @@ async fn run_external_agent(
     piece_id: &str,
     feedback: Option<&str>,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<AgentResult, String> {
     use super::git_ops;
 
@@ -810,13 +810,13 @@ async fn run_external_agent(
 
 /// Generate a concise context summary from an agent's output and store as an artifact.
 /// Called fire-and-forget after successful agent runs.
-async fn generate_context_summary(
+async fn generate_context_summary<R: tauri::Runtime>(
     piece_id: &str,
     piece_name: &str,
     agent_output: &str,
     git_info: Option<(&str, &str)>, // (working_dir, branch_name)
     settings: &ProjectSettings,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<(), String> {
     debug!(piece_id, piece_name, output_len = agent_output.len(), has_git = git_info.is_some(), "Generating context summary");
 
@@ -888,11 +888,11 @@ async fn generate_context_summary(
 }
 
 /// Run the Leader Agent: analyze full diagram, produce a structured work plan
-pub async fn run_leader_agent(
+pub async fn run_leader_agent<R: tauri::Runtime>(
     project_id: &str,
     user_guidance: &str,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<WorkPlan, String> {
     // 1. Create WorkPlan row, supersede existing drafts
     let (plan_id, messages, provider_name, api_key, model, base_url) = {
@@ -1149,4 +1149,242 @@ pub fn resolve_api_key(provider_name: &str) -> String {
         debug!(provider = provider_name, source = "env", "API key resolved from environment");
     }
     val
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::project_commands::create_project_impl;
+    use crate::llm::{set_test_llm_responses, TestLlmResponses};
+    use crate::test_support::ensure_test_tools;
+    use std::collections::HashSet;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    fn temp_workspace(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "project-builder-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).expect("create test workspace");
+        path
+    }
+
+    #[test]
+    fn parse_plan_output_handles_fenced_json_and_fallbacks() {
+        let raw = r#"```json
+{"summary":"Ready to ship","tasks":[{"pieceId":"piece-1","pieceName":"API","title":"Build API","description":"Implement it","priority":"high","suggestedPhase":"implementing","dependsOn":[],"order":1}]}
+```"#;
+
+        let (summary, tasks) = parse_plan_output(raw);
+        assert_eq!(summary, "Ready to ship");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].piece_id, "piece-1");
+        assert_eq!(tasks[0].suggested_phase, "implementing");
+
+        let (summary, tasks) = parse_plan_output("definitely not json");
+        assert_eq!(summary, "Plan generated but could not be parsed");
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_all_plan_tasks_rejects_unapproved_plans() {
+        ensure_test_tools();
+
+        let workspace = temp_workspace("run-all-gate");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Gate Project".to_string(),
+            "Approval gate".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            db.create_piece(&project.id, None, "Gate Piece", 0.0, 0.0)
+                .expect("create piece")
+        };
+
+        let plan = {
+            let db = state.lock().expect("lock db");
+            let plan = db
+                .create_work_plan(&project.id, "Gate guidance")
+                .expect("create plan");
+            db.update_work_plan(
+                &plan.id,
+                &WorkPlanUpdate {
+                    tasks: Some(vec![PlanTask {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        piece_id: piece.id,
+                        piece_name: piece.name,
+                        title: "Gate task".to_string(),
+                        description: "Should not run".to_string(),
+                        priority: TaskPriority::High,
+                        suggested_phase: "implementing".to_string(),
+                        dependencies: vec![],
+                        status: TaskStatus::Pending,
+                        order: 1,
+                    }]),
+                    ..Default::default()
+                },
+            )
+            .expect("seed plan");
+            plan
+        };
+
+        let running_pieces = Mutex::new(HashSet::new());
+        let err = run_all_plan_tasks(&plan.id, &state, &running_pieces, &app_handle)
+            .await
+            .expect_err("draft plan should be rejected");
+        assert!(err.contains("approved"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn core_orchestration_happy_path_completes_create_plan_run_merge_review() {
+        ensure_test_tools();
+        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+
+        let workspace = temp_workspace("orchestration-smoke");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Smoke Project".to_string(),
+            "End-to-end orchestration smoke".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+        let working_dir = project
+            .settings
+            .working_directory
+            .clone()
+            .expect("project working directory");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            db.create_piece(&project.id, None, "Auth Service", 0.0, 0.0)
+                .expect("create piece")
+        };
+        set_test_llm_responses(TestLlmResponses {
+            leader_plan: serde_json::json!({
+                "summary": "Ship the feature",
+                "tasks": [{
+                    "pieceId": piece.id.clone(),
+                    "pieceName": piece.name.clone(),
+                    "title": "Implement the feature",
+                    "description": "Execute the end-to-end path",
+                    "priority": "high",
+                    "suggestedPhase": "implementing",
+                    "dependsOn": [],
+                    "order": 1
+                }]
+            })
+            .to_string(),
+            integration_review: "Integration review passed.".to_string(),
+            summary: String::new(),
+        });
+
+        {
+            let db = state.lock().expect("lock db");
+            let mut settings = project.settings.clone();
+            settings.llm_configs = vec![crate::models::LlmConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                api_key_env: None,
+                base_url: None,
+            }];
+            db.update_project(&project.id, None, None, None, Some(&settings))
+                .expect("update project settings");
+
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("configure external engine");
+
+            drop(db);
+
+            let plan = run_leader_agent(&project.id, "Build the end-to-end feature", &state, &app_handle)
+                .await
+                .expect("generate plan");
+            let plan_id = plan.id.clone();
+            assert_eq!(plan.status, PlanStatus::Draft);
+            assert_eq!(plan.tasks.len(), 1);
+
+            {
+                let db = state.lock().expect("lock db");
+                let approved = db
+                    .update_work_plan(
+                        &plan.id,
+                        &WorkPlanUpdate {
+                            status: Some(PlanStatus::Approved),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("approve plan");
+                assert_eq!(approved.status, PlanStatus::Approved);
+            }
+
+            let running_pieces = Mutex::new(HashSet::new());
+            run_all_plan_tasks(&plan.id, &state, &running_pieces, &app_handle)
+                .await
+                .expect("run all tasks");
+
+            let db = state.lock().expect("lock db");
+            let plan = db.get_work_plan(&plan_id).expect("reload plan");
+            assert_eq!(plan.status, PlanStatus::Approved);
+            assert_eq!(plan.tasks[0].status, TaskStatus::Complete);
+            assert!(plan.integration_review.contains("Integration review passed"));
+        }
+
+        let db = state.lock().expect("lock db");
+        let plans = db.list_work_plans(&project.id).expect("list plans");
+        assert_eq!(plans.len(), 1);
+        let plan = &plans[0];
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].status, TaskStatus::Complete);
+        assert!(plan.integration_review.contains("Integration review passed"));
+
+        let piece_after = db.get_piece(&piece.id).expect("reload piece");
+        assert_eq!(piece_after.phase, Phase::Implementing);
+
+        let generated = std::fs::read_to_string(std::path::Path::new(&working_dir).join("generated-from-codex.txt"))
+            .expect("read fake codex output");
+        assert!(generated.contains("fake codex run"));
+
+        let git_status = Command::new("git")
+            .args([
+                "-C",
+                working_dir.as_str(),
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .expect("run git status");
+        assert!(git_status.status.success());
+        assert!(String::from_utf8_lossy(&git_status.stdout).trim().is_empty());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 }

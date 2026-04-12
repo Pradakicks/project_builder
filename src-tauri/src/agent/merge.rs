@@ -47,10 +47,10 @@ pub struct ConflictInfo {
 
 /// Merge all piece branches for a completed plan back to main.
 /// Emits "merge-progress" events throughout.
-pub async fn merge_plan_branches(
+pub async fn merge_plan_branches<R: tauri::Runtime>(
     plan_id: &str,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<MergeSummary, String> {
     // 1. Load plan and validate
     let (plan, working_dir, conflict_policy) = {
@@ -238,11 +238,11 @@ pub async fn merge_plan_branches(
 
 /// Resolve a merge conflict using AI. Called from IPC when user clicks "Resolve with AI".
 /// Expects to be called while a merge conflict is still active (not aborted).
-pub async fn resolve_merge_conflict(
+pub async fn resolve_merge_conflict<R: tauri::Runtime>(
     plan_id: &str,
     piece_id: &str,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<(), String> {
     let (piece_name, working_dir) = {
         let db = db.lock().map_err(|e| e.to_string())?;
@@ -273,7 +273,7 @@ pub async fn resolve_merge_conflict(
 }
 
 /// Internal AI conflict resolution — spawns external tool or calls LLM to resolve.
-async fn resolve_conflict_with_ai_internal(
+async fn resolve_conflict_with_ai_internal<R: tauri::Runtime>(
     piece_id: &str,
     piece_name: &str,
     branch: &str,
@@ -281,7 +281,7 @@ async fn resolve_conflict_with_ai_internal(
     conflict_files: &[String],
     working_dir: &str,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<(), String> {
     let (execution_engine, settings) = {
         let db = db.lock().map_err(|e| e.to_string())?;
@@ -412,10 +412,10 @@ fn extract_file_content(response: &str, filename: &str) -> Option<String> {
 
 /// Run an integration review after all branches are merged.
 /// Streams output via "integration-review-chunk" events.
-pub async fn run_integration_review(
+pub async fn run_integration_review<R: tauri::Runtime>(
     plan_id: &str,
     db: &Mutex<Database>,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
 ) -> Result<String, String> {
     info!(plan_id, "Starting integration review");
     let (_project_id, plan, pieces, connections, summaries, settings) = {
@@ -556,8 +556,8 @@ pub async fn run_integration_review(
     Ok(review_text)
 }
 
-fn emit_progress(
-    app: &AppHandle,
+fn emit_progress<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     plan_id: &str,
     piece_name: &str,
     branch: &str,
@@ -583,4 +583,97 @@ async fn diff_stat_if_merged(working_dir: &str, before_sha: &str) -> String {
     git_ops::diff_stat_between(working_dir, before_sha, "HEAD")
         .await
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Database, PieceUpdate};
+    use std::sync::Mutex;
+
+    fn temp_workspace(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "project-builder-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).expect("create test workspace");
+        path
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn merge_plan_branches_rejects_incomplete_tasks() {
+        let workspace = temp_workspace("merge-gate");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = {
+            let db = state.lock().expect("lock db");
+            db.create_project_with_settings(
+                "Merge Gate",
+                "Precondition check",
+                crate::models::ProjectSettings {
+                    working_directory: Some(workspace.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("create project")
+        };
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "Merge Piece", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("update piece");
+            piece
+        };
+
+        let plan = {
+            let db = state.lock().expect("lock db");
+            let plan = db
+                .create_work_plan(&project.id, "Merge gate")
+                .expect("create plan");
+            db.update_work_plan(
+                &plan.id,
+                &WorkPlanUpdate {
+                    status: Some(PlanStatus::Approved),
+                    tasks: Some(vec![PlanTask {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        piece_id: piece.id,
+                        piece_name: piece.name,
+                        title: "Incomplete".to_string(),
+                        description: "Should fail merge gating".to_string(),
+                        priority: TaskPriority::High,
+                        suggested_phase: "implementing".to_string(),
+                        dependencies: vec![],
+                        status: TaskStatus::Pending,
+                        order: 1,
+                    }]),
+                    ..Default::default()
+                },
+            )
+            .expect("seed plan");
+            plan
+        };
+
+        let err = merge_plan_branches(&plan.id, &state, &app_handle)
+            .await
+            .expect_err("merge should be gated");
+        assert!(err.contains("complete"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 }

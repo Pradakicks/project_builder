@@ -80,10 +80,8 @@ fn bootstrap_repo(parent_directory: &str, project_name: &str) -> Result<PathBuf,
     Ok(repo_path)
 }
 
-#[tracing::instrument(skip(state))]
-#[tauri::command]
-pub fn create_project(
-    state: State<AppState>,
+pub(crate) fn create_project_impl(
+    db: &std::sync::Mutex<crate::db::Database>,
     name: String,
     description: String,
     parent_directory: Option<String>,
@@ -97,7 +95,7 @@ pub fn create_project(
         created_repo_path = Some(repo_path);
     }
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.lock().map_err(|e| e.to_string())?;
     match db.create_project_with_settings(&name, &description, settings) {
         Ok(project) => {
             info!(project_id = %project.id, name = %project.name, working_directory = ?project.settings.working_directory, "Created project");
@@ -110,6 +108,17 @@ pub fn create_project(
             Err(error)
         }
     }
+}
+
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn create_project(
+    state: State<AppState>,
+    name: String,
+    description: String,
+    parent_directory: Option<String>,
+) -> Result<Project, String> {
+    create_project_impl(&state.db, name, description, parent_directory)
 }
 
 #[tracing::instrument(skip(state))]
@@ -162,4 +171,66 @@ pub fn load_project_from_file(state: State<AppState>, path: String) -> Result<Pr
     let project_file: ProjectFile = serde_json::from_str(&json).map_err(|e| e.to_string())?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.import_project(&project_file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::test_support::ensure_test_tools;
+    use std::sync::Mutex;
+
+    #[test]
+    fn bootstrap_repo_rolls_back_when_git_commit_fails() {
+        ensure_test_tools();
+
+        let parent = std::env::temp_dir().join(format!(
+            "project-builder-rollback-bootstrap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&parent).expect("create rollback parent");
+
+        let repo_path = parent.join("rollback-project");
+        let result = bootstrap_repo(parent.to_str().expect("parent path"), "Rollback Project");
+
+        assert!(result.is_err(), "bootstrap should fail");
+        assert!(!repo_path.exists(), "repo directory should be cleaned up");
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn create_project_impl_persists_project_settings_and_repo_path() {
+        ensure_test_tools();
+
+        let parent = std::env::temp_dir().join(format!(
+            "project-builder-create-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&parent).expect("create parent");
+
+        let db_path = parent.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("create db");
+        let state = Mutex::new(db);
+
+        let project = create_project_impl(
+            &state,
+            "Smoke Project".to_string(),
+            "A smoke-test project".to_string(),
+            Some(parent.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        assert!(project.settings.working_directory.is_some());
+        let working_dir = project.settings.working_directory.as_ref().unwrap();
+        assert!(working_dir.contains("smoke-project"));
+        assert!(std::path::Path::new(working_dir).exists());
+
+        let db = state.into_inner().expect("unwrap db mutex");
+        let stored = db.get_project(&project.id).expect("reload project");
+        assert_eq!(stored.name, "Smoke Project");
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 }

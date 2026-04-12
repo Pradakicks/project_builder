@@ -3,6 +3,8 @@ mod db;
 pub mod models;
 mod llm;
 mod agent;
+#[cfg(test)]
+mod test_support;
 
 use db::Database;
 use std::collections::HashSet;
