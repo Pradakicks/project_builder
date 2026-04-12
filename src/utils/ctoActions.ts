@@ -3,65 +3,301 @@ import { useLeaderStore } from "../store/useLeaderStore";
 import { useAppStore } from "../store/useAppStore";
 import { devLog } from "./devLog";
 import * as api from "../api/tauriApi";
+import type {
+  CtoAction,
+  CtoActionExecutionResult,
+  CtoActionReview,
+  CtoActionName,
+} from "../types";
 
-export interface CtoAction {
-  action: string;
-  [key: string]: unknown;
+const supportedActions = new Set<CtoActionName>([
+  "updatePiece",
+  "createPiece",
+  "createConnection",
+  "updateConnection",
+  "generatePlan",
+  "approvePlan",
+  "rejectPlan",
+  "runAllTasks",
+  "mergeBranches",
+]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(
+  value: unknown,
+  field: string,
+  actionIndex: number,
+): string {
+  if (typeof value !== "string") {
+    throw new Error(`Action ${actionIndex + 1}: "${field}" must be a string`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Action ${actionIndex + 1}: "${field}" cannot be empty`);
+  }
+  return trimmed;
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw new Error("Optional string fields must be strings");
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function readOptionalPlainObject(
+  value: unknown,
+  field: string,
+  actionIndex: number,
+): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) {
+    throw new Error(`Action ${actionIndex + 1}: "${field}" must be an object`);
+  }
+  return { ...value };
+}
+
+function ensureAllowedKeys(
+  raw: Record<string, unknown>,
+  allowedKeys: string[],
+  actionIndex: number,
+): void {
+  const extras = Object.keys(raw).filter((key) => !allowedKeys.includes(key));
+  if (extras.length > 0) {
+    throw new Error(
+      `Action ${actionIndex + 1}: unsupported field(s): ${extras.join(", ")}`,
+    );
+  }
+}
+
+function buildActionError(actionIndex: number, actionName: string, reason: string): string {
+  return `Action ${actionIndex + 1} (${actionName}): ${reason}`;
 }
 
 async function resolvePieceReference(
   projectId: string,
-  reference: unknown,
+  reference: string | undefined,
   createdPieceRefs: Map<string, string>,
 ): Promise<string> {
-  const value = String(reference ?? "").trim();
-  if (!value) {
-    throw new Error("Missing piece reference");
+  const trimmed = reference?.trim();
+  if (!trimmed) {
+    throw new Error("piece reference is required");
   }
 
-  const createdId = createdPieceRefs.get(value);
-  if (createdId) {
-    return createdId;
+  const createdPieceId = createdPieceRefs.get(trimmed);
+  if (createdPieceId) {
+    return createdPieceId;
   }
 
   const pieces = await api.listPieces(projectId);
-  if (pieces.some((piece) => piece.id === value)) {
-    return value;
+  if (pieces.some((piece) => piece.id === trimmed)) {
+    return trimmed;
   }
 
-  const exactNameMatches = pieces.filter((piece) => piece.name === value);
+  const exactNameMatches = pieces.filter((piece) => piece.name === trimmed);
   if (exactNameMatches.length === 1) {
     return exactNameMatches[0].id;
   }
 
   if (exactNameMatches.length > 1) {
-    throw new Error(`Ambiguous piece reference: ${value}`);
+    throw new Error(`Ambiguous piece reference: ${trimmed}`);
   }
 
-  throw new Error(`Piece reference not found: ${value}`);
+  throw new Error(`Piece reference not found: ${trimmed}`);
 }
 
-/** Extract action blocks from CTO markdown response */
-export function parseActions(markdown: string): CtoAction[] {
-  const actions: CtoAction[] = [];
-  const regex = /```action\s*\n([\s\S]*?)\n```/g;
-  let match;
-  while ((match = regex.exec(markdown)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1]);
-      if (parsed && typeof parsed.action === "string") {
-        actions.push(parsed);
-      }
-    } catch (e) {
-      devLog("warn", "CTO", `Failed to parse action block JSON`, e);
-    }
+function normalizeAction(
+  raw: unknown,
+  actionIndex: number,
+): { action?: CtoAction; error?: string } {
+  if (!isPlainObject(raw)) {
+    return {
+      error: `Action ${actionIndex + 1}: expected a JSON object`,
+    };
   }
-  return actions;
+
+  let actionName: string;
+  try {
+    actionName = readString(raw.action, "action", actionIndex);
+  } catch (error) {
+    return {
+      error:
+        error instanceof Error
+          ? error.message
+          : `Action ${actionIndex + 1}: invalid action field`,
+    };
+  }
+  if (!supportedActions.has(actionName as CtoActionName)) {
+    return {
+      error: `Action ${actionIndex + 1}: unsupported action "${actionName}"`,
+    };
+  }
+
+  try {
+    switch (actionName as CtoActionName) {
+      case "updatePiece": {
+        ensureAllowedKeys(raw, ["action", "pieceId", "updates"], actionIndex);
+        const pieceId = readString(raw.pieceId, "pieceId", actionIndex);
+        const updates = readOptionalPlainObject(raw.updates, "updates", actionIndex);
+        if (!updates || Object.keys(updates).length === 0) {
+          throw new Error("updates must contain at least one field");
+        }
+        return { action: { action: "updatePiece", pieceId, updates } };
+      }
+      case "createPiece": {
+        ensureAllowedKeys(
+          raw,
+          ["action", "name", "ref", "pieceType", "responsibilities"],
+          actionIndex,
+        );
+        const name = readString(raw.name, "name", actionIndex);
+        const normalized: CtoAction = {
+          action: "createPiece",
+          name,
+        };
+        const ref = readOptionalString(raw.ref);
+        if (ref) normalized.ref = ref;
+        const pieceType = readOptionalString(raw.pieceType);
+        if (pieceType) normalized.pieceType = pieceType;
+        const responsibilities = readOptionalString(raw.responsibilities);
+        if (responsibilities) normalized.responsibilities = responsibilities;
+        return { action: normalized };
+      }
+      case "createConnection": {
+        ensureAllowedKeys(
+          raw,
+          [
+            "action",
+            "sourceRef",
+            "sourcePieceId",
+            "targetRef",
+            "targetPieceId",
+            "label",
+          ],
+          actionIndex,
+        );
+        const sourceRef =
+          readOptionalString(raw.sourceRef) ?? readOptionalString(raw.sourcePieceId);
+        const targetRef =
+          readOptionalString(raw.targetRef) ?? readOptionalString(raw.targetPieceId);
+        if (!sourceRef) {
+          throw new Error("sourceRef or sourcePieceId is required");
+        }
+        if (!targetRef) {
+          throw new Error("targetRef or targetPieceId is required");
+        }
+        const normalized: CtoAction = {
+          action: "createConnection",
+          sourceRef,
+          targetRef,
+        };
+        const label = readOptionalString(raw.label);
+        if (label) normalized.label = label;
+        return { action: normalized };
+      }
+      case "updateConnection": {
+        ensureAllowedKeys(raw, ["action", "connectionId", "updates"], actionIndex);
+        const connectionId = readString(raw.connectionId, "connectionId", actionIndex);
+        const updates = readOptionalPlainObject(raw.updates, "updates", actionIndex);
+        if (!updates || Object.keys(updates).length === 0) {
+          throw new Error("updates must contain at least one field");
+        }
+        return { action: { action: "updateConnection", connectionId, updates } };
+      }
+      case "generatePlan": {
+        ensureAllowedKeys(raw, ["action", "guidance"], actionIndex);
+        const guidance = readString(raw.guidance, "guidance", actionIndex);
+        return { action: { action: "generatePlan", guidance } };
+      }
+      case "approvePlan": {
+        ensureAllowedKeys(raw, ["action", "planId"], actionIndex);
+        const planId = readString(raw.planId, "planId", actionIndex);
+        return { action: { action: "approvePlan", planId } };
+      }
+      case "rejectPlan": {
+        ensureAllowedKeys(raw, ["action", "planId"], actionIndex);
+        const planId = readString(raw.planId, "planId", actionIndex);
+        return { action: { action: "rejectPlan", planId } };
+      }
+      case "runAllTasks": {
+        ensureAllowedKeys(raw, ["action", "planId"], actionIndex);
+        const planId = readString(raw.planId, "planId", actionIndex);
+        return { action: { action: "runAllTasks", planId } };
+      }
+      case "mergeBranches": {
+        ensureAllowedKeys(raw, ["action", "planId"], actionIndex);
+        const planId = readString(raw.planId, "planId", actionIndex);
+        return { action: { action: "mergeBranches", planId } };
+      }
+      default:
+        return {
+          error: buildActionError(
+            actionIndex,
+            actionName,
+            "unsupported action",
+          ),
+        };
+    }
+  } catch (error) {
+    return {
+      error:
+        error instanceof Error
+          ? buildActionError(actionIndex, actionName, error.message)
+          : buildActionError(actionIndex, actionName, String(error)),
+    };
+  }
 }
 
 /** Remove action blocks from display text */
 export function stripActionBlocks(markdown: string): string {
   return markdown.replace(/```action\s*\n[\s\S]*?\n```/g, "").trim();
+}
+
+/** Extract, validate, and normalize CTO action blocks from assistant markdown. */
+export function reviewActions(markdown: string): CtoActionReview {
+  const actions: CtoAction[] = [];
+  const validationErrors: string[] = [];
+  const regex = /```action\s*\n([\s\S]*?)\n```/g;
+  let match: RegExpExecArray | null;
+  let actionIndex = 0;
+
+  while ((match = regex.exec(markdown)) !== null) {
+    actionIndex += 1;
+    try {
+      const parsed = JSON.parse(match[1]) as unknown;
+      const normalized = normalizeAction(parsed, actionIndex);
+      if (normalized.error) {
+        validationErrors.push(normalized.error);
+        continue;
+      }
+      if (normalized.action) {
+        actions.push(normalized.action);
+      }
+    } catch (error) {
+      validationErrors.push(
+        error instanceof Error
+          ? `Action ${actionIndex}: invalid JSON (${error.message})`
+          : `Action ${actionIndex}: invalid JSON`,
+      );
+      devLog("warn", "CTO", `Failed to parse action block JSON`, error);
+    }
+  }
+
+  return {
+    actions,
+    cleanedContent: stripActionBlocks(markdown),
+    validationErrors,
+  };
+}
+
+/** Backwards-compatible helper that returns only validated actions. */
+export function parseActions(markdown: string): CtoAction[] {
+  return reviewActions(markdown).actions;
 }
 
 /** Describe an action in human-readable form */
@@ -91,7 +327,7 @@ export function describeAction(action: CtoAction): string {
     case "mergeBranches":
       return "Merge all piece branches to main";
     default:
-      return `Unknown action: ${action.action}`;
+      return `Unknown action: ${(action as { action: string }).action}`;
   }
 }
 
@@ -99,14 +335,10 @@ export function describeAction(action: CtoAction): string {
 export async function executeActions(
   actions: CtoAction[],
   projectId: string,
-): Promise<{
-  executed: number;
-  errors: string[];
-  switchToTab?: string;
-  reloadCurrentProject: boolean;
-}> {
+): Promise<CtoActionExecutionResult> {
   let executed = 0;
   const errors: string[] = [];
+  const steps: CtoActionExecutionResult["steps"] = [];
   let switchToTab: string | undefined;
   let reloadCurrentProject = false;
   const createdPieceRefs = new Map<string, string>();
@@ -114,15 +346,22 @@ export async function executeActions(
     useAppStore.getState().activeProjectId === projectId &&
     useProjectStore.getState().project?.id === projectId;
 
-  devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map(a => a.action));
-  for (const action of actions) {
+  devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map((a) => a.action));
+  for (const [index, action] of actions.entries()) {
+    const description = describeAction(action);
     try {
       switch (action.action) {
         case "updatePiece": {
           const updates = action.updates as Record<string, unknown>;
           await api.updatePiece(action.pieceId as string, updates);
-          executed++;
+          executed += 1;
           reloadCurrentProject = true;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "createPiece": {
@@ -138,26 +377,33 @@ export async function executeActions(
           if (typeof action.ref === "string" && action.ref.trim()) {
             createdPieceRefs.set(action.ref.trim(), piece.id);
           }
-          // Apply additional fields
           const extraUpdates: Record<string, unknown> = {};
           if (action.pieceType) extraUpdates.pieceType = action.pieceType;
           if (action.responsibilities) extraUpdates.responsibilities = action.responsibilities;
           if (Object.keys(extraUpdates).length > 0) {
             await api.updatePiece(piece.id, extraUpdates);
           }
-          executed++;
+          executed += 1;
           reloadCurrentProject = true;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "createConnection": {
           const sourcePieceId = await resolvePieceReference(
             projectId,
-            action.sourceRef ?? action.sourcePieceId,
+            (action.sourceRef as string | undefined) ??
+              (action.sourcePieceId as string | undefined),
             createdPieceRefs,
           );
           const targetPieceId = await resolvePieceReference(
             projectId,
-            action.targetRef ?? action.targetPieceId,
+            (action.targetRef as string | undefined) ??
+              (action.targetPieceId as string | undefined),
             createdPieceRefs,
           );
 
@@ -167,27 +413,45 @@ export async function executeActions(
             targetPieceId,
             (action.label as string) || "",
           );
-          executed++;
+          executed += 1;
           reloadCurrentProject = true;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "updateConnection": {
           const updates = action.updates as Record<string, unknown>;
           await api.updateConnection(action.connectionId as string, updates);
-          executed++;
+          executed += 1;
           reloadCurrentProject = true;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "generatePlan": {
           if (isActiveProject) {
-            useLeaderStore
+            await useLeaderStore
               .getState()
               .generatePlan(projectId, (action.guidance as string) || "");
           } else {
             await api.generateWorkPlan(projectId, (action.guidance as string) || "");
           }
           switchToTab = "plan";
-          executed++;
+          executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "approvePlan": {
@@ -197,7 +461,13 @@ export async function executeActions(
             await api.updatePlanStatus(action.planId as string, "approved");
           }
           switchToTab = "plan";
-          executed++;
+          executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "rejectPlan": {
@@ -207,22 +477,34 @@ export async function executeActions(
             await api.updatePlanStatus(action.planId as string, "rejected");
           }
           switchToTab = "plan";
-          executed++;
+          executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "runAllTasks": {
           if (isActiveProject) {
-            useLeaderStore.getState().runAllTasks(action.planId as string);
+            await useLeaderStore.getState().runAllTasks(action.planId as string);
           } else {
             await api.runAllPlanTasks(action.planId as string);
           }
           switchToTab = "plan";
-          executed++;
+          executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
         case "mergeBranches": {
           if (isActiveProject) {
-            useLeaderStore.getState().mergeBranches(action.planId as string);
+            await useLeaderStore.getState().mergeBranches(action.planId as string);
           } else {
             const summary = await api.mergePlanBranches(action.planId as string);
             if (!summary.conflict) {
@@ -230,18 +512,41 @@ export async function executeActions(
             }
           }
           switchToTab = "plan";
-          executed++;
+          executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+          });
           break;
         }
-        default:
-          errors.push(`Unknown action: ${action.action}`);
+        default: {
+          const message = `Unknown action: ${(action as { action: string }).action}`;
+          errors.push(message);
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "failed",
+            error: message,
+          });
+        }
       }
-    } catch (e) {
-      devLog("error", "CTO", `Action "${action.action}" failed`, e);
-      errors.push(`${action.action} failed: ${e}`);
+    } catch (error) {
+      devLog("error", "CTO", `Action "${action.action}" failed`, error);
+      const message = `${action.action} failed: ${error}`;
+      errors.push(message);
+      steps.push({
+        index,
+        action: action.action,
+        description,
+        status: "failed",
+        error: message,
+      });
     }
   }
 
   devLog("info", "CTO", `Executed ${executed}/${actions.length} actions`, { errors });
-  return { executed, errors, switchToTab, reloadCurrentProject };
+  return { executed, errors, steps, switchToTab, reloadCurrentProject };
 }

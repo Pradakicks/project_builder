@@ -174,6 +174,44 @@ export interface CtoDecision {
   createdAt: string;
 }
 
+export type CtoActionName =
+  | "updatePiece"
+  | "createPiece"
+  | "createConnection"
+  | "updateConnection"
+  | "generatePlan"
+  | "approvePlan"
+  | "rejectPlan"
+  | "runAllTasks"
+  | "mergeBranches";
+
+export interface CtoAction {
+  action: CtoActionName;
+  [key: string]: unknown;
+}
+
+export interface CtoActionReview {
+  actions: CtoAction[];
+  cleanedContent: string;
+  validationErrors: string[];
+}
+
+export interface CtoActionExecutionStep {
+  index: number;
+  action: string;
+  description: string;
+  status: "executed" | "failed";
+  error?: string;
+}
+
+export interface CtoActionExecutionResult {
+  executed: number;
+  errors: string[];
+  steps: CtoActionExecutionStep[];
+  switchToTab?: string;
+  reloadCurrentProject: boolean;
+}
+
 // ── Work Plans ───────────────────────────────────────────
 
 export type PlanStatus = "generating" | "draft" | "approved" | "rejected" | "superseded";
