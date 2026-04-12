@@ -8,3 +8,4 @@ target/
 *.swo
 .claude/
 docs/
+.debug-sessions/

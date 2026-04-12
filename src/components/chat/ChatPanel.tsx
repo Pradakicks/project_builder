@@ -4,6 +4,7 @@ import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
 import { useDialogStore } from "../../store/useDialogStore";
+import { useDebugStore } from "../../store/useDebugStore";
 import { Markdown } from "../ui/Markdown";
 import { devLog } from "../../utils/devLog";
 import {
@@ -16,6 +17,8 @@ import type {
   CtoActionReview,
   CtoActionExecutionResult,
   CtoDecisionRecordInput,
+  CapturedScenario,
+  DebugConversationMessage,
 } from "../../types";
 
 type Tab = "chat" | "decisions";
@@ -128,6 +131,8 @@ export function ChatPanel({
     projectId: string;
     projectName: string;
     requestId: string;
+    prompt: string;
+    conversation: DebugConversationMessage[];
     assistantText: string;
     cleanedContent: string;
     review: CtoActionReview;
@@ -143,6 +148,55 @@ export function ChatPanel({
       return [decision, ...next];
     });
   };
+
+  const captureScenario = async (scenario: CapturedScenario) => {
+    useDebugStore.getState().captureScenario(scenario);
+    try {
+      const { recordDebugScenario } = await import("../../api/debugApi");
+      const persisted = await recordDebugScenario(scenario);
+      useDebugStore.getState().captureScenario(persisted);
+    } catch (error) {
+      devLog("warn", "Diagnostics", "Failed to persist debug scenario artifact", error);
+    }
+  };
+
+  const buildScenario = ({
+    status,
+    prompt,
+    conversation,
+    assistantText,
+    cleanedContent,
+    review,
+    decision,
+    error,
+    scenarioProjectId,
+    scenarioProjectName,
+  }: {
+    status: "failed" | "rejected";
+    prompt: string;
+    conversation: DebugConversationMessage[];
+    assistantText: string | null;
+    cleanedContent: string | null;
+    review: CtoActionReview | null;
+    decision: CtoDecisionRecordInput | null;
+    error: string | null;
+    scenarioProjectId: string;
+    scenarioProjectName: string | null;
+  }): CapturedScenario => ({
+    id: crypto.randomUUID(),
+    kind: "cto-chat",
+    status,
+    projectId: scenarioProjectId,
+    projectName: scenarioProjectName,
+    prompt,
+    conversation,
+    assistantText,
+    cleanedContent,
+    review,
+    decision,
+    error,
+    capturedAt: new Date().toISOString(),
+  });
 
   useEffect(() => {
     listRef.current?.scrollTo(0, listRef.current.scrollHeight);
@@ -175,16 +229,32 @@ export function ChatPanel({
     };
   }, [tab, project?.id]);
 
-  const send = async () => {
-    const text = input.trim();
+  const sendPrompt = async (
+    promptText: string,
+    conversationOverride?: DebugConversationMessage[],
+  ) => {
+    const text = promptText.trim();
     if (!text || streaming || !project) return;
     devLog("info", "Chat", `Sending message (${text.length} chars)`);
-    const conversation = messages
+    const conversation =
+      conversationOverride ??
+      messages
       .filter((m) => m.content)
       .map((m) => ({
         role: m.role === "user" ? "user" : "assistant",
         content: m.content,
       }));
+    useDebugStore.getState().recordEvent({
+      kind: "cto-request",
+      level: "info",
+      category: "CTO",
+      message: "Starting CTO request",
+      data: {
+        projectId: project.id,
+        prompt: text,
+        conversationCount: conversation.length,
+      },
+    });
     const requestId = crypto.randomUUID();
     useChatStore.getState().startRequest(project.id, text, requestId);
     setInput("");
@@ -207,6 +277,26 @@ export function ChatPanel({
 
         if (payload.done) {
           const review = reviewActions(streamBuffer);
+          useDebugStore.getState().recordEvent({
+            kind: "cto-response",
+            level: "info",
+            category: "CTO",
+            message: "Received CTO response",
+            data: {
+              projectId: originProjectId,
+              responseLength: streamBuffer.length,
+            },
+          });
+          useDebugStore.getState().recordEvent({
+            kind: "cto-review",
+            level: review.validationErrors.length > 0 ? "warn" : "info",
+            category: "CTO",
+            message: "Reviewed CTO action block",
+            data: {
+              actionCount: review.actions.length,
+              validationErrors: review.validationErrors,
+            },
+          });
           useChatStore
             .getState()
             .finalizeRequest(originProjectId, requestId, review.cleanedContent);
@@ -216,6 +306,8 @@ export function ChatPanel({
               projectId: originProjectId,
               projectName: originProjectName,
               requestId,
+              prompt: text,
+              conversation,
               assistantText: streamBuffer,
               cleanedContent: review.cleanedContent,
               review,
@@ -229,15 +321,51 @@ export function ChatPanel({
               `CTO action block rejected: ${review.validationErrors[0]}. Nothing executed.`,
               "warning",
             );
+            const rejectedDecision = buildRejectedDecision(streamBuffer, review);
+            await captureScenario(
+              buildScenario({
+                status: "rejected",
+                prompt: text,
+                conversation,
+                assistantText: streamBuffer,
+                cleanedContent: review.cleanedContent,
+                review,
+                decision: rejectedDecision,
+                error: review.validationErrors.join("; "),
+                scenarioProjectId: originProjectId,
+                scenarioProjectName: originProjectName,
+              }),
+            );
             try {
               const { logCtoDecision } = await import("../../api/ctoApi");
               const decision = await logCtoDecision(
                 originProjectId,
-                buildRejectedDecision(streamBuffer, review),
+                rejectedDecision,
               );
               refreshDecisions(decision);
+              useDebugStore.getState().recordEvent({
+                kind: "cto-decision",
+                level: "warn",
+                category: "CTO",
+                message: "Logged rejected CTO decision",
+                data: { projectId: originProjectId, decisionId: decision.id },
+              });
             } catch (logError) {
               devLog("warn", "Chat", "Failed to log rejected CTO decision", logError);
+              await captureScenario(
+                buildScenario({
+                  status: "failed",
+                  prompt: text,
+                  conversation,
+                  assistantText: streamBuffer,
+                  cleanedContent: review.cleanedContent,
+                  review,
+                  decision: rejectedDecision,
+                  error: `Failed to log rejected CTO decision: ${logError}`,
+                  scenarioProjectId: originProjectId,
+                  scenarioProjectName: originProjectName,
+                }),
+              );
             }
           }
 
@@ -254,6 +382,20 @@ export function ChatPanel({
       await chatWithCto(originProjectId, text, conversation, requestId);
     } catch (e) {
       devLog("error", "Chat", `CTO chat error`, e);
+      await captureScenario(
+        buildScenario({
+          status: "failed",
+          prompt: text,
+          conversation,
+          assistantText: streamBuffer || null,
+          cleanedContent: streamBuffer || null,
+          review: null,
+          decision: null,
+          error: `CTO chat error: ${e}`,
+          scenarioProjectId: originProjectId,
+          scenarioProjectName: originProjectName,
+        }),
+      );
       useChatStore
         .getState()
         .failRequest(originProjectId, requestId, "(Failed to connect to LLM)");
@@ -265,6 +407,31 @@ export function ChatPanel({
     }
   };
 
+  const send = async () => {
+    await sendPrompt(input);
+  };
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || !projectId) {
+      useDebugStore.getState().registerReplayHandler(null);
+      return;
+    }
+
+    useDebugStore.getState().registerReplayHandler(async (scenario) => {
+      if (scenario.kind !== "cto-chat") {
+        throw new Error(`Unsupported scenario kind: ${scenario.kind}`);
+      }
+      if (scenario.projectId !== projectId) {
+        throw new Error("Open the captured project before replaying this scenario.");
+      }
+      await sendPrompt(scenario.prompt, scenario.conversation);
+    });
+
+    return () => {
+      useDebugStore.getState().registerReplayHandler(null);
+    };
+  }, [projectId, project?.id, streaming, messages]);
+
   const executePendingReview = async () => {
     const currentReview = pendingReview;
     if (!currentReview || currentReview.review.validationErrors.length > 0 || executingReview) {
@@ -273,6 +440,7 @@ export function ChatPanel({
 
     setExecutingReview(true);
     const addToast = useToastStore.getState().addToast;
+    let executedDecision: CtoDecisionRecordInput | null = null;
     try {
       const result = await executeActions(
         currentReview.review.actions,
@@ -299,13 +467,20 @@ export function ChatPanel({
       }
 
       const { logCtoDecision } = await import("../../api/ctoApi");
-      const decision = buildExecutedDecision(
+      executedDecision = buildExecutedDecision(
         currentReview.assistantText,
         currentReview.review,
         result,
       );
-      const savedDecision = await logCtoDecision(currentReview.projectId, decision);
+      const savedDecision = await logCtoDecision(currentReview.projectId, executedDecision);
       refreshDecisions(savedDecision);
+      useDebugStore.getState().recordEvent({
+        kind: "cto-decision",
+        level: result.errors.length > 0 ? "warn" : "info",
+        category: "CTO",
+        message: "Logged executed CTO decision",
+        data: { projectId: currentReview.projectId, decisionId: savedDecision.id },
+      });
 
       if (isOriginProjectActive && result.reloadCurrentProject) {
         await useProjectStore.getState().loadProject(currentReview.projectId);
@@ -318,6 +493,20 @@ export function ChatPanel({
       setPendingReview(null);
     } catch (error) {
       devLog("error", "Chat", "Failed to execute CTO review", error);
+      await captureScenario(
+        buildScenario({
+          status: "failed",
+          prompt: currentReview.prompt,
+          conversation: currentReview.conversation,
+          assistantText: currentReview.assistantText,
+          cleanedContent: currentReview.cleanedContent,
+          review: currentReview.review,
+          decision: executedDecision,
+          error: `CTO execution failed: ${error}`,
+          scenarioProjectId: currentReview.projectId,
+          scenarioProjectName: currentReview.projectName,
+        }),
+      );
       addToast(
         useAppStore.getState().activeProjectId === currentReview.projectId
           ? `CTO execution failed: ${error}`

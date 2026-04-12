@@ -345,3 +345,75 @@ export interface IntegrationReviewChunk {
   chunk: string;
   done: boolean;
 }
+
+// ── Developer Diagnostics ───────────────────────────────
+
+export type DebugEventKind =
+  | "frontend-log"
+  | "ipc-invoke"
+  | "ipc-result"
+  | "ipc-error"
+  | "cto-request"
+  | "cto-response"
+  | "cto-review"
+  | "cto-decision"
+  | "scenario"
+  | "session";
+
+export type DebugEventLevel = "debug" | "info" | "warn" | "error" | "trace";
+
+export interface DebugEvent {
+  id: string;
+  timestamp: string;
+  kind: DebugEventKind;
+  level: DebugEventLevel;
+  category: string;
+  message: string;
+  data?: unknown;
+}
+
+export interface DebugSessionSummary {
+  enabled: boolean;
+  sessionId: string | null;
+  sessionDir: string | null;
+  startedAt: string | null;
+  logPath: string | null;
+}
+
+export interface DebugLogTail {
+  path: string | null;
+  lines: string[];
+}
+
+export interface DebugConversationMessage {
+  role: string;
+  content: string;
+}
+
+export type CapturedScenarioStatus = "failed" | "rejected";
+
+export interface CapturedScenario {
+  id: string;
+  kind: "cto-chat";
+  status: CapturedScenarioStatus;
+  projectId: string;
+  projectName: string | null;
+  prompt: string;
+  conversation: DebugConversationMessage[];
+  assistantText: string | null;
+  cleanedContent: string | null;
+  review: CtoActionReview | null;
+  decision: CtoDecisionRecordInput | null;
+  error: string | null;
+  capturedAt: string;
+  path?: string | null;
+}
+
+export interface DebugReport {
+  generatedAt: string;
+  session: DebugSessionSummary | null;
+  activeProjectId: string | null;
+  activeView: string;
+  lastScenario: CapturedScenario | null;
+  recentEvents: DebugEvent[];
+}

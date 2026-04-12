@@ -4,13 +4,25 @@
 SHELL := /bin/zsh
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: dev build check clean setup icons container-up container-shell container-frontend check-container host-tauri-dev
+.PHONY: dev build check clean setup icons container-up container-shell container-frontend check-container host-tauri-dev dev-session dev-session-host dev-session-tail
 
 # ── Primary commands ──────────────────────────────────────
 
 ## Start dev server (frontend + Tauri backend with hot-reload)
 dev:
 	npm run tauri dev
+
+## Start a captured desktop debug session (logs + scenario artifacts)
+dev-session:
+	./scripts/dev-session.sh
+
+## Start a captured desktop debug session against the container frontend
+dev-session-host:
+	./scripts/dev-session.sh --host-container
+
+## Tail the most recent captured desktop debug session log
+dev-session-tail:
+	./scripts/dev-session-tail.sh
 
 ## Build production app bundle
 build:

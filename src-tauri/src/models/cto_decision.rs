@@ -71,11 +71,25 @@ pub struct CtoRollbackStep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CtoRollbackKind {
-    RestorePiece { piece: Piece },
-    DeletePiece { piece_id: String },
-    RestoreConnection { connection: Connection },
-    DeleteConnection { connection_id: String },
-    RestorePlanStatus { plan_id: String, status: PlanStatus },
+    RestorePiece {
+        piece: Piece,
+    },
+    DeletePiece {
+        #[serde(rename = "pieceId", alias = "piece_id")]
+        piece_id: String,
+    },
+    RestoreConnection {
+        connection: Connection,
+    },
+    DeleteConnection {
+        #[serde(rename = "connectionId", alias = "connection_id")]
+        connection_id: String,
+    },
+    RestorePlanStatus {
+        #[serde(rename = "planId", alias = "plan_id")]
+        plan_id: String,
+        status: PlanStatus,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,4 +139,49 @@ pub enum CtoRollbackResultStepStatus {
     Applied,
     Failed,
     Skipped,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rollback_kind_accepts_camel_case_payloads() {
+        let delete_piece: CtoRollbackKind = serde_json::from_value(json!({
+            "kind": "deletePiece",
+            "pieceId": "piece-123",
+        }))
+        .expect("deserialize deletePiece");
+        match delete_piece {
+            CtoRollbackKind::DeletePiece { piece_id } => assert_eq!(piece_id, "piece-123"),
+            other => panic!("expected deletePiece, got {other:?}"),
+        }
+
+        let delete_connection: CtoRollbackKind = serde_json::from_value(json!({
+            "kind": "deleteConnection",
+            "connectionId": "conn-456",
+        }))
+        .expect("deserialize deleteConnection");
+        match delete_connection {
+            CtoRollbackKind::DeleteConnection { connection_id } => {
+                assert_eq!(connection_id, "conn-456")
+            }
+            other => panic!("expected deleteConnection, got {other:?}"),
+        }
+
+        let restore_plan_status: CtoRollbackKind = serde_json::from_value(json!({
+            "kind": "restorePlanStatus",
+            "planId": "plan-789",
+            "status": "approved",
+        }))
+        .expect("deserialize restorePlanStatus");
+        match restore_plan_status {
+            CtoRollbackKind::RestorePlanStatus { plan_id, status } => {
+                assert_eq!(plan_id, "plan-789");
+                assert_eq!(status, PlanStatus::Approved);
+            }
+            other => panic!("expected restorePlanStatus, got {other:?}"),
+        }
+    }
 }

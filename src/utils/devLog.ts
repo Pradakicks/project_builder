@@ -1,3 +1,5 @@
+import { useDebugStore } from "../store/useDebugStore";
+
 const isDev = import.meta.env.DEV;
 
 type LogLevel = "debug" | "info" | "warn" | "error" | "trace";
@@ -9,6 +11,13 @@ export function devLog(
   data?: unknown,
 ) {
   if (!isDev) return;
+  useDebugStore.getState().recordEvent({
+    kind: "frontend-log",
+    level,
+    category,
+    message,
+    data,
+  });
   const ts = new Date().toISOString().slice(11, 23);
   const prefix = `[${ts}] [${category}]`;
   const method =

@@ -18,6 +18,13 @@ const SettingsPage = lazy(() =>
     default: module.SettingsPage,
   })),
 );
+const DevDiagnosticsPanel = import.meta.env.DEV
+  ? lazy(() =>
+      import("./components/debug/DevDiagnosticsPanel").then((module) => ({
+        default: module.DevDiagnosticsPanel,
+      })),
+    )
+  : null;
 
 function FullScreenLoader({ label }: { label: string }) {
   return (
@@ -60,6 +67,11 @@ function App() {
       </Suspense>
       <ToastContainer />
       <ConfirmDialog />
+      {DevDiagnosticsPanel ? (
+        <Suspense fallback={null}>
+          <DevDiagnosticsPanel />
+        </Suspense>
+      ) : null}
     </>
   );
 }

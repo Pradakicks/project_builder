@@ -1,0 +1,71 @@
+# Development Loop
+
+Use the captured desktop session workflow when iterating on CTO, IPC, task, merge, or review failures.
+
+## Start A Captured Session
+
+Run the standard desktop loop with log capture:
+
+```bash
+make dev-session
+```
+
+Run the native Tauri shell against the containerized frontend with the same capture flow:
+
+```bash
+make dev-session-host
+```
+
+Each run creates `.debug-sessions/<session-id>/` with:
+
+- `desktop.log`: combined `tauri dev` output
+- `session.json`: session metadata
+- `latest-scenario.json`: the most recent captured CTO failure/rejection artifact
+
+Tail the current session:
+
+```bash
+make dev-session-tail
+```
+
+## In-App Diagnostics
+
+In development builds, the app shows a **Dev Diagnostics** button in the lower-right corner.
+
+The panel exposes:
+
+- recent frontend log and IPC events
+- current debug session metadata
+- the latest captured CTO failure/rejection scenario
+- a tail of the current captured desktop log
+- a copied JSON debug report for pasting into follow-up investigations
+
+## CTO Failure Workflow
+
+When a CTO request fails or a reviewed decision cannot be logged, the app captures:
+
+- the user prompt
+- the conversation that led to the request
+- the assistant response
+- the parsed CTO review result
+- the decision payload submitted to `log_cto_decision`
+- the returned error
+
+That scenario is visible in the diagnostics panel and is also written to `latest-scenario.json` when the app is running under `make dev-session`.
+
+## Replay
+
+The diagnostics panel can replay the latest captured CTO scenario against the currently open project.
+
+If the captured scenario belongs to another project, the panel will open that project first. Replay becomes available as soon as the CTO panel for that project has loaded.
+
+## Current First-Class Regression
+
+The current diagnostics workflow includes a regression for the `log_cto_decision` payload mismatch where Rust expected `piece_id`/`plan_id` while the frontend sent `pieceId`/`planId`.
+
+Keep adding real desktop failures to this loop:
+
+1. reproduce under `make dev-session`
+1. inspect the diagnostics panel and session files
+1. fix the contract or flow
+1. add a regression before moving on

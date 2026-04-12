@@ -27,6 +27,14 @@ Start the Tauri desktop app:
 npm run tauri dev
 ```
 
+Start a captured desktop debug session:
+
+```bash
+make dev-session
+```
+
+That workflow writes session logs and the latest captured CTO failure artifact into `.debug-sessions/` and enables the in-app **Dev Diagnostics** panel. The panel can copy a structured debug report and replay the latest captured CTO scenario once the relevant project is open.
+
 Build the frontend bundle:
 
 ```bash
@@ -67,6 +75,7 @@ The database bootstrap is versioned with `PRAGMA user_version`, and startup migr
 ## Troubleshooting
 
 - If the desktop app fails to start, check the terminal output for the first Rust error and then rerun `cd src-tauri && cargo check`.
+- For fast CTO/IPC debugging, prefer `make dev-session` over raw `npm run tauri dev`, then inspect the in-app **Dev Diagnostics** panel and `.debug-sessions/current/`.
 - If the UI dev server port is busy, stop the other process using port `5174`.
 - If a view opens with a short loading spinner, that is expected. Projects, settings, the editor shell, and the heavier CTO/plan panels are split into separate runtime chunks.
 - If you need a clean local database, delete the `data.db` file at the path above and relaunch the app.
@@ -93,6 +102,10 @@ Rollback is exposed only for the safest reversible CTO actions. Destructive or a
 ## Operator Runbook
 
 For task failures, malformed CTO responses, merge conflicts, rollback guidance, and local reset/recovery steps, see [docs/operator-runbook.md](./docs/operator-runbook.md).
+
+## Development Workflow
+
+For the captured desktop debugging loop, scenario replay behavior, and the current `log_cto_decision` regression workflow, see [DEVELOPMENT.md](./DEVELOPMENT.md).
 
 ## Expanded Test Matrix
 

@@ -1,8 +1,8 @@
+mod agent;
 mod commands;
 mod db;
-pub mod models;
 mod llm;
-mod agent;
+pub mod models;
 #[cfg(test)]
 mod test_support;
 
@@ -84,6 +84,10 @@ pub fn run() {
             commands::merge_commands::merge_plan_branches,
             commands::merge_commands::resolve_merge_conflict,
             commands::merge_commands::run_integration_review,
+            commands::debug_commands::get_debug_session_info,
+            commands::debug_commands::record_debug_scenario,
+            commands::debug_commands::get_last_debug_scenario,
+            commands::debug_commands::read_debug_log_tail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
