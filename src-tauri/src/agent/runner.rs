@@ -318,6 +318,19 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         let settings_clone = settings.clone();
         let app = app_handle.clone();
 
+        if let Some((working_dir, branch)) = git_info.as_ref().map(|(wd, b)| (wd.as_str(), b.as_str()))
+        {
+            if let Err(e) =
+                store_generated_files_artifact(&piece_id_owned, working_dir, branch, db, &app).await
+            {
+                warn!(
+                    piece_id = %piece_id_owned,
+                    error = %e,
+                    "Generated files artifact update failed"
+                );
+            }
+        }
+
         tokio::spawn(async move {
             if let Err(e) = generate_context_summary(
                 &piece_id_owned,
@@ -806,6 +819,31 @@ async fn run_external_agent<R: tauri::Runtime>(
         }
         Err(err) => Err(err),
     }
+}
+
+async fn store_generated_files_artifact<R: tauri::Runtime>(
+    piece_id: &str,
+    working_dir: &str,
+    branch: &str,
+    db: &Mutex<Database>,
+    _app_handle: &AppHandle<R>,
+) -> Result<(), String> {
+    let files = super::git_ops::list_branch_files(working_dir, branch).await?;
+    let trimmed = files.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let file_count = trimmed.lines().count();
+    let title = format!("Generated files on {branch}");
+    let content = format!(
+        "Branch: {branch}\nFiles: {file_count}\n\n{}",
+        trimmed
+    );
+
+    let db = db.lock().map_err(|e| e.to_string())?;
+    db.upsert_artifact(piece_id, "generated_files", &title, &content)?;
+    Ok(())
 }
 
 /// Generate a concise context summary from an agent's output and store as an artifact.
@@ -1316,6 +1354,12 @@ mod tests {
             assert_eq!(history.len(), 2);
             assert_eq!(history[0].metadata.success, Some(true));
             assert_eq!(history[1].metadata.success, Some(false));
+
+            let files_artifact = db
+                .get_artifact_by_type(&piece.id, "generated_files")
+                .expect("load generated files artifact")
+                .expect("generated files artifact exists");
+            assert!(files_artifact.content.contains("generated-from-codex.txt"));
         }
 
         let generated = fs::read_to_string(std::path::Path::new(&working_dir).join("generated-from-codex.txt"))
@@ -1444,6 +1488,12 @@ mod tests {
 
         let piece_after = db.get_piece(&piece.id).expect("reload piece");
         assert_eq!(piece_after.phase, Phase::Implementing);
+
+        let files_artifact = db
+            .get_artifact_by_type(&piece.id, "generated_files")
+            .expect("load generated files artifact")
+            .expect("generated files artifact exists");
+        assert!(files_artifact.content.contains("generated-from-codex.txt"));
 
         let generated = std::fs::read_to_string(std::path::Path::new(&working_dir).join("generated-from-codex.txt"))
             .expect("read fake codex output");

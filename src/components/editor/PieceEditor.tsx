@@ -4,6 +4,7 @@ import { useDialogStore } from "../../store/useDialogStore";
 import { useAgentStore } from "../../store/useAgentStore";
 import { useToastStore } from "../../store/useToastStore";
 import type {
+  Artifact,
   Piece,
   PieceInterface,
   Constraint,
@@ -533,19 +534,29 @@ function AgentTab({
 
   const run = useAgentStore((s) => s.runs[piece.id]);
   const [feedbackText, setFeedbackText] = useState("");
+  const [generatedFilesArtifact, setGeneratedFilesArtifact] = useState<Artifact | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    const loadHistory = async () => {
+    const loadRunEvidence = async () => {
       const existing = useAgentStore.getState().runs[piece.id];
       if (existing?.running) return;
 
-      const { getAgentHistory } = await import("../../api/leaderApi");
+      const { getAgentHistory, listArtifacts } = await import("../../api/leaderApi");
       try {
-        const history = await getAgentHistory(piece.id);
+        const [history, artifacts] = await Promise.all([
+          getAgentHistory(piece.id),
+          listArtifacts(piece.id),
+        ]);
         const latest = history[0];
-        if (!latest || cancelled) return;
+        if (cancelled) return;
+
+        setGeneratedFilesArtifact(
+          artifacts.find((artifact) => artifact.artifactType === "generated_files") ?? null,
+        );
+
+        if (!latest) return;
 
         const metadata = latest.metadata ?? {};
         const validation = metadata.validation ?? undefined;
@@ -569,7 +580,7 @@ function AgentTab({
       }
     };
 
-    loadHistory();
+    loadRunEvidence();
     return () => {
       cancelled = true;
     };
@@ -599,6 +610,14 @@ function AgentTab({
         if (payload.phaseChanged) {
           useProjectStore.getState().loadProject(piece.projectId);
         }
+        void import("../../api/leaderApi")
+          .then(({ listArtifacts }) => listArtifacts(piece.id))
+          .then((artifacts) => {
+            setGeneratedFilesArtifact(
+              artifacts.find((artifact) => artifact.artifactType === "generated_files") ?? null,
+            );
+          })
+          .catch(() => {});
         unlisten();
       } else {
         if (payload.streamKind === "validation") {
@@ -643,6 +662,14 @@ function AgentTab({
         if (payload.phaseChanged) {
           useProjectStore.getState().loadProject(piece.projectId);
         }
+        void import("../../api/leaderApi")
+          .then(({ listArtifacts }) => listArtifacts(piece.id))
+          .then((artifacts) => {
+            setGeneratedFilesArtifact(
+              artifacts.find((artifact) => artifact.artifactType === "generated_files") ?? null,
+            );
+          })
+          .catch(() => {});
         unlisten();
       } else {
         if (payload.streamKind === "validation") {
@@ -896,6 +923,20 @@ function AgentTab({
           {run.gitDiffStat && (
             <pre className="text-gray-500 whitespace-pre-wrap">{run.gitDiffStat}</pre>
           )}
+        </div>
+      )}
+
+      {generatedFilesArtifact && !run?.running && (
+        <div className="rounded border border-gray-800 bg-gray-900 px-3 py-2 text-[10px] text-gray-400 space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-gray-500">generated files</span>
+            <span className="text-gray-500">
+              {new Date(generatedFilesArtifact.updatedAt).toLocaleString()}
+            </span>
+          </div>
+          <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-gray-950 p-2 text-gray-300">
+            {generatedFilesArtifact.content}
+          </pre>
         </div>
       )}
 

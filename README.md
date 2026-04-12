@@ -112,6 +112,7 @@ For the captured desktop debugging loop, scenario replay behavior, and the curre
 The current regression suite covers:
 
 - deterministic project bootstrap and rollback
+- external agent runs writing real files into the repo working directory
 - schema upgrade/idempotency for local SQLite databases
 - happy-path plan generation, execution, merge, and integration review
 - failed external execution and retry/recovery
@@ -119,3 +120,13 @@ The current regression suite covers:
 - CTO action parsing for valid `generatePlan` blocks and malformed fenced action output
 
 When adding new behavior, prefer a focused Rust test or Vitest regression over relying on manual verification.
+
+## External Run Evidence
+
+Successful external piece runs now persist a `generated_files` artifact alongside the existing git metadata. In the Piece editor's Agent tab, you can inspect:
+
+- branch and commit SHA
+- diff summary
+- generated file listing captured from the piece branch
+
+This is the first baseline proof that the system wrote real files into the project working directory.
