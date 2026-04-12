@@ -146,6 +146,9 @@ pub async fn try_merge(working_dir: &str, branch: &str) -> Result<bool, String> 
         if stderr.contains("CONFLICT") || stderr.contains("Automatic merge failed") {
             warn!(branch, "Merge conflict detected");
             Ok(false)
+        } else if !list_conflict_files(working_dir).await.unwrap_or_default().is_empty() {
+            warn!(branch, "Merge conflict detected from unresolved files");
+            Ok(false)
         } else {
             Err(format!("git merge failed: {stderr}"))
         }

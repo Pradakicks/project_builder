@@ -41,6 +41,10 @@ pub fn ensure_test_tools() -> &'static TestTools {
         write_script(
             &root.join("codex"),
             "#!/bin/sh\n\
+             if [ -f \"$PWD/.fake-codex-fail\" ]; then\n\
+               echo \"simulated codex failure\" >&2\n\
+               exit 13\n\
+             fi\n\
              printf '%s\\n' \"fake codex run\" >> \"$PWD/generated-from-codex.txt\"\n\
              exit 0\n",
         );

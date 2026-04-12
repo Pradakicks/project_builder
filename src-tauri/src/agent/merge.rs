@@ -589,6 +589,8 @@ async fn diff_stat_if_merged(working_dir: &str, before_sha: &str) -> String {
 mod tests {
     use super::*;
     use crate::db::{Database, PieceUpdate};
+    use std::fs;
+    use std::process::Command;
     use std::sync::Mutex;
 
     fn temp_workspace(label: &str) -> std::path::PathBuf {
@@ -598,6 +600,35 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("create test workspace");
         path
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -675,5 +706,118 @@ mod tests {
         assert!(err.contains("complete"));
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn merge_plan_branches_handles_manual_conflicts_by_aborting_merge() {
+        let workspace = temp_workspace("merge-manual-conflict");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = crate::commands::project_commands::create_project_impl(
+            &state,
+            "Merge Conflict Project".to_string(),
+            "Manual conflict handling".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+        let working_dir = project
+            .settings
+            .working_directory
+            .clone()
+            .expect("working directory");
+
+        {
+            let db = state.lock().expect("lock db");
+            let mut settings = project.settings.clone();
+            settings.conflict_resolution = ConflictResolutionPolicy::Manual;
+            db.update_project(&project.id, None, None, None, Some(&settings))
+                .expect("update project settings");
+        }
+
+        let frontend = {
+            let db = state.lock().expect("lock db");
+            db.create_piece(&project.id, None, "Frontend", 0.0, 0.0)
+                .expect("create frontend piece")
+        };
+        let backend = {
+            let db = state.lock().expect("lock db");
+            db.create_piece(&project.id, None, "Backend", 0.0, 0.0)
+                .expect("create backend piece")
+        };
+
+        let shared_file = std::path::Path::new(&working_dir).join("shared.txt");
+        fs::write(&shared_file, "version = \"base\"\n").expect("seed shared file");
+        git(std::path::Path::new(&working_dir), &["add", "shared.txt"]);
+        git(std::path::Path::new(&working_dir), &["commit", "-m", "Seed shared file"]);
+
+        git(std::path::Path::new(&working_dir), &["checkout", "-b", "piece/frontend"]);
+        fs::write(&shared_file, "version = \"frontend\"\n").expect("write frontend change");
+        git(std::path::Path::new(&working_dir), &["add", "shared.txt"]);
+        git(std::path::Path::new(&working_dir), &["commit", "-m", "Frontend change"]);
+
+        git(std::path::Path::new(&working_dir), &["checkout", "main"]);
+        git(std::path::Path::new(&working_dir), &["checkout", "-b", "piece/backend"]);
+        fs::write(&shared_file, "version = \"backend\"\n").expect("write backend change");
+        git(std::path::Path::new(&working_dir), &["add", "shared.txt"]);
+        git(std::path::Path::new(&working_dir), &["commit", "-m", "Backend change"]);
+
+        let plan = {
+            let db = state.lock().expect("lock db");
+            let plan = db
+                .create_work_plan(&project.id, "Manual merge conflict")
+                .expect("create plan");
+            db.update_work_plan(
+                &plan.id,
+                &WorkPlanUpdate {
+                    status: Some(PlanStatus::Approved),
+                    tasks: Some(vec![
+                        PlanTask {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            piece_id: frontend.id.clone(),
+                            piece_name: frontend.name.clone(),
+                            title: "Frontend task".to_string(),
+                            description: "Create frontend change".to_string(),
+                            priority: TaskPriority::High,
+                            suggested_phase: "implementing".to_string(),
+                            dependencies: vec![],
+                            status: TaskStatus::Complete,
+                            order: 1,
+                        },
+                        PlanTask {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            piece_id: backend.id.clone(),
+                            piece_name: backend.name.clone(),
+                            title: "Backend task".to_string(),
+                            description: "Create backend change".to_string(),
+                            priority: TaskPriority::High,
+                            suggested_phase: "implementing".to_string(),
+                            dependencies: vec![],
+                            status: TaskStatus::Complete,
+                            order: 2,
+                        },
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .expect("seed approved plan");
+            plan
+        };
+
+        let summary = merge_plan_branches(&plan.id, &state, &app_handle)
+            .await
+            .expect("merge should return summary");
+        let conflict = summary.conflict.expect("expected manual merge conflict");
+        assert_eq!(summary.merged, vec!["piece/frontend".to_string()]);
+        assert_eq!(conflict.branch, "piece/backend");
+        assert!(conflict.conflicting_files.iter().any(|file| file == "shared.txt"));
+
+        assert_eq!(git_stdout(std::path::Path::new(&working_dir), &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+        assert!(git_stdout(std::path::Path::new(&working_dir), &["status", "--porcelain"]).is_empty());
+
+        let _ = fs::remove_dir_all(&workspace);
     }
 }

@@ -1158,6 +1158,7 @@ mod tests {
     use crate::llm::{set_test_llm_responses, TestLlmResponses};
     use crate::test_support::ensure_test_tools;
     use std::collections::HashSet;
+    use std::fs;
     use std::process::Command;
     use std::sync::Mutex;
 
@@ -1246,6 +1247,82 @@ mod tests {
         assert!(err.contains("approved"));
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_piece_agent_recovers_after_external_failure() {
+        ensure_test_tools();
+
+        let workspace = temp_workspace("run-all-recovery");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Recovery Project".to_string(),
+            "Retry after a failed external run".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+        let working_dir = project
+            .settings
+            .working_directory
+            .clone()
+            .expect("project working directory");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "Retry Service", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("configure external engine");
+            piece
+        };
+
+        let fail_marker = std::path::Path::new(&working_dir).join(".fake-codex-fail");
+        fs::write(&fail_marker, "1").expect("mark codex failure");
+        run_piece_agent(&piece.id, None, &state, &app_handle)
+            .await
+            .expect("first run should complete with failure metadata");
+
+        {
+            let db = state.lock().expect("lock db");
+            let history = db.list_agent_history(&piece.id).expect("list history");
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].metadata.success, Some(false));
+        }
+
+        fs::remove_file(&fail_marker).expect("clear codex failure");
+        run_piece_agent(&piece.id, None, &state, &app_handle)
+            .await
+            .expect("retry should succeed");
+
+        {
+            let db = state.lock().expect("lock db");
+            let history = db.list_agent_history(&piece.id).expect("list history");
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[0].metadata.success, Some(true));
+            assert_eq!(history[1].metadata.success, Some(false));
+        }
+
+        let generated = fs::read_to_string(std::path::Path::new(&working_dir).join("generated-from-codex.txt"))
+            .expect("read fake codex output");
+        assert!(generated.contains("fake codex run"));
+
+        let _ = fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
