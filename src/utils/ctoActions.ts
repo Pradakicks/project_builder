@@ -79,6 +79,100 @@ function buildActionError(actionIndex: number, actionName: string, reason: strin
   return `Action ${actionIndex + 1} (${actionName}): ${reason}`;
 }
 
+interface ActionBlockCandidate {
+  start: number;
+  end: number;
+  raw: string;
+}
+
+function extractBalancedJsonObject(source: string, openBraceIndex: number): string | null {
+  if (source[openBraceIndex] !== "{") {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = openBraceIndex; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(openBraceIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function collectActionBlocks(markdown: string): ActionBlockCandidate[] {
+  const candidates: ActionBlockCandidate[] = [];
+  const fencedRanges: Array<{ start: number; end: number }> = [];
+
+  const fencedRegex = /```action\s*\n([\s\S]*?)\n```/g;
+  let match: RegExpExecArray | null;
+  while ((match = fencedRegex.exec(markdown)) !== null) {
+    fencedRanges.push({ start: match.index, end: match.index + match[0].length });
+    candidates.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      raw: match[1].trim(),
+    });
+  }
+
+  const inlineRegex = /\baction\s*\{/g;
+  while ((match = inlineRegex.exec(markdown)) !== null) {
+    const braceIndex = match.index + match[0].lastIndexOf("{");
+    const insideFence = fencedRanges.some(
+      (range) => braceIndex >= range.start && braceIndex < range.end,
+    );
+    if (insideFence) {
+      continue;
+    }
+
+    const raw = extractBalancedJsonObject(markdown, braceIndex);
+    if (!raw) {
+      continue;
+    }
+
+    candidates.push({
+      start: match.index,
+      end: braceIndex + raw.length,
+      raw,
+    });
+  }
+
+  return candidates.sort((a, b) => a.start - b.start);
+}
+
+async function loadLeaderApi() {
+  return import("../api/leaderApi");
+}
+
 async function resolvePieceReference(
   projectId: string,
   reference: string | undefined,
@@ -255,21 +349,22 @@ function normalizeAction(
 
 /** Remove action blocks from display text */
 export function stripActionBlocks(markdown: string): string {
-  return markdown.replace(/```action\s*\n[\s\S]*?\n```/g, "").trim();
+  const candidates = collectActionBlocks(markdown).slice().sort((a, b) => b.start - a.start);
+  let cleaned = markdown;
+  for (const candidate of candidates) {
+    cleaned = `${cleaned.slice(0, candidate.start)}${cleaned.slice(candidate.end)}`;
+  }
+  return cleaned.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** Extract, validate, and normalize CTO action blocks from assistant markdown. */
 export function reviewActions(markdown: string): CtoActionReview {
   const actions: CtoAction[] = [];
   const validationErrors: string[] = [];
-  const regex = /```action\s*\n([\s\S]*?)\n```/g;
-  let match: RegExpExecArray | null;
-  let actionIndex = 0;
 
-  while ((match = regex.exec(markdown)) !== null) {
-    actionIndex += 1;
+  for (const [actionIndex, candidate] of collectActionBlocks(markdown).entries()) {
     try {
-      const parsed = JSON.parse(match[1]) as unknown;
+      const parsed = JSON.parse(candidate.raw) as unknown;
       const normalized = normalizeAction(parsed, actionIndex);
       if (normalized.error) {
         validationErrors.push(normalized.error);
@@ -281,8 +376,8 @@ export function reviewActions(markdown: string): CtoActionReview {
     } catch (error) {
       validationErrors.push(
         error instanceof Error
-          ? `Action ${actionIndex}: invalid JSON (${error.message})`
-          : `Action ${actionIndex}: invalid JSON`,
+          ? `Action ${actionIndex + 1}: invalid JSON (${error.message})`
+          : `Action ${actionIndex + 1}: invalid JSON`,
       );
       devLog("warn", "CTO", `Failed to parse action block JSON`, error);
     }
@@ -339,6 +434,7 @@ export async function executeActions(
   let executed = 0;
   const errors: string[] = [];
   const steps: CtoActionExecutionResult["steps"] = [];
+  const rollbackSteps: CtoActionExecutionResult["rollback"]["steps"] = [];
   let switchToTab: string | undefined;
   let reloadCurrentProject = false;
   const createdPieceRefs = new Map<string, string>();
@@ -349,11 +445,20 @@ export async function executeActions(
   devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map((a) => a.action));
   for (const [index, action] of actions.entries()) {
     const description = describeAction(action);
+    let rollbackStep: CtoActionExecutionResult["steps"][number]["rollback"] = null;
     try {
       switch (action.action) {
         case "updatePiece": {
+          const previousPiece = await api.getPiece(action.pieceId as string);
           const updates = action.updates as Record<string, unknown>;
           await api.updatePiece(action.pieceId as string, updates);
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: true,
+            kind: { kind: "restorePiece", piece: previousPiece },
+          };
           executed += 1;
           reloadCurrentProject = true;
           steps.push({
@@ -361,7 +466,9 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "createPiece": {
@@ -377,6 +484,13 @@ export async function executeActions(
           if (typeof action.ref === "string" && action.ref.trim()) {
             createdPieceRefs.set(action.ref.trim(), piece.id);
           }
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: true,
+            kind: { kind: "deletePiece", pieceId: piece.id },
+          };
           const extraUpdates: Record<string, unknown> = {};
           if (action.pieceType) extraUpdates.pieceType = action.pieceType;
           if (action.responsibilities) extraUpdates.responsibilities = action.responsibilities;
@@ -390,7 +504,9 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "createConnection": {
@@ -407,12 +523,19 @@ export async function executeActions(
             createdPieceRefs,
           );
 
-          await api.createConnection(
+          const connection = await api.createConnection(
             projectId,
             sourcePieceId,
             targetPieceId,
             (action.label as string) || "",
           );
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: true,
+            kind: { kind: "deleteConnection", connectionId: connection.id },
+          };
           executed += 1;
           reloadCurrentProject = true;
           steps.push({
@@ -420,12 +543,22 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "updateConnection": {
+          const previousConnection = await api.getConnection(action.connectionId as string);
           const updates = action.updates as Record<string, unknown>;
           await api.updateConnection(action.connectionId as string, updates);
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: true,
+            kind: { kind: "restoreConnection", connection: previousConnection },
+          };
           executed += 1;
           reloadCurrentProject = true;
           steps.push({
@@ -433,16 +566,29 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "generatePlan": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Generated plans are not rollback-safe yet",
+          };
           if (isActiveProject) {
             await useLeaderStore
               .getState()
               .generatePlan(projectId, (action.guidance as string) || "");
           } else {
-            await api.generateWorkPlan(projectId, (action.guidance as string) || "");
+            const leaderApi = await loadLeaderApi();
+            await leaderApi.generateWorkPlan(
+              projectId,
+              (action.guidance as string) || "",
+            );
           }
           switchToTab = "plan";
           executed += 1;
@@ -451,15 +597,33 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "approvePlan": {
+          const leaderApi = (await loadLeaderApi()) as any;
+          const previousPlan = await leaderApi.getWorkPlan(action.planId as string);
           if (isActiveProject) {
             await useLeaderStore.getState().approvePlan(action.planId as string);
           } else {
-            await api.updatePlanStatus(action.planId as string, "approved");
+            await leaderApi.updatePlanStatus(
+              action.planId as string,
+              "approved",
+            );
           }
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: true,
+            kind: {
+              kind: "restorePlanStatus",
+              planId: previousPlan.id,
+              status: previousPlan.status,
+            },
+          };
           switchToTab = "plan";
           executed += 1;
           steps.push({
@@ -467,15 +631,33 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "rejectPlan": {
+          const leaderApi = (await loadLeaderApi()) as any;
+          const previousPlan = await leaderApi.getWorkPlan(action.planId as string);
           if (isActiveProject) {
             await useLeaderStore.getState().rejectPlan(action.planId as string);
           } else {
-            await api.updatePlanStatus(action.planId as string, "rejected");
+            await leaderApi.updatePlanStatus(
+              action.planId as string,
+              "rejected",
+            );
           }
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: true,
+            kind: {
+              kind: "restorePlanStatus",
+              planId: previousPlan.id,
+              status: previousPlan.status,
+            },
+          };
           switchToTab = "plan";
           executed += 1;
           steps.push({
@@ -483,14 +665,24 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "runAllTasks": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Task execution changes workspace state and is not rollback-safe",
+          };
           if (isActiveProject) {
             await useLeaderStore.getState().runAllTasks(action.planId as string);
           } else {
-            await api.runAllPlanTasks(action.planId as string);
+            const leaderApi = await loadLeaderApi();
+            await leaderApi.runAllPlanTasks(action.planId as string);
           }
           switchToTab = "plan";
           executed += 1;
@@ -499,16 +691,26 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         case "mergeBranches": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Git merges are not rollback-safe from the audit log",
+          };
           if (isActiveProject) {
             await useLeaderStore.getState().mergeBranches(action.planId as string);
           } else {
-            const summary = await api.mergePlanBranches(action.planId as string);
+            const leaderApi = await loadLeaderApi();
+            const summary = await leaderApi.mergePlanBranches(action.planId as string);
             if (!summary.conflict) {
-              await api.runIntegrationReview(action.planId as string);
+              await leaderApi.runIntegrationReview(action.planId as string);
             }
           }
           switchToTab = "plan";
@@ -518,7 +720,9 @@ export async function executeActions(
             action: action.action,
             description,
             status: "executed",
+            rollback: rollbackStep,
           });
+          rollbackSteps.push(rollbackStep);
           break;
         }
         default: {
@@ -530,6 +734,20 @@ export async function executeActions(
             description,
             status: "failed",
             error: message,
+            rollback: {
+              index,
+              action: action.action,
+              description,
+              supported: false,
+              reason: message,
+            },
+          });
+          rollbackSteps.push({
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: message,
           });
         }
       }
@@ -543,10 +761,44 @@ export async function executeActions(
         description,
         status: "failed",
         error: message,
+        rollback: rollbackStep ?? {
+          index,
+          action: action.action,
+          description,
+          supported: false,
+          reason: message,
+        },
       });
+      rollbackSteps.push(
+        rollbackStep ?? {
+          index,
+          action: action.action,
+          description,
+          supported: false,
+          reason: message,
+        },
+      );
     }
   }
 
+  const rollbackSupported = errors.length === 0 && rollbackSteps.every((step) => step.supported);
+  const rollbackReason = rollbackSupported
+    ? null
+    : errors.length > 0
+      ? "One or more CTO actions failed during execution."
+      : "This decision includes non-reversible action(s).";
+
   devLog("info", "CTO", `Executed ${executed}/${actions.length} actions`, { errors });
-  return { executed, errors, steps, switchToTab, reloadCurrentProject };
+  return {
+    executed,
+    errors,
+    steps,
+    switchToTab,
+    reloadCurrentProject,
+    rollback: {
+      supported: rollbackSupported,
+      reason: rollbackReason,
+      steps: rollbackSteps,
+    },
+  };
 }

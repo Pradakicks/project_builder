@@ -170,8 +170,73 @@ export interface CtoDecision {
   id: string;
   projectId: string;
   summary: string;
-  actionsJson: string;
+  review: CtoDecisionReview;
+  execution: CtoDecisionExecution | null;
+  rollback: CtoRollbackResult | null;
+  status: CtoDecisionStatus;
   createdAt: string;
+  updatedAt: string;
+}
+
+export type CtoDecisionStatus = "rejected" | "executed" | "failed" | "rolled-back";
+
+export interface CtoDecisionReview {
+  assistantText: string;
+  cleanedContent: string;
+  actions: CtoAction[];
+  validationErrors: string[];
+}
+
+export interface CtoDecisionExecution {
+  executed: number;
+  errors: string[];
+  steps: CtoActionExecutionStep[];
+  switchToTab?: string | null;
+  reloadCurrentProject: boolean;
+  rollback: CtoRollbackPlan;
+}
+
+export interface CtoRollbackPlan {
+  supported: boolean;
+  reason?: string | null;
+  steps: CtoRollbackStep[];
+}
+
+export interface CtoRollbackStep {
+  index: number;
+  action: string;
+  description: string;
+  supported: boolean;
+  reason?: string | null;
+  kind?: CtoRollbackKind | null;
+}
+
+export type CtoRollbackKind =
+  | { kind: "restorePiece"; piece: Piece }
+  | { kind: "deletePiece"; pieceId: string }
+  | { kind: "restoreConnection"; connection: Connection }
+  | { kind: "deleteConnection"; connectionId: string }
+  | { kind: "restorePlanStatus"; planId: string; status: PlanStatus };
+
+export interface CtoRollbackResult {
+  appliedAt: string;
+  steps: CtoRollbackResultStep[];
+  errors: string[];
+}
+
+export interface CtoRollbackResultStep {
+  index: number;
+  action: string;
+  description: string;
+  status: "applied" | "failed" | "skipped";
+  error?: string | null;
+}
+
+export interface CtoDecisionRecordInput {
+  summary: string;
+  review: CtoDecisionReview;
+  execution: CtoDecisionExecution | null;
+  status: CtoDecisionStatus;
 }
 
 export type CtoActionName =
@@ -202,14 +267,16 @@ export interface CtoActionExecutionStep {
   description: string;
   status: "executed" | "failed";
   error?: string;
+  rollback?: CtoRollbackStep | null;
 }
 
 export interface CtoActionExecutionResult {
   executed: number;
   errors: string[];
   steps: CtoActionExecutionStep[];
-  switchToTab?: string;
+  switchToTab?: string | null;
   reloadCurrentProject: boolean;
+  rollback: CtoRollbackPlan;
 }
 
 // ── Work Plans ───────────────────────────────────────────

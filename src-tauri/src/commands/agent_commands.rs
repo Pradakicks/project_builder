@@ -1,7 +1,10 @@
 use crate::agent;
 use crate::db::AgentHistoryEntry;
 use crate::llm::{self, LlmConfig, Message};
-use crate::models::{Artifact, CtoDecision};
+use crate::models::{
+    Artifact, CtoDecision, CtoDecisionRecordInput, CtoRollbackResult, CtoRollbackResultStep,
+    CtoRollbackResultStepStatus, CtoRollbackKind,
+};
 use crate::AppState;
 use serde::Serialize;
 use serde_json::json;
@@ -217,11 +220,10 @@ pub fn list_artifacts(
 pub fn log_cto_decision(
     state: State<'_, AppState>,
     project_id: String,
-    summary: String,
-    actions_json: String,
+    decision: CtoDecisionRecordInput,
 ) -> Result<CtoDecision, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.insert_cto_decision(&project_id, &summary, &actions_json)
+    db.insert_cto_decision(&project_id, &decision)
 }
 
 #[tracing::instrument(skip(state))]
@@ -232,4 +234,155 @@ pub fn list_cto_decisions(
 ) -> Result<Vec<CtoDecision>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_cto_decisions(&project_id)
+}
+
+fn piece_to_update(piece: &crate::models::Piece) -> crate::db::PieceUpdate {
+    crate::db::PieceUpdate {
+        name: Some(piece.name.clone()),
+        piece_type: Some(piece.piece_type.clone()),
+        color: piece.color.clone(),
+        icon: piece.icon.clone(),
+        responsibilities: Some(piece.responsibilities.clone()),
+        interfaces: Some(piece.interfaces.clone()),
+        constraints: Some(piece.constraints.clone()),
+        notes: Some(piece.notes.clone()),
+        agent_prompt: Some(piece.agent_prompt.clone()),
+        agent_config: Some(piece.agent_config.clone()),
+        output_mode: Some(piece.output_mode.clone()),
+        phase: Some(piece.phase.clone()),
+        position_x: Some(piece.position_x),
+        position_y: Some(piece.position_y),
+    }
+}
+
+fn connection_to_update(connection: &crate::models::Connection) -> crate::db::ConnectionUpdate {
+    crate::db::ConnectionUpdate {
+        label: Some(connection.label.clone()),
+        direction: Some(connection.direction.clone()),
+        data_type: connection.data_type.clone(),
+        protocol: connection.protocol.clone(),
+        constraints: Some(connection.constraints.clone()),
+        notes: Some(connection.notes.clone()),
+        metadata: Some(connection.metadata.clone()),
+    }
+}
+
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn rollback_cto_decision(
+    state: State<'_, AppState>,
+    decision_id: String,
+) -> Result<CtoDecision, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let decision = db.get_cto_decision(&decision_id)?;
+
+    if matches!(decision.status, crate::models::CtoDecisionStatus::RolledBack) {
+        return Err("This CTO decision has already been rolled back.".to_string());
+    }
+
+    let execution = decision
+        .execution
+        .as_ref()
+        .ok_or("This CTO decision does not have execution data to roll back.")?;
+    if !execution.rollback.supported {
+        return Err(
+            execution
+                .rollback
+                .reason
+                .clone()
+                .unwrap_or_else(|| "This CTO decision is not rollback-safe.".to_string()),
+        );
+    }
+
+    let mut results: Vec<CtoRollbackResultStep> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for step in execution.rollback.steps.iter().rev() {
+        if !step.supported {
+            results.push(CtoRollbackResultStep {
+                index: step.index,
+                action: step.action.clone(),
+                description: step.description.clone(),
+                status: CtoRollbackResultStepStatus::Skipped,
+                error: step.reason.clone(),
+            });
+            continue;
+        }
+
+        let outcome = match &step.kind {
+            Some(CtoRollbackKind::RestorePiece { piece }) => {
+                db.update_piece(&piece.id, &piece_to_update(piece))
+                    .map(|_| CtoRollbackResultStepStatus::Applied)
+                    .map_err(|e| e.to_string())
+            }
+            Some(CtoRollbackKind::DeletePiece { piece_id }) => {
+                db.delete_piece(piece_id)
+                    .map(|_| CtoRollbackResultStepStatus::Applied)
+                    .map_err(|e| e.to_string())
+            }
+            Some(CtoRollbackKind::RestoreConnection { connection }) => {
+                db.update_connection(&connection.id, &connection_to_update(connection))
+                    .map(|_| CtoRollbackResultStepStatus::Applied)
+                    .map_err(|e| e.to_string())
+            }
+            Some(CtoRollbackKind::DeleteConnection { connection_id }) => {
+                db.delete_connection(connection_id)
+                    .map(|_| CtoRollbackResultStepStatus::Applied)
+                    .map_err(|e| e.to_string())
+            }
+            Some(CtoRollbackKind::RestorePlanStatus { plan_id, status }) => {
+                db.update_work_plan(
+                    plan_id,
+                    &crate::models::WorkPlanUpdate {
+                        status: Some(status.clone()),
+                        ..Default::default()
+                    },
+                )
+                .map(|_| CtoRollbackResultStepStatus::Applied)
+                .map_err(|e| e.to_string())
+            }
+            None => Err("Rollback data missing for executed action".to_string()),
+        };
+
+        match outcome {
+            Ok(status) => results.push(CtoRollbackResultStep {
+                index: step.index,
+                action: step.action.clone(),
+                description: step.description.clone(),
+                status,
+                error: None,
+            }),
+            Err(error) => {
+                errors.push(format!("Action {} rollback failed: {}", step.action, error));
+                results.push(CtoRollbackResultStep {
+                    index: step.index,
+                    action: step.action.clone(),
+                    description: step.description.clone(),
+                    status: CtoRollbackResultStepStatus::Failed,
+                    error: Some(error),
+                });
+            }
+        }
+    }
+
+    let rollback = CtoRollbackResult {
+        applied_at: chrono::Utc::now().to_rfc3339(),
+        steps: results,
+        errors: errors.clone(),
+    };
+
+    let updated = db.record_cto_decision_rollback(
+        &decision_id,
+        &rollback,
+        if errors.is_empty() {
+            crate::models::CtoDecisionStatus::RolledBack
+        } else {
+            crate::models::CtoDecisionStatus::Failed
+        },
+    )?;
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+
+    Ok(updated)
 }

@@ -13,9 +13,9 @@ import {
 } from "../../utils/ctoActions";
 import type {
   CtoDecision,
-  CtoAction,
   CtoActionReview,
   CtoActionExecutionResult,
+  CtoDecisionRecordInput,
 } from "../../types";
 
 type Tab = "chat" | "decisions";
@@ -35,31 +35,72 @@ function formatActionReviewDetails(review: CtoActionReview): string {
   return sections.join("\n");
 }
 
-function buildExecutionSummary(
+function buildExecutedDecision(
   assistantText: string,
   review: CtoActionReview,
   result: CtoActionExecutionResult,
-): string {
-  const record = {
-    assistantText: assistantText.trim(),
-    actionCount: review.actions.length,
-    validationErrors: review.validationErrors,
+): CtoDecisionRecordInput {
+  const summary =
+    review.cleanedContent.trim() || assistantText.trim() || "CTO response";
+  return {
+    summary,
+    review: {
+      assistantText: assistantText.trim(),
+      cleanedContent: review.cleanedContent,
+      actions: review.actions,
+      validationErrors: review.validationErrors,
+    },
     execution: {
       executed: result.executed,
       errors: result.errors,
       steps: result.steps,
       reloadCurrentProject: result.reloadCurrentProject,
       switchToTab: result.switchToTab ?? null,
+      rollback: result.rollback,
     },
+    status: result.errors.length > 0 ? "failed" : "executed",
   };
+}
 
-  return [
-    assistantText.trim() || "CTO response",
-    "Execution record:",
-    "```json",
-    JSON.stringify(record, null, 2),
-    "```",
-  ].join("\n");
+function buildRejectedDecision(
+  assistantText: string,
+  review: CtoActionReview,
+): CtoDecisionRecordInput {
+  return {
+    summary: buildRejectedDecisionSummary(review),
+    review: {
+      assistantText: assistantText.trim(),
+      cleanedContent: review.cleanedContent,
+      actions: review.actions,
+      validationErrors: review.validationErrors,
+    },
+    execution: null,
+    status: "rejected",
+  };
+}
+
+function buildRejectedDecisionSummary(review: CtoActionReview): string {
+  const sections = [
+    "Rejected CTO action block",
+    "Nothing executed because validation failed before dispatch.",
+  ];
+
+  if (review.actions.length > 0) {
+    sections.push(`Recovered actions: ${review.actions.length}`);
+  }
+
+  if (review.validationErrors.length > 0) {
+    sections.push("");
+    sections.push("Validation errors:");
+    sections.push(...review.validationErrors.map((error) => `- ${error}`));
+  }
+
+  sections.push("");
+  sections.push(
+    "Next step: ask the CTO to return only fenced ```action blocks containing a single JSON object per block.",
+  );
+
+  return sections.join("\n");
 }
 
 export function ChatPanel({
@@ -87,6 +128,7 @@ export function ChatPanel({
     projectId: string;
     projectName: string;
     requestId: string;
+    assistantText: string;
     cleanedContent: string;
     review: CtoActionReview;
   } | null>(null);
@@ -94,6 +136,13 @@ export function ChatPanel({
   const listRef = useRef<HTMLDivElement>(null);
   const messages = thread?.messages ?? [];
   const streaming = thread?.streaming ?? false;
+
+  const refreshDecisions = (decision: CtoDecision) => {
+    setDecisions((current) => {
+      const next = current.filter((item) => item.id !== decision.id);
+      return [decision, ...next];
+    });
+  };
 
   useEffect(() => {
     listRef.current?.scrollTo(0, listRef.current.scrollHeight);
@@ -111,7 +160,7 @@ export function ChatPanel({
   useEffect(() => {
     let cancelled = false;
     if (tab === "decisions" && project) {
-      import("../../api/tauriApiAsync").then(({ listCtoDecisions }) => {
+      import("../../api/ctoApi").then(({ listCtoDecisions }) => {
         listCtoDecisions(project.id)
           .then((items) => {
             if (!cancelled) setDecisions(items);
@@ -146,9 +195,9 @@ export function ChatPanel({
     let streamBuffer = "";
 
     try {
-      const { chatWithCto, onCtoChatChunk } = await import("../../api/tauriApiAsync");
+      const { chatWithCto, onCtoChatChunk } = await import("../../api/ctoApi");
 
-      const unlisten = await onCtoChatChunk((payload) => {
+      const unlisten = await onCtoChatChunk(async (payload) => {
         if (
           payload.projectId !== originProjectId ||
           payload.requestId !== requestId
@@ -167,6 +216,7 @@ export function ChatPanel({
               projectId: originProjectId,
               projectName: originProjectName,
               requestId,
+              assistantText: streamBuffer,
               cleanedContent: review.cleanedContent,
               review,
             });
@@ -176,9 +226,19 @@ export function ChatPanel({
 
           if (review.validationErrors.length > 0) {
             useToastStore.getState().addToast(
-              `CTO action block rejected: ${review.validationErrors[0]}`,
+              `CTO action block rejected: ${review.validationErrors[0]}. Nothing executed.`,
               "warning",
             );
+            try {
+              const { logCtoDecision } = await import("../../api/ctoApi");
+              const decision = await logCtoDecision(
+                originProjectId,
+                buildRejectedDecision(streamBuffer, review),
+              );
+              refreshDecisions(decision);
+            } catch (logError) {
+              devLog("warn", "Chat", "Failed to log rejected CTO decision", logError);
+            }
           }
 
           devLog("info", "Chat", `CTO response complete (${streamBuffer.length} chars)`);
@@ -238,17 +298,14 @@ export function ChatPanel({
         );
       }
 
-      const { logCtoDecision } = await import("../../api/tauriApiAsync");
-      const summary = buildExecutionSummary(
-        currentReview.cleanedContent,
+      const { logCtoDecision } = await import("../../api/ctoApi");
+      const decision = buildExecutedDecision(
+        currentReview.assistantText,
         currentReview.review,
         result,
       );
-      await logCtoDecision(
-        currentReview.projectId,
-        summary,
-        JSON.stringify(currentReview.review.actions),
-      );
+      const savedDecision = await logCtoDecision(currentReview.projectId, decision);
+      refreshDecisions(savedDecision);
 
       if (isOriginProjectActive && result.reloadCurrentProject) {
         await useProjectStore.getState().loadProject(currentReview.projectId);
@@ -286,6 +343,45 @@ export function ChatPanel({
         details: formatActionReviewDetails(pendingReview.review),
         confirmLabel: "Execute",
         cancelLabel: "Keep Reviewing",
+      },
+    );
+  };
+
+  const rollbackDecision = async (decision: CtoDecision) => {
+    if (!decision.execution?.rollback.supported) {
+      return;
+    }
+
+    showConfirm(
+      `Roll back CTO decision from ${new Date(decision.createdAt).toLocaleString()}?`,
+      () => {
+        void (async () => {
+          try {
+            const { rollbackCtoDecision } = await import("../../api/ctoApi");
+            const updatedDecision = await rollbackCtoDecision(decision.id);
+            refreshDecisions(updatedDecision);
+            if (useAppStore.getState().activeProjectId === decision.projectId) {
+              await useProjectStore.getState().loadProject(decision.projectId);
+            }
+            useToastStore.getState().addToast("CTO decision rolled back", "info");
+        } catch (error) {
+          devLog("error", "Chat", "Failed to roll back CTO decision", error);
+          try {
+            const { listCtoDecisions } = await import("../../api/ctoApi");
+            const items = await listCtoDecisions(decision.projectId);
+            setDecisions(items);
+          } catch (refreshError) {
+            devLog("warn", "Chat", "Failed to refresh CTO decisions after rollback error", refreshError);
+          }
+          useToastStore.getState().addToast(`CTO rollback failed: ${error}`, "warning");
+        }
+      })();
+    },
+      {
+        title: "Rollback CTO decision",
+        details: decision.execution?.rollback.reason ?? "This decision can be rolled back safely.",
+        confirmLabel: "Rollback",
+        cancelLabel: "Keep Decision",
       },
     );
   };
@@ -410,9 +506,18 @@ export function ChatPanel({
                   </p>
                   <p className="mt-1 text-[11px] text-gray-300">
                     {pendingReview.review.validationErrors.length > 0
-                      ? "The returned action block was rejected by validation. Nothing will execute until the model emits a valid block."
+                      ? "The returned action block was rejected before execution. Nothing changed in the project."
                       : "The returned action block is valid. Review it here before execution."}
                   </p>
+                  {pendingReview.review.validationErrors.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-gray-400">
+                      Next step: ask the CTO to emit one fenced{" "}
+                      <code className="rounded bg-gray-900 px-1 py-0.5 text-[10px] text-gray-200">
+                        ```action
+                      </code>{" "}
+                      block per change, with valid JSON only.
+                    </p>
+                  ) : null}
                 </div>
                 <span
                   className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-medium ${
@@ -428,15 +533,21 @@ export function ChatPanel({
               </div>
 
               <div className="mt-2 space-y-1">
-                {pendingReview.review.actions.map((action, index) => (
-                  <div
-                    key={`${pendingReview.requestId}-${index}`}
-                    className="flex items-start gap-2 text-[11px] text-gray-200"
-                  >
-                    <span className="mt-0.5 text-blue-300">•</span>
-                    <span>{describeAction(action)}</span>
-                  </div>
-                ))}
+                {pendingReview.review.actions.length > 0 ? (
+                  pendingReview.review.actions.map((action, index) => (
+                    <div
+                      key={`${pendingReview.requestId}-${index}`}
+                      className="flex items-start gap-2 text-[11px] text-gray-200"
+                    >
+                      <span className="mt-0.5 text-blue-300">•</span>
+                      <span>{describeAction(action)}</span>
+                    </div>
+                  ))
+                ) : pendingReview.review.validationErrors.length > 0 ? (
+                  <p className="text-[11px] text-gray-400">
+                    No valid actions were extracted, so nothing was queued for execution.
+                  </p>
+                ) : null}
                 {pendingReview.review.validationErrors.length > 0 ? (
                   <div className="rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-[11px] text-red-200">
                     {pendingReview.review.validationErrors.map((error, index) => (
@@ -495,14 +606,9 @@ export function ChatPanel({
             </p>
           )}
           {decisions.map((d) => {
-            const actions = (() => {
-              try {
-                return JSON.parse(d.actionsJson) as CtoAction[];
-              } catch {
-                return [];
-              }
-            })();
+            const actions = d.review.actions;
             const isExpanded = expandedDecision === d.id;
+            const isRejected = d.status === "rejected";
             const date = new Date(d.createdAt);
             const timeStr = date.toLocaleString(undefined, {
               month: "short",
@@ -531,8 +637,20 @@ export function ChatPanel({
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5 mt-1">
-                    <span className="rounded bg-blue-900/50 px-1.5 py-0.5 text-[9px] text-blue-400 font-medium">
-                      {actions.length} action{actions.length !== 1 ? "s" : ""}
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                        isRejected
+                          ? "bg-red-900/50 text-red-300"
+                          : "bg-blue-900/50 text-blue-400"
+                      }`}
+                    >
+                      {isRejected
+                        ? "Rejected"
+                        : d.status === "rolled-back"
+                          ? "Rolled back"
+                          : d.status === "failed"
+                            ? "Failed"
+                            : `${actions.length} action${actions.length !== 1 ? "s" : ""}`}
                     </span>
                     <span className="text-[9px] text-gray-600">
                       {isExpanded ? "▾" : "▸"}
@@ -550,9 +668,65 @@ export function ChatPanel({
                         <span>{describeAction(a)}</span>
                       </div>
                     ))}
+                    {d.execution && (
+                      <div className="rounded border border-gray-700 bg-gray-900/70 px-2 py-1 text-[10px] text-gray-400">
+                        <p>
+                          Execution: {d.execution.executed} applied
+                          {d.execution.errors.length > 0 ? `, ${d.execution.errors.length} warning(s)` : ""}
+                        </p>
+                        {d.execution.errors.length > 0 && (
+                          <div className="mt-0.5 space-y-0.5 text-red-300">
+                            {d.execution.errors.map((error, index) => (
+                              <p key={`${d.id}-exec-${index}`}>{error}</p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {d.execution?.rollback && (
+                      <div className="rounded border border-gray-700 bg-gray-900/70 px-2 py-1 text-[10px] text-gray-400">
+                        <p>
+                          Rollback:{" "}
+                          {d.execution.rollback.supported
+                            ? "available"
+                            : d.execution.rollback.reason ?? "not available"}
+                        </p>
+                        {d.execution.rollback.steps.length > 0 && (
+                          <div className="mt-0.5 space-y-0.5">
+                            {d.execution.rollback.steps.map((step) => (
+                              <p key={`${d.id}-rollback-${step.index}`}>
+                                {step.supported ? "•" : "×"} {step.description}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {d.rollback && (
+                      <div className="rounded border border-green-900/60 bg-green-950/30 px-2 py-1 text-[10px] text-green-200">
+                        <p>Rolled back at {new Date(d.rollback.appliedAt).toLocaleString()}</p>
+                        {d.rollback.errors.length > 0 && (
+                          <div className="mt-0.5 space-y-0.5 text-red-300">
+                            {d.rollback.errors.map((error, index) => (
+                              <p key={`${d.id}-rollback-error-${index}`}>{error}</p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {d.summary && (
                       <div className="mt-1.5 text-[10px] text-gray-500 leading-relaxed">
                         <Markdown content={d.summary} />
+                      </div>
+                    )}
+                    {d.execution?.rollback.supported && d.status === "executed" && (
+                      <div className="pt-1">
+                        <button
+                          onClick={() => void rollbackDecision(d)}
+                          className="rounded border border-amber-700 px-2 py-1 text-[9px] text-amber-300 hover:bg-amber-900/30"
+                        >
+                          Roll back decision
+                        </button>
                       </div>
                     )}
                   </div>

@@ -69,6 +69,7 @@ pub fn run() {
             commands::agent_commands::list_artifacts,
             commands::agent_commands::log_cto_decision,
             commands::agent_commands::list_cto_decisions,
+            commands::agent_commands::rollback_cto_decision,
             commands::settings_commands::get_api_key,
             commands::settings_commands::set_api_key,
             commands::settings_commands::delete_api_key,

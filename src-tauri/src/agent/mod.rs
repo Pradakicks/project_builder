@@ -118,7 +118,7 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
     debug!(project_id, "Building CTO prompt");
 
     let mut system_parts = vec![
-        "You are the CTO of this project. You make decisions — you don't ask permission or suggest options. When something needs to change, you change it. When the architecture needs a new component, you create it. When responsibilities need updating, you update them.\n\nBe direct and assertive. State what you're doing and why, then do it. Your changes are applied automatically.".to_string(),
+        "You are the CTO of this project. You make decisions — you don't ask permission or suggest options. When something needs to change, you propose the change directly. When the architecture needs a new component, you create it. When responsibilities need updating, you update them.\n\nBe direct and assertive. State what you're doing and why, then include the action block. Your response is reviewed before execution.".to_string(),
     ];
 
     if let Ok(project) = db.get_project(project_id) {
@@ -191,8 +191,9 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
         system_parts.push(plan_section);
     }
 
-    system_parts.push(r#"Make changes by including action blocks in your response. Your changes are applied immediately — no approval step.
-Wrap each action in a fenced code block with the language tag "action".
+    system_parts.push(r#"Make changes by including action blocks in your response. Your response is reviewed before anything executes.
+Wrap each action in a fenced code block with the language tag "action" and put only a single JSON object inside the fence.
+Do not claim the change has already been applied. Do not wrap the JSON in markdown prose.
 
 Available actions (diagram):
 - {"action": "updatePiece", "pieceId": "<id>", "updates": {...}}
@@ -219,7 +220,8 @@ Rules:
 - Briefly explain what you're doing, then include the action block
 - When you create multiple pieces and then connect them in the same response, give each new piece a unique ref and connect them with sourceRef/targetRef. Do not invent UUIDs.
 - Use piece/connection/plan/task IDs from the lists above only for entities that already exist
-- Take action whenever the conversation calls for it — don't just describe what could be done"#.to_string());
+- Fenced action blocks are the primary contract; the app may recover a simple inline `action { ... }` fallback, but you should not rely on that.
+- If you are proposing a `generatePlan`, include only the JSON object for the action and keep the guidance concise"#.to_string());
 
     trace!(prompt_length = system_parts.join("\n\n").len(), "CTO prompt built");
 
@@ -442,4 +444,53 @@ fn resolve_references(prompt: &str, pieces: &[Piece]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ProjectSettings;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_db_path(case: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "project-builder-cto-prompt-{case}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create temp test directory");
+        dir.join("data.db")
+    }
+
+    fn cleanup(db_path: &PathBuf) {
+        if let Some(parent) = db_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn cto_prompt_reflects_review_first_contract() {
+        let db_path = temp_db_path("review-first");
+        let db = Database::new_at_path(&db_path).expect("open temp db");
+        let project = db
+            .create_project_with_settings(
+                "Prompt project",
+                "Validate the CTO prompt",
+                ProjectSettings::default(),
+            )
+            .expect("create project");
+
+        let system_prompt = build_cto_prompt(&db, &project.id)
+            .into_iter()
+            .find(|message| message.role == "system")
+            .map(|message| message.content)
+            .expect("system prompt");
+
+        assert!(system_prompt.contains("reviewed before execution"));
+        assert!(system_prompt.contains("fenced code block"));
+        assert!(system_prompt.contains("inline `action { ... }` fallback"));
+        assert!(!system_prompt.contains("applied automatically"));
+
+        cleanup(&db_path);
+    }
 }

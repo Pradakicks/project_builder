@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use tracing::{error, info};
 
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 type MigrationFn = fn(&Connection) -> Result<(), String>;
 
@@ -23,9 +23,13 @@ struct Migration {
 }
 
 const MIGRATIONS: &[Migration] = &[Migration {
-    version: CURRENT_SCHEMA_VERSION,
-    description: "Bootstrap the current application schema",
+    version: 1,
+    description: "Bootstrap the core application schema",
     apply: migrate_v1,
+}, Migration {
+    version: CURRENT_SCHEMA_VERSION,
+    description: "Add structured CTO audit records",
+    apply: migrate_v2,
 }];
 
 pub struct Database {
@@ -220,7 +224,12 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
             project_id TEXT NOT NULL,
             summary TEXT NOT NULL DEFAULT '',
             actions_json TEXT NOT NULL DEFAULT '[]',
+            review_json TEXT NOT NULL DEFAULT '{}',
+            execution_json TEXT,
+            rollback_json TEXT,
+            status TEXT NOT NULL DEFAULT 'rejected',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_cto_decisions_project ON cto_decisions(project_id);
@@ -232,7 +241,12 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
     })?;
 
     ensure_agent_history_metadata_column(conn)?;
+    ensure_cto_decisions_schema(conn)?;
     Ok(())
+}
+
+fn migrate_v2(conn: &Connection) -> Result<(), String> {
+    ensure_cto_decisions_schema(conn)
 }
 
 fn ensure_agent_history_metadata_column(conn: &Connection) -> Result<(), String> {
@@ -254,6 +268,64 @@ fn ensure_agent_history_metadata_column(conn: &Connection) -> Result<(), String>
     if !has_metadata_json {
         conn.execute(
             "ALTER TABLE agent_history ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(cto_decisions)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_review_json = false;
+    let mut has_execution_json = false;
+    let mut has_rollback_json = false;
+    let mut has_status = false;
+    let mut has_updated_at = false;
+
+    for column in columns {
+        match column.map_err(|e| e.to_string())?.as_str() {
+            "review_json" => has_review_json = true,
+            "execution_json" => has_execution_json = true,
+            "rollback_json" => has_rollback_json = true,
+            "status" => has_status = true,
+            "updated_at" => has_updated_at = true,
+            _ => {}
+        }
+    }
+
+    if !has_review_json {
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN review_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_execution_json {
+        conn.execute("ALTER TABLE cto_decisions ADD COLUMN execution_json TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    if !has_rollback_json {
+        conn.execute("ALTER TABLE cto_decisions ADD COLUMN rollback_json TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    if !has_status {
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'rejected'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_updated_at {
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))",
             [],
         )
         .map_err(|e| e.to_string())?;
