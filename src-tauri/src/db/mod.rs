@@ -1,18 +1,22 @@
 mod queries;
 mod agent_queries;
 mod artifact_queries;
+mod goal_run_queries;
 mod plan_queries;
 mod cto_queries;
 
 pub use queries::*;
 pub use agent_queries::*;
+#[allow(unused_imports)]
 pub use plan_queries::*;
+#[allow(unused_imports)]
+pub use goal_run_queries::*;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
 use tracing::{error, info};
 
-const CURRENT_SCHEMA_VERSION: i32 = 2;
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 type MigrationFn = fn(&Connection) -> Result<(), String>;
 
@@ -27,9 +31,13 @@ const MIGRATIONS: &[Migration] = &[Migration {
     description: "Bootstrap the core application schema",
     apply: migrate_v1,
 }, Migration {
-    version: CURRENT_SCHEMA_VERSION,
+    version: 2,
     description: "Add structured CTO audit records",
     apply: migrate_v2,
+}, Migration {
+    version: CURRENT_SCHEMA_VERSION,
+    description: "Add goal run orchestration state",
+    apply: migrate_v3,
 }];
 
 pub struct Database {
@@ -249,6 +257,10 @@ fn migrate_v2(conn: &Connection) -> Result<(), String> {
     ensure_cto_decisions_schema(conn)
 }
 
+fn migrate_v3(conn: &Connection) -> Result<(), String> {
+    ensure_goal_runs_schema(conn)
+}
+
 fn ensure_agent_history_metadata_column(conn: &Connection) -> Result<(), String> {
     let mut stmt = conn
         .prepare("PRAGMA table_info(agent_history)")
@@ -332,6 +344,32 @@ fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS goal_runs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            phase TEXT NOT NULL DEFAULT 'prompt-received',
+            status TEXT NOT NULL DEFAULT 'running',
+            blocker_reason TEXT,
+            current_plan_id TEXT,
+            runtime_status_summary TEXT,
+            verification_summary TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_failure_summary TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_project ON goal_runs(project_id);
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_status ON goal_runs(status, updated_at DESC);
+        ",
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Get the platform-appropriate data directory
@@ -431,6 +469,15 @@ mod tests {
         let conn = Connection::open(&db_path).expect("open legacy db");
         conn.execute_batch(
             "
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                root_piece_id TEXT,
+                settings_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE agent_history (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
@@ -440,6 +487,23 @@ mod tests {
                 tokens_used INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE cto_decisions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                actions_json TEXT NOT NULL DEFAULT '[]',
+                review_json TEXT NOT NULL DEFAULT '{}',
+                execution_json TEXT,
+                rollback_json TEXT,
+                status TEXT NOT NULL DEFAULT 'rejected',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO projects (
+                id, name, description, settings_json, created_at, updated_at
+            ) VALUES (
+                'project-1', 'Legacy project', 'Before goal runs', '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'
+            );
             INSERT INTO agent_history (
                 id, agent_id, action, input_text, output_text, tokens_used, created_at
             ) VALUES (
@@ -448,12 +512,15 @@ mod tests {
         ",
         )
         .expect("seed legacy schema");
+        conn.execute_batch("PRAGMA user_version = 2;")
+            .expect("set legacy version");
 
         drop(conn);
 
         let db = Database::new_at_path(&db_path).expect("upgrade legacy db");
         assert_eq!(user_version(&db.conn), CURRENT_SCHEMA_VERSION);
         assert!(table_has_column(&db.conn, "agent_history", "metadata_json"));
+        assert!(table_has_column(&db.conn, "goal_runs", "retry_count"));
 
         let metadata: String = db
             .conn
@@ -464,6 +531,10 @@ mod tests {
             )
             .expect("read migrated row");
         assert_eq!(metadata, "{}");
+
+        let projects = db.list_projects().expect("list projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "project-1");
 
         drop(db);
         cleanup(&db_path);

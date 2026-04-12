@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod artifact;
+pub mod goal_run;
 pub mod connection;
 pub mod cto_decision;
 pub mod debug;
@@ -10,6 +11,7 @@ pub mod work_plan;
 
 pub use agent::*;
 pub use artifact::*;
+pub use goal_run::*;
 pub use connection::*;
 pub use cto_decision::*;
 pub use debug::*;
