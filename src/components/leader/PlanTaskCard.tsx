@@ -58,7 +58,7 @@ export function PlanTaskCard({
       const existing = useAgentStore.getState().runs[task.pieceId];
       if (existing?.running || existing?.output) return;
 
-      const { getAgentHistory } = await import("../../api/tauriApi");
+      const { getAgentHistory } = await import("../../api/tauriApiAsync");
       try {
         const history = await getAgentHistory(task.pieceId);
         const latest = history[0];

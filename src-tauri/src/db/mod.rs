@@ -10,7 +10,23 @@ pub use plan_queries::*;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
-use tracing::{info, error};
+use tracing::{error, info};
+
+const CURRENT_SCHEMA_VERSION: i32 = 1;
+
+type MigrationFn = fn(&Connection) -> Result<(), String>;
+
+struct Migration {
+    version: i32,
+    description: &'static str,
+    apply: MigrationFn,
+}
+
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: CURRENT_SCHEMA_VERSION,
+    description: "Bootstrap the current application schema",
+    apply: migrate_v1,
+}];
 
 pub struct Database {
     pub conn: Connection,
@@ -18,16 +34,19 @@ pub struct Database {
 
 impl Database {
     pub fn new() -> Result<Self, String> {
-        let db_path = Self::db_path()?;
+        Self::new_at_path(Self::db_path()?)
+    }
+
+    pub fn new_at_path(db_path: impl Into<PathBuf>) -> Result<Self, String> {
+        let db_path = db_path.into();
         info!(path = %db_path.display(), "Initializing database");
 
-        // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-        let db = Database { conn };
+        let mut db = Database { conn };
         db.init_schema()?;
         info!("Database schema initialized successfully");
         Ok(db)
@@ -40,169 +59,207 @@ impl Database {
         Ok(path)
     }
 
-    fn init_schema(&self) -> Result<(), String> {
-        self.conn
-            .execute_batch(
-                "
-            CREATE TABLE IF NOT EXISTS projects (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                root_piece_id TEXT,
-                settings_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+    fn init_schema(&mut self) -> Result<(), String> {
+        let mut version = self.schema_version()?;
+        if version > CURRENT_SCHEMA_VERSION {
+            let message = format!(
+                "Database schema version {} is newer than supported version {}",
+                version, CURRENT_SCHEMA_VERSION
             );
+            error!("{message}");
+            return Err(message);
+        }
 
-            CREATE TABLE IF NOT EXISTS pieces (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                parent_id TEXT,
-                name TEXT NOT NULL,
-                piece_type TEXT NOT NULL DEFAULT '',
-                color TEXT,
-                icon TEXT,
-                responsibilities TEXT NOT NULL DEFAULT '',
-                interfaces_json TEXT NOT NULL DEFAULT '[]',
-                constraints_json TEXT NOT NULL DEFAULT '[]',
-                notes TEXT NOT NULL DEFAULT '',
-                agent_prompt TEXT NOT NULL DEFAULT '',
-                agent_config_json TEXT NOT NULL DEFAULT '{}',
-                output_mode TEXT NOT NULL DEFAULT 'both',
-                phase TEXT NOT NULL DEFAULT 'design',
-                position_x REAL NOT NULL DEFAULT 0.0,
-                position_y REAL NOT NULL DEFAULT 0.0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS connections (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                source_piece_id TEXT NOT NULL,
-                target_piece_id TEXT NOT NULL,
-                direction TEXT NOT NULL DEFAULT 'unidirectional',
-                label TEXT NOT NULL DEFAULT '',
-                data_type TEXT,
-                protocol TEXT,
-                constraints_json TEXT NOT NULL DEFAULT '[]',
-                notes TEXT NOT NULL DEFAULT '',
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-                FOREIGN KEY (source_piece_id) REFERENCES pieces(id) ON DELETE CASCADE,
-                FOREIGN KEY (target_piece_id) REFERENCES pieces(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS agents (
-                id TEXT PRIMARY KEY,
-                piece_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'idle',
-                token_budget INTEGER NOT NULL DEFAULT 0,
-                token_usage INTEGER NOT NULL DEFAULT 0,
-                provider TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (piece_id) REFERENCES pieces(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS agent_history (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                input_text TEXT NOT NULL DEFAULT '',
-                output_text TEXT NOT NULL DEFAULT '',
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                tokens_used INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS artifacts (
-                id TEXT PRIMARY KEY,
-                piece_id TEXT NOT NULL,
-                agent_id TEXT,
-                artifact_type TEXT NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL DEFAULT '',
-                review_status TEXT NOT NULL DEFAULT 'draft',
-                version INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (piece_id) REFERENCES pieces(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS work_plans (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1,
-                status TEXT NOT NULL DEFAULT 'generating',
-                summary TEXT NOT NULL DEFAULT '',
-                user_guidance TEXT NOT NULL DEFAULT '',
-                tasks_json TEXT NOT NULL DEFAULT '[]',
-                raw_output TEXT NOT NULL DEFAULT '',
-                tokens_used INTEGER NOT NULL DEFAULT 0,
-                integration_review TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_pieces_project ON pieces(project_id);
-            CREATE INDEX IF NOT EXISTS idx_pieces_parent ON pieces(parent_id);
-            CREATE INDEX IF NOT EXISTS idx_connections_project ON connections(project_id);
-            CREATE INDEX IF NOT EXISTS idx_agents_piece ON agents(piece_id);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_piece ON artifacts(piece_id);
-            CREATE INDEX IF NOT EXISTS idx_work_plans_project ON work_plans(project_id);
-
-            CREATE TABLE IF NOT EXISTS cto_decisions (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                summary TEXT NOT NULL DEFAULT '',
-                actions_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_cto_decisions_project ON cto_decisions(project_id);
-            ",
-            )
-            .map_err(|e| {
-                error!(error = %e, "Failed to initialize database schema");
-                e.to_string()
-            })?;
-        self.ensure_agent_history_metadata_column()?;
-        Ok(())
-    }
-
-    fn ensure_agent_history_metadata_column(&self) -> Result<(), String> {
-        let mut stmt = self
-            .conn
-            .prepare("PRAGMA table_info(agent_history)")
-            .map_err(|e| e.to_string())?;
-        let columns = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| e.to_string())?;
-
-        let mut has_metadata_json = false;
-        for column in columns {
-            if column.map_err(|e| e.to_string())? == "metadata_json" {
-                has_metadata_json = true;
-                break;
+        for migration in MIGRATIONS {
+            if migration.version > version {
+                info!(
+                    version = migration.version,
+                    description = migration.description,
+                    "Applying database migration"
+                );
+                (migration.apply)(&self.conn)?;
+                self.set_schema_version(migration.version)?;
+                version = migration.version;
             }
         }
 
-        if !has_metadata_json {
-            self.conn
-                .execute(
-                    "ALTER TABLE agent_history ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
-                    [],
-                )
-                .map_err(|e| e.to_string())?;
-        }
-
+        ensure_agent_history_metadata_column(&self.conn)?;
         Ok(())
     }
+
+    fn schema_version(&self) -> Result<i32, String> {
+        self.conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_schema_version(&self, version: i32) -> Result<(), String> {
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {version};"))
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn migrate_v1(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            root_piece_id TEXT,
+            settings_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pieces (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            parent_id TEXT,
+            name TEXT NOT NULL,
+            piece_type TEXT NOT NULL DEFAULT '',
+            color TEXT,
+            icon TEXT,
+            responsibilities TEXT NOT NULL DEFAULT '',
+            interfaces_json TEXT NOT NULL DEFAULT '[]',
+            constraints_json TEXT NOT NULL DEFAULT '[]',
+            notes TEXT NOT NULL DEFAULT '',
+            agent_prompt TEXT NOT NULL DEFAULT '',
+            agent_config_json TEXT NOT NULL DEFAULT '{}',
+            output_mode TEXT NOT NULL DEFAULT 'both',
+            phase TEXT NOT NULL DEFAULT 'design',
+            position_x REAL NOT NULL DEFAULT 0.0,
+            position_y REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS connections (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source_piece_id TEXT NOT NULL,
+            target_piece_id TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'unidirectional',
+            label TEXT NOT NULL DEFAULT '',
+            data_type TEXT,
+            protocol TEXT,
+            constraints_json TEXT NOT NULL DEFAULT '[]',
+            notes TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (source_piece_id) REFERENCES pieces(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_piece_id) REFERENCES pieces(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY,
+            piece_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'idle',
+            token_budget INTEGER NOT NULL DEFAULT 0,
+            token_usage INTEGER NOT NULL DEFAULT 0,
+            provider TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (piece_id) REFERENCES pieces(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_history (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            input_text TEXT NOT NULL DEFAULT '',
+            output_text TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS artifacts (
+            id TEXT PRIMARY KEY,
+            piece_id TEXT NOT NULL,
+            agent_id TEXT,
+            artifact_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            review_status TEXT NOT NULL DEFAULT 'draft',
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (piece_id) REFERENCES pieces(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS work_plans (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'generating',
+            summary TEXT NOT NULL DEFAULT '',
+            user_guidance TEXT NOT NULL DEFAULT '',
+            tasks_json TEXT NOT NULL DEFAULT '[]',
+            raw_output TEXT NOT NULL DEFAULT '',
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            integration_review TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pieces_project ON pieces(project_id);
+        CREATE INDEX IF NOT EXISTS idx_pieces_parent ON pieces(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_connections_project ON connections(project_id);
+        CREATE INDEX IF NOT EXISTS idx_agents_piece ON agents(piece_id);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_piece ON artifacts(piece_id);
+        CREATE INDEX IF NOT EXISTS idx_work_plans_project ON work_plans(project_id);
+
+        CREATE TABLE IF NOT EXISTS cto_decisions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            actions_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_cto_decisions_project ON cto_decisions(project_id);
+        ",
+    )
+    .map_err(|e| {
+        error!(error = %e, "Failed to initialize database schema");
+        e.to_string()
+    })?;
+
+    ensure_agent_history_metadata_column(conn)?;
+    Ok(())
+}
+
+fn ensure_agent_history_metadata_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(agent_history)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_metadata_json = false;
+    for column in columns {
+        if column.map_err(|e| e.to_string())? == "metadata_json" {
+            has_metadata_json = true;
+            break;
+        }
+    }
+
+    if !has_metadata_json {
+        conn.execute(
+            "ALTER TABLE agent_history ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 /// Get the platform-appropriate data directory
@@ -222,5 +279,121 @@ fn dirs_next() -> Option<PathBuf> {
         std::env::var("HOME")
             .ok()
             .map(|h| PathBuf::from(h).join(".local").join("share"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_db_path(case: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "project-builder-dashboard-{case}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create temp test directory");
+        dir.join("data.db")
+    }
+
+    fn cleanup(db_path: &Path) {
+        if let Some(parent) = db_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    fn user_version(conn: &Connection) -> i32 {
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+            .expect("read user_version")
+    }
+
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table_info");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table_info");
+
+        for row in rows {
+            if row.expect("read table_info row") == column {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn new_database_initializes_schema_and_is_idempotent() {
+        let db_path = temp_db_path("fresh");
+
+        let project_id = {
+            let db = Database::new_at_path(&db_path).expect("initial database open");
+            assert_eq!(user_version(&db.conn), CURRENT_SCHEMA_VERSION);
+            assert!(table_has_column(&db.conn, "agent_history", "metadata_json"));
+
+            let project = db
+                .create_project("Alpha", "First project")
+                .expect("create project");
+            assert_eq!(user_version(&db.conn), CURRENT_SCHEMA_VERSION);
+            project.id
+        };
+
+        let reopened = Database::new_at_path(&db_path).expect("reopen database");
+        assert_eq!(user_version(&reopened.conn), CURRENT_SCHEMA_VERSION);
+        assert!(table_has_column(&reopened.conn, "agent_history", "metadata_json"));
+
+        let projects = reopened.list_projects().expect("list projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, project_id);
+
+        drop(reopened);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn legacy_database_is_upgraded_without_losing_rows() {
+        let db_path = temp_db_path("legacy");
+        let conn = Connection::open(&db_path).expect("open legacy db");
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_history (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                input_text TEXT NOT NULL DEFAULT '',
+                output_text TEXT NOT NULL DEFAULT '',
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO agent_history (
+                id, agent_id, action, input_text, output_text, tokens_used, created_at
+            ) VALUES (
+                'history-1', 'agent-1', 'run', 'input', 'output', 5, '2024-01-01T00:00:00Z'
+            );
+        ",
+        )
+        .expect("seed legacy schema");
+
+        drop(conn);
+
+        let db = Database::new_at_path(&db_path).expect("upgrade legacy db");
+        assert_eq!(user_version(&db.conn), CURRENT_SCHEMA_VERSION);
+        assert!(table_has_column(&db.conn, "agent_history", "metadata_json"));
+
+        let metadata: String = db
+            .conn
+            .query_row(
+                "SELECT metadata_json FROM agent_history WHERE id = 'history-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated row");
+        assert_eq!(metadata, "{}");
+
+        drop(db);
+        cleanup(&db_path);
     }
 }
