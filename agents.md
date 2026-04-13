@@ -20,6 +20,12 @@ Documentation and machine-readable state files must always reflect reality. They
 
 The underlying principle: **agents are the authors of their own memory. If you built it, you own keeping the record accurate.**
 
+### This philosophy applies at two levels
+
+**Level 1 — Us, building project builder.** The rules above apply to this codebase: keep `docs/next-steps.md` current, keep specs in sync with code, commit documentation alongside the changes that necessitate it.
+
+**Level 2 — The agents inside project builder.** The CTO agent, implementation agents, and any future team agents should have this philosophy programmed into their behavior. When we build or update their prompts, we must encode this: agents that make changes are responsible for updating any relevant docs, specs, or state files in the same action. This is a core product design principle, not just a development convention. The goal is agents that maintain an accurate, living record of the project they're building — so any agent (or the user) can pick up context at any time without relying on conversation history.
+
 ## Commit Policy
 
 - Every code or documentation change made by the coding agent must be committed before the task is considered complete.
