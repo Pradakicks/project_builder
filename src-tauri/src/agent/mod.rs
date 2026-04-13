@@ -1,3 +1,4 @@
+pub mod capability;
 pub mod external;
 pub mod git_ops;
 pub mod merge;
