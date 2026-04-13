@@ -101,6 +101,18 @@ pub struct GoalRunCodeEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LiveActivity {
+    pub piece_id: String,
+    pub piece_name: String,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub engine: Option<String>,
+    pub current_index: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalRunDeliverySnapshot {
     pub goal_run: GoalRun,
     pub current_plan: Option<WorkPlan>,
@@ -110,6 +122,7 @@ pub struct GoalRunDeliverySnapshot {
     pub code_evidence: Option<GoalRunCodeEvidence>,
     pub runtime_status: Option<ProjectRuntimeStatus>,
     pub recent_events: Vec<GoalRunEvent>,
+    pub live_activity: Option<LiveActivity>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
