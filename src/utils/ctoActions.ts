@@ -565,6 +565,14 @@ export async function executeActions(
     useAppStore.getState().activeProjectId === projectId &&
     useProjectStore.getState().project?.id === projectId;
 
+  // Eagerly reload the canvas after structural mutations (piece/connection create/update)
+  // without blocking — so pieces appear immediately rather than waiting for slow runPiece calls.
+  const eagerReload = () => {
+    if (isActiveProject) {
+      void useProjectStore.getState().loadProject(projectId);
+    }
+  };
+
   devLog("info", "CTO", `Executing ${actions.length} actions`, actions.map((a) => a.action));
   for (const [index, action] of actions.entries()) {
     const description = describeAction(action);
@@ -584,6 +592,7 @@ export async function executeActions(
           };
           executed += 1;
           reloadCurrentProject = true;
+          eagerReload();
           steps.push({
             index,
             action: action.action,
@@ -637,6 +646,7 @@ export async function executeActions(
           };
           executed += 1;
           reloadCurrentProject = true;
+          eagerReload();
           steps.push({
             index,
             action: action.action,
@@ -706,6 +716,7 @@ export async function executeActions(
           };
           executed += 1;
           reloadCurrentProject = true;
+          eagerReload();
           steps.push({
             index,
             action: action.action,
