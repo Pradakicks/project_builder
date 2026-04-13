@@ -4,7 +4,7 @@ use crate::db::Database;
 use crate::db::AgentHistoryMetadata;
 use crate::models::{
     GoalRun, GoalRunCodeEvidence, GoalRunDeliverySnapshot, GoalRunEvent, GoalRunPhase,
-    GoalRunRetryState, GoalRunStatus, GoalRunUpdate, PlanTask, TaskStatus, WorkPlan,
+    GoalRunRetryState, GoalRunStatus, GoalRunUpdate, LiveActivity, PlanTask, TaskStatus, WorkPlan,
 };
 use crate::AppState;
 use tauri::{AppHandle, State};
@@ -274,6 +274,57 @@ pub(crate) async fn build_goal_run_delivery_snapshot_impl(
         None
     };
 
+    let live_activity = if matches!(goal_run.phase, GoalRunPhase::Implementation)
+        && matches!(goal_run.status, GoalRunStatus::Running | GoalRunStatus::Retrying)
+    {
+        goal_run.current_piece_id.as_deref().and_then(|piece_id| {
+            // Look up the piece name
+            let piece = {
+                let db = db.lock().ok()?;
+                db.get_piece(piece_id).ok()?
+            };
+
+            // Find the task in the current plan
+            let (task_id, task_title, current_index, total) = if let Some(plan) = &current_plan {
+                let total = plan.tasks.len();
+                let current_index = goal_run
+                    .current_task_id
+                    .as_deref()
+                    .and_then(|tid| {
+                        plan.tasks
+                            .iter()
+                            .position(|t| t.id == tid)
+                            .map(|i| i + 1) // 1-based
+                    })
+                    .unwrap_or(0);
+                let task = goal_run
+                    .current_task_id
+                    .as_deref()
+                    .and_then(|tid| plan.tasks.iter().find(|t| t.id == tid));
+                (
+                    task.map(|t| t.id.clone()),
+                    task.map(|t| t.title.clone()),
+                    current_index,
+                    total,
+                )
+            } else {
+                (None, None, 0, 0)
+            };
+
+            Some(LiveActivity {
+                piece_id: piece_id.to_string(),
+                piece_name: piece.name.clone(),
+                task_id,
+                task_title,
+                engine: piece.agent_config.execution_engine.clone(),
+                current_index,
+                total,
+            })
+        })
+    } else {
+        None
+    };
+
     Ok(GoalRunDeliverySnapshot {
         goal_run: goal_run.clone(),
         current_plan,
@@ -290,6 +341,7 @@ pub(crate) async fn build_goal_run_delivery_snapshot_impl(
         code_evidence,
         runtime_status: Some(runtime_status),
         recent_events,
+        live_activity,
     })
 }
 
