@@ -158,6 +158,27 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
             })
             .collect();
         system_parts.push(format!("Pieces:\n{}", piece_desc.join("\n")));
+
+        // Refactor nudge: when pieces already exist, bias the CTO toward updating them
+        system_parts.push(
+            "REFACTOR RULE: The project already has pieces (listed above). When the user asks \
+            to modernize, upgrade, rewrite, refactor, or change the stack, you MUST inspect the \
+            existing pieces and produce actions that UPDATE existing pieces (updatePiece + \
+            runPiece) rather than creating parallel new ones. Only use createPiece when the goal \
+            genuinely introduces a new component with NO existing counterpart. Creating a \
+            duplicate of an existing piece is a bug."
+                .to_string(),
+        );
+
+        // Also surface source files if the working directory has them
+        if snapshot.working_directory.exists
+            && !snapshot.working_directory.existing_source_files.is_empty()
+        {
+            system_parts.push(format!(
+                "Existing source files (update these, do not recreate from scratch): {}",
+                snapshot.working_directory.existing_source_files.join(", ")
+            ));
+        }
     } else if has_working_directory {
         system_parts.push(
             "There are no pieces yet, but the project has a working directory. Create one implementation piece with a concrete agentPrompt, outputMode, and executionEngine, then run it so code is actually written into the repo. Infer what to build from the project description and the user's message — do not ask clarifying questions."
@@ -702,6 +723,53 @@ mod tests {
         assert!(system_prompt.contains("fenced code block"));
         assert!(system_prompt.contains("inline `action { ... }` fallback"));
         assert!(!system_prompt.contains("applied automatically"));
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn cto_prompt_biases_non_empty_repo_toward_refactor() {
+        let db_path = temp_db_path("non-empty-repo-refactor");
+        let db = Database::new_at_path(&db_path).expect("open temp db");
+
+        let project = db
+            .create_project("Non-empty Repo Project", "Existing project with pieces")
+            .expect("create project");
+        // Give project a working directory with source files (path may not exist on disk)
+        let settings = ProjectSettings {
+            working_directory: Some("/tmp/existing-repo".to_string()),
+            ..ProjectSettings::default()
+        };
+        db.update_project(&project.id, None, None, None, Some(&settings))
+            .expect("update settings");
+
+        // Create an existing piece (simulating existing work)
+        let piece = db
+            .create_piece(&project.id, None, "Frontend", 0.0, 0.0)
+            .expect("create piece");
+        db.update_piece(
+            &piece.id,
+            &crate::db::PieceUpdate {
+                responsibilities: Some("React frontend with routing".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("update piece");
+
+        let system_prompt = build_cto_prompt(&db, &project.id)
+            .into_iter()
+            .find(|message| message.role == "system")
+            .map(|message| message.content)
+            .expect("system prompt");
+
+        // The prompt should contain the refactor rule since pieces exist
+        assert!(
+            system_prompt.contains("REFACTOR RULE")
+                || system_prompt.contains("UPDATE existing pieces")
+                || system_prompt.contains("updatePiece"),
+            "CTO prompt for non-empty repo should contain refactor guidance; got: {}",
+            &system_prompt[..system_prompt.len().min(500)]
+        );
 
         cleanup(&db_path);
     }

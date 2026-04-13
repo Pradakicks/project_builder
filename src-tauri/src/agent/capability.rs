@@ -17,6 +17,8 @@ pub struct WorkingDirectoryState {
     pub path: Option<String>,
     pub exists: bool,
     pub is_git_repo: bool,
+    /// Relative paths of source files in the working directory, capped at 50.
+    pub existing_source_files: Vec<String>,
 }
 
 pub struct RuntimeCapability {
@@ -61,6 +63,69 @@ fn binary_on_path(name: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Walk `root` recursively and collect relative source file paths.
+/// Caps at 50 entries. Skips common non-source directories.
+fn collect_source_files(root: &str) -> Vec<String> {
+    const MAX_FILES: usize = 50;
+    const SKIP_DIRS: &[&str] = &[
+        "node_modules",
+        ".git",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".venv",
+        "__pycache__",
+        ".claude",
+    ];
+    const SOURCE_EXTS: &[&str] = &[
+        "ts", "tsx", "js", "jsx", "rs", "py", "go", "svelte", "vue", "html", "css",
+    ];
+
+    let mut files: Vec<String> = Vec::new();
+    let root_path = std::path::Path::new(root);
+
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        skip: &[&str],
+        exts: &[&str],
+        out: &mut Vec<String>,
+        limit: usize,
+    ) {
+        if out.len() >= limit {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            if out.len() >= limit {
+                break;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if path.is_dir() {
+                if !skip.iter().any(|s| name_str == *s) {
+                    walk(&path, root, skip, exts, out, limit);
+                }
+            } else if let Some(ext) = path.extension() {
+                if exts.iter().any(|e| ext == std::ffi::OsStr::new(e)) {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(rel.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    walk(root_path, root_path, SKIP_DIRS, SOURCE_EXTS, &mut files, MAX_FILES);
+    files
 }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +187,18 @@ pub fn build_capability_snapshot(db: &Database, project_id: &str) -> CapabilityS
         .as_ref()
         .map(|p| std::path::Path::new(p).join(".git").exists())
         .unwrap_or(false);
+    let source_files = if wd_exists {
+        wd.as_deref().map(collect_source_files).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let working_directory = WorkingDirectoryState {
         configured: wd_configured,
         path: wd,
         exists: wd_exists,
         is_git_repo: wd_is_git,
+        existing_source_files: source_files,
     };
 
     // --- Runtime ---
@@ -254,6 +325,14 @@ pub fn render_capability_section(snapshot: &CapabilitySnapshot) -> String {
             snapshot.working_directory.exists,
             snapshot.working_directory.is_git_repo
         ));
+        if snapshot.working_directory.exists {
+            if snapshot.working_directory.existing_source_files.is_empty() {
+                out.push_str("  Source files: (empty repo — no source files found)\n");
+            } else {
+                let files = snapshot.working_directory.existing_source_files.join(", ");
+                out.push_str(&format!("  Source files: {}\n", files));
+            }
+        }
     } else {
         out.push_str("  Working directory: not configured\n");
     }
@@ -357,6 +436,7 @@ mod tests {
                 path: Some("/tmp/test-repo".to_string()),
                 exists: true,
                 is_git_repo: true,
+                existing_source_files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
             },
             runtime: RuntimeCapability {
                 configured: true,
@@ -389,6 +469,8 @@ mod tests {
         assert!(rendered.contains("Working directory:"), "missing wd subsection");
         assert!(rendered.contains("exists: true"), "missing exists");
         assert!(rendered.contains("git repo: true"), "missing git repo");
+        assert!(rendered.contains("Source files:"), "missing source files");
+        assert!(rendered.contains("src/main.rs"), "missing source file entry");
         assert!(rendered.contains("Runtime:"), "missing runtime");
         assert!(rendered.contains("npm run dev"), "missing run command");
         assert!(rendered.contains("Verification:"), "missing verification");
