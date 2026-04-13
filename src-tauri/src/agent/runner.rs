@@ -458,13 +458,13 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
             };
             if let Some(phase) = phase {
                 let db = db.lock().map_err(|e| e.to_string())?;
-                let _ = db.update_piece(
+                db.update_piece(
                     &task.piece_id,
                     &PieceUpdate {
                         phase: Some(phase),
                         ..Default::default()
                     },
-                );
+                ).map_err(|e| format!("Failed to update phase for task '{}': {}", task.title, e))?;
             }
         }
 

@@ -1203,6 +1203,32 @@ pub async fn detect_runtime_with_agent(
 
     // Build file context
     let file_listing = collect_file_listing(&working_directory, 3);
+
+    // Guard: skip the LLM call entirely if there are no recognizable source or config files.
+    // Without real project files the LLM has nothing to reason about and tends to hallucinate
+    // a run command based on the project name rather than returning null.
+    let source_extensions = [
+        ".rs", ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".rb",
+        ".html", ".css", ".toml", ".json", ".yaml", ".yml",
+    ];
+    let config_names = [
+        "package.json", "Cargo.toml", "go.mod", "requirements.txt",
+        "pyproject.toml", "Makefile", "index.html",
+    ];
+    let has_recognizable_files = file_listing.iter().any(|f| {
+        let lower = f.to_lowercase();
+        source_extensions.iter().any(|ext| lower.ends_with(ext))
+            || config_names.iter().any(|name| lower.ends_with(name))
+    });
+    if !has_recognizable_files {
+        warn!(
+            project_id = %project_id,
+            file_count = file_listing.len(),
+            "Skipping LLM runtime detection: no recognizable source or config files found"
+        );
+        return Ok(None);
+    }
+
     let key_files = [
         ("package.json", 200usize),
         ("Cargo.toml", 200),

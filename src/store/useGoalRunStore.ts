@@ -118,6 +118,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     }
 
     set({ orchestrating: true, lastError: null });
+    let lastKnownPhase: GoalRunPhase = goalRun.phase;
     try {
       let currentGoalRun = goalRun;
 
@@ -130,6 +131,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       let plan = plans.find((item) => item.status === "approved") ?? plans[0] ?? null;
       if (!plan || plan.status === "rejected" || plan.status === "superseded") {
         currentGoalRun = await setGoalRunPhase(goalRun.id, "planning", "running");
+        lastKnownPhase = "planning";
         plan = await leaderApi.generateWorkPlan(goalRun.projectId, goalRun.prompt);
       }
 
@@ -137,6 +139,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         currentPlanId: plan.id,
         blockerReason: null,
       });
+      lastKnownPhase = "planning";
 
       if (plan.status === "draft") {
         plan = await leaderApi.updatePlanStatus(plan.id, "approved");
@@ -145,6 +148,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       currentGoalRun = await setGoalRunPhase(goalRun.id, "implementation", "running", {
         currentPlanId: plan.id,
       });
+      lastKnownPhase = "implementation";
       await leaderApi.runAllPlanTasks(plan.id);
 
       plans = await leaderApi.listWorkPlans(goalRun.projectId);
@@ -153,6 +157,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         (await leaderApi.getWorkPlan(plan.id));
 
       currentGoalRun = await setGoalRunPhase(goalRun.id, "runtime-configuration", "running");
+      lastKnownPhase = "runtime-configuration";
       let runtimeStatus = await runtimeApi.getRuntimeStatus(goalRun.projectId);
       if (!runtimeStatus.spec) {
         // Layer 1: static pattern detection
@@ -188,11 +193,13 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
           ? `configured: ${runtimeStatus.spec.runCommand}`
           : "runtime configured",
       });
+      lastKnownPhase = "runtime-execution";
 
       runtimeStatus = await runtimeApi.startRuntime(goalRun.projectId);
       const verificationSummary = await runtimeApi.verifyRuntime(goalRun.projectId);
       const runtimeLogs = await runtimeApi.tailRuntimeLogs(goalRun.projectId, 120);
 
+      lastKnownPhase = "verification";
       currentGoalRun = await setGoalRunPhase(goalRun.id, "verification", "completed", {
         blockerReason: null,
         lastFailureSummary: null,
@@ -217,7 +224,10 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       if (current?.id === goalRunId) {
         const failure =
           error instanceof Error ? error.message : String(error);
-        const phase = current.phase;
+        // Use lastKnownPhase rather than current.phase — the store isn't updated
+        // on each phase transition, so current.phase can be stale (e.g. "prompt-received"
+        // when we've already advanced to "runtime-execution").
+        const phase = lastKnownPhase;
         const blocked =
           phase === "runtime-configuration" || failure.toLowerCase().includes("runtime");
         const updated = await setGoalRunPhase(
