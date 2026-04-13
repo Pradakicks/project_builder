@@ -405,6 +405,7 @@ fn update_plan_task_status_in_db(
 
 pub async fn run_all_plan_tasks<R: tauri::Runtime>(
     plan_id: &str,
+    goal_run_id: Option<&str>,
     db: &Mutex<Database>,
     running_pieces: &Mutex<HashSet<String>>,
     app_handle: &AppHandle<R>,
@@ -431,6 +432,7 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
 
     let total_tasks = tasks.len();
     let mut skipped_tasks = 0usize;
+    let mut current_index = 0usize;
 
     for task in tasks {
         // Validate the piece exists before attempting to run — skip tasks that
@@ -448,6 +450,44 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
             );
             skipped_tasks += 1;
             continue;
+        }
+
+        current_index += 1;
+
+        // Look up execution engine from the piece
+        let engine_name = {
+            let db = db.lock().map_err(|e| e.to_string())?;
+            let piece = db.get_piece(&task.piece_id).ok();
+            piece
+                .as_ref()
+                .and_then(|p| p.agent_config.execution_engine.as_deref())
+                .unwrap_or("built-in")
+                .to_string()
+        };
+
+        // Write current piece/task to goal run DB row (only when orchestrated by goal run)
+        if let Some(gid) = goal_run_id {
+            let db = db.lock().map_err(|e| e.to_string())?;
+            let _ = db.update_goal_run(gid, &GoalRunUpdate {
+                current_piece_id: Some(Some(task.piece_id.clone())),
+                current_task_id: Some(Some(task.id.clone())),
+                ..Default::default()
+            });
+        }
+
+        // Emit implementation-progress event (started)
+        if let Some(gid) = goal_run_id {
+            let _ = app_handle.emit("implementation-progress", serde_json::json!({
+                "goalRunId": gid,
+                "current": current_index,
+                "total": total_tasks,
+                "pieceId": task.piece_id,
+                "pieceName": task.piece_name,
+                "taskId": task.id,
+                "taskTitle": task.title,
+                "engine": engine_name,
+                "status": "started",
+            }));
         }
 
         update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::InProgress)?;
@@ -491,9 +531,44 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
         }
 
         match result {
-            Ok(_) => update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::Complete)?,
+            Ok(_) => {
+                update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::Complete)?;
+                if let Some(gid) = goal_run_id {
+                    let _ = app_handle.emit("implementation-progress", serde_json::json!({
+                        "goalRunId": gid,
+                        "current": current_index,
+                        "total": total_tasks,
+                        "pieceId": task.piece_id,
+                        "pieceName": task.piece_name,
+                        "taskId": task.id,
+                        "taskTitle": task.title,
+                        "engine": engine_name,
+                        "status": "completed",
+                    }));
+                    // Clear current piece/task
+                    let db = db.lock().map_err(|e| e.to_string())?;
+                    let _ = db.update_goal_run(gid, &GoalRunUpdate {
+                        current_piece_id: Some(None),
+                        current_task_id: Some(None),
+                        ..Default::default()
+                    });
+                }
+            }
             Err(error) => {
                 update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::Pending)?;
+                if let Some(gid) = goal_run_id {
+                    let _ = app_handle.emit("implementation-progress", serde_json::json!({
+                        "goalRunId": gid,
+                        "current": current_index,
+                        "total": total_tasks,
+                        "pieceId": task.piece_id,
+                        "pieceName": task.piece_name,
+                        "taskId": task.id,
+                        "taskTitle": task.title,
+                        "engine": engine_name,
+                        "status": "failed",
+                    }));
+                }
                 return Err(format!("Task '{}' failed: {}", task.title, error));
             }
         }
@@ -1409,7 +1484,7 @@ mod tests {
         };
 
         let running_pieces = Mutex::new(HashSet::new());
-        let err = run_all_plan_tasks(&plan.id, &state, &running_pieces, &app_handle)
+        let err = run_all_plan_tasks(&plan.id, None, &state, &running_pieces, &app_handle)
             .await
             .expect_err("draft plan should be rejected");
         assert!(err.contains("approved"));
@@ -1597,7 +1672,7 @@ mod tests {
             }
 
             let running_pieces = Mutex::new(HashSet::new());
-            run_all_plan_tasks(&plan.id, &state, &running_pieces, &app_handle)
+            run_all_plan_tasks(&plan.id, None, &state, &running_pieces, &app_handle)
                 .await
                 .expect("run all tasks");
 

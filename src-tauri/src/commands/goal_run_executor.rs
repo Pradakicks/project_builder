@@ -375,6 +375,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
     'implementation: loop {
         match runner::run_all_plan_tasks(
             &plan.id,
+            Some(goal_run_id),
             &state.db,
             &state.running_pieces,
             app_handle,
