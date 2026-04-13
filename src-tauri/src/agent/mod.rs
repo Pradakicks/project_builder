@@ -605,6 +605,67 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
+    fn make_repo_backed_project_fixture(db: &Database, case: &str) -> (crate::models::Project, crate::models::Piece, crate::models::GoalRun) {
+        use crate::models::{GoalRunStatus, GoalRunUpdate, GoalRunPhase, ProjectRuntimeSpec, ProjectSettings};
+        use crate::models::runtime::{RuntimeReadinessCheck, RuntimeStopBehavior};
+
+        // Create a temp working directory that exists on disk with a .git folder
+        let wd = std::env::temp_dir().join(format!("project-builder-cto-fixture-{case}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&wd).expect("create fixture working dir");
+        std::fs::create_dir_all(wd.join(".git")).expect("create .git dir");
+        let wd_path = wd.to_string_lossy().to_string();
+
+        let settings = ProjectSettings {
+            working_directory: Some(wd_path.clone()),
+            runtime_spec: Some(ProjectRuntimeSpec {
+                run_command: "npm run dev".to_string(),
+                install_command: Some("npm install".to_string()),
+                app_url: Some("http://127.0.0.1:5173".to_string()),
+                port_hint: Some(5173),
+                readiness_check: RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 30,
+                    poll_interval_ms: 500,
+                },
+                verify_command: Some("npm test".to_string()),
+                stop_behavior: RuntimeStopBehavior::Kill,
+            }),
+            ..ProjectSettings::default()
+        };
+
+        let project = db
+            .create_project_with_settings("Fixture project", "Repo-backed CTO prompt fixture", settings)
+            .expect("create fixture project");
+
+        let piece = db
+            .create_piece(&project.id, None, "Implementation", 0.0, 0.0)
+            .expect("create fixture piece");
+
+        let goal_run = db
+            .create_goal_run(&project.id, "Build a todo web app")
+            .expect("create fixture goal run");
+
+        db.update_goal_run(
+            &goal_run.id,
+            &GoalRunUpdate {
+                phase: Some(GoalRunPhase::Implementation),
+                status: Some(GoalRunStatus::Failed),
+                retry_count: Some(2),
+                last_failure_summary: Some(Some("npm run dev exited with code 1".to_string())),
+                last_failure_fingerprint: Some(Some("implementation:npm-exit-1".to_string())),
+                attention_required: Some(true),
+                blocker_reason: Some(Some("exit code 1".to_string())),
+                ..Default::default()
+            },
+        )
+        .expect("update fixture goal run");
+
+        let goal_run = db.get_goal_run(&goal_run.id).expect("get updated goal run");
+        (project, piece, goal_run)
+    }
+
     #[test]
     fn cto_prompt_reflects_review_first_contract() {
         let db_path = temp_db_path("review-first");
