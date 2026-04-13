@@ -58,8 +58,24 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
     let runtime_json = working_dir.join("runtime.json");
     if runtime_json.exists() {
         let raw = std::fs::read_to_string(&runtime_json).map_err(|e| e.to_string())?;
-        if let Ok(spec) = serde_json::from_str::<ProjectRuntimeSpec>(&raw) {
+        if let Ok(mut spec) = serde_json::from_str::<ProjectRuntimeSpec>(&raw) {
             if validate_runtime_spec(&spec).is_ok() {
+                // Enforce a minimum readiness timeout — agents often write short
+                // values (e.g. 30s) that don't account for npm install + compile time.
+                const MIN_READINESS_TIMEOUT_SECS: u64 = 90;
+                match &mut spec.readiness_check {
+                    RuntimeReadinessCheck::Http { timeout_seconds, .. }
+                    | RuntimeReadinessCheck::TcpPort { timeout_seconds, .. }
+                        if *timeout_seconds < MIN_READINESS_TIMEOUT_SECS =>
+                    {
+                        debug!(
+                            "Bumping agent-authored readiness timeout from {}s to {}s",
+                            timeout_seconds, MIN_READINESS_TIMEOUT_SECS
+                        );
+                        *timeout_seconds = MIN_READINESS_TIMEOUT_SECS;
+                    }
+                    _ => {}
+                }
                 debug!("Using agent-authored runtime.json");
                 return Ok(Some(spec));
             }

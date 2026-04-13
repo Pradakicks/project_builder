@@ -261,7 +261,9 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         // when we've already advanced to "runtime-execution").
         const phase = lastKnownPhase;
         const blocked =
-          phase === "runtime-configuration" || failure.toLowerCase().includes("runtime");
+          phase === "runtime-configuration" ||
+          phase === "runtime-execution" ||
+          failure.toLowerCase().includes("runtime");
         const updated = await setGoalRunPhase(
           goalRunId,
           phase,
