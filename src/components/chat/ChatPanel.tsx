@@ -911,12 +911,20 @@ export function ChatPanel({
               )}
 
               <div className="mt-2 flex justify-end">
-                <button
-                  onClick={() => onSwitchTab?.("plan")}
-                  className="rounded border border-gray-700 px-2.5 py-1 text-[11px] text-gray-200 hover:bg-gray-800"
-                >
-                  Open work plan
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => onSwitchTab?.("plan")}
+                    className="rounded border border-gray-700 px-2.5 py-1 text-[11px] text-gray-200 hover:bg-gray-800"
+                  >
+                    Open work plan
+                  </button>
+                  <button
+                    onClick={() => onSwitchTab?.("delivery")}
+                    className="rounded border border-cyan-700 px-2.5 py-1 text-[11px] text-cyan-200 hover:bg-cyan-950/30"
+                  >
+                    Open delivery
+                  </button>
+                </div>
               </div>
             </div>
           ) : null}

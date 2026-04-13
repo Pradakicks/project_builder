@@ -227,6 +227,15 @@ export type GoalRunPhase =
   | "verification";
 
 export type GoalRunStatus = "running" | "blocked" | "completed" | "failed" | "interrupted";
+export type GoalRunEventKind =
+  | "phase-started"
+  | "phase-completed"
+  | "retry-scheduled"
+  | "retry-resumed"
+  | "blocked"
+  | "failed"
+  | "stopped"
+  | "note";
 
 export interface GoalRun {
   id: string;
@@ -240,6 +249,12 @@ export interface GoalRun {
   verificationSummary: string | null;
   retryCount: number;
   lastFailureSummary: string | null;
+  stopRequested: boolean;
+  currentPieceId: string | null;
+  currentTaskId: string | null;
+  retryBackoffUntil: string | null;
+  lastFailureFingerprint: string | null;
+  attentionRequired: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -254,6 +269,39 @@ export interface GoalRunUpdate {
   verificationSummary?: string | null;
   retryCount?: number;
   lastFailureSummary?: string | null;
+  stopRequested?: boolean;
+  currentPieceId?: string | null;
+  currentTaskId?: string | null;
+  retryBackoffUntil?: string | null;
+  lastFailureFingerprint?: string | null;
+  attentionRequired?: boolean;
+}
+
+export interface GoalRunEvent {
+  id: string;
+  goalRunId: string;
+  phase: GoalRunPhase;
+  kind: GoalRunEventKind;
+  summary: string;
+  payloadJson: string | null;
+  createdAt: string;
+}
+
+export type GoalRunTimelineEntryKind =
+  | "phase"
+  | "runtime"
+  | "verification"
+  | "summary"
+  | "history";
+
+export interface GoalRunTimelineEntry {
+  id: string;
+  kind: GoalRunTimelineEntryKind;
+  title: string;
+  detail: string | null;
+  timestamp: string;
+  active: boolean;
+  status: GoalRunStatus | "info" | "success" | "warning";
 }
 
 export interface AgentHistoryMetadata {

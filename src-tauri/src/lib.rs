@@ -15,6 +15,7 @@ pub struct AppState {
     pub db: Mutex<Database>,
     /// Tracks which pieces currently have an agent running (prevents double-runs).
     pub running_pieces: Mutex<HashSet<String>>,
+    pub running_goal_runs: Mutex<HashSet<String>>,
     pub runtime_sessions: Mutex<commands::runtime_commands::RuntimeSessions>,
 }
 
@@ -46,6 +47,10 @@ pub fn run() {
         if count > 0 {
             info!(count, "Marked interrupted goal runs on startup");
         }
+        let runtime_count = database.mark_runtime_sessions_interrupted().unwrap_or(0);
+        if runtime_count > 0 {
+            info!(runtime_count, "Marked stale runtime sessions on startup");
+        }
     }
 
     tauri::Builder::default()
@@ -53,6 +58,7 @@ pub fn run() {
         .manage(AppState {
             db: Mutex::new(database),
             running_pieces: Mutex::new(HashSet::new()),
+            running_goal_runs: Mutex::new(HashSet::new()),
             runtime_sessions: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
@@ -75,9 +81,13 @@ pub fn run() {
             commands::connection_commands::delete_connection,
             commands::connection_commands::list_connections,
             commands::goal_run_commands::create_goal_run,
+            commands::goal_run_commands::start_goal_run,
             commands::goal_run_commands::get_goal_run,
             commands::goal_run_commands::list_goal_runs,
             commands::goal_run_commands::update_goal_run,
+            commands::goal_run_commands::resume_goal_run,
+            commands::goal_run_commands::stop_goal_run,
+            commands::goal_run_commands::get_goal_run_events,
             commands::agent_commands::run_piece_agent,
             commands::agent_commands::get_agent_history,
             commands::agent_commands::chat_with_cto,

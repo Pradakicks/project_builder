@@ -487,7 +487,7 @@ async fn mark_runtime_failed(handle: &Arc<RuntimeSessionHandle>, error: String) 
     error
 }
 
-async fn current_runtime_status(
+pub(crate) async fn current_runtime_status(
     db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: &str,
@@ -504,8 +504,18 @@ async fn current_runtime_status(
     };
 
     let session = match handle {
-        Some(handle) => Some(refresh_runtime_session(&handle).await?),
-        None => None,
+        Some(handle) => {
+            let session = refresh_runtime_session(&handle).await?;
+            {
+                let db = db.lock().map_err(|e| e.to_string())?;
+                let _ = db.upsert_runtime_session(project_id, None, &session);
+            }
+            Some(session)
+        }
+        None => {
+            let db = db.lock().map_err(|e| e.to_string())?;
+            db.latest_runtime_session(project_id)?.map(|record| record.session)
+        }
     };
 
     Ok(ProjectRuntimeStatus {
@@ -515,7 +525,7 @@ async fn current_runtime_status(
     })
 }
 
-async fn start_runtime_session(
+pub(crate) async fn start_runtime_session(
     project: &Project,
     spec: &ProjectRuntimeSpec,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
@@ -736,7 +746,7 @@ async fn start_runtime_session(
     })
 }
 
-async fn stop_runtime_session(
+pub(crate) async fn stop_runtime_session(
     project_id: &str,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     stop_behavior: RuntimeStopBehavior,
@@ -825,7 +835,7 @@ async fn stop_runtime_session(
     Ok(Some(session))
 }
 
-async fn configure_runtime_impl(
+pub(crate) async fn configure_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
@@ -861,7 +871,7 @@ async fn configure_runtime_impl(
     db.update_project(&project_id, None, None, None, Some(&settings))
 }
 
-async fn get_runtime_status_impl(
+pub(crate) async fn get_runtime_status_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
@@ -869,7 +879,7 @@ async fn get_runtime_status_impl(
     current_runtime_status(state_db, runtime_sessions, &project_id).await
 }
 
-async fn detect_runtime_impl(
+pub(crate) async fn detect_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     project_id: String,
 ) -> Result<Option<ProjectRuntimeSpec>, String> {
@@ -892,7 +902,7 @@ async fn detect_runtime_impl(
     detect_runtime_spec_from_working_dir(&working_directory)
 }
 
-async fn start_runtime_impl(
+pub(crate) async fn start_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
@@ -908,10 +918,15 @@ async fn start_runtime_impl(
         .ok_or_else(|| "Project runtime is not configured".to_string())?;
 
     debug!(project_id = %project_id, "Starting runtime session");
-    start_runtime_session(&project, &spec, runtime_sessions).await
+    let status = start_runtime_session(&project, &spec, runtime_sessions).await?;
+    if let Some(ref session) = status.session {
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        let _ = db.upsert_runtime_session(&project.id, None, session);
+    }
+    Ok(status)
 }
 
-async fn stop_runtime_impl(
+pub(crate) async fn stop_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
@@ -926,6 +941,10 @@ async fn stop_runtime_impl(
         .map(|runtime| runtime.stop_behavior.clone())
         .unwrap_or_default();
     let session = stop_runtime_session(&project_id, runtime_sessions, stop_behavior).await?;
+    if let Some(ref session) = session {
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        let _ = db.upsert_runtime_session(&project_id, None, session);
+    }
     Ok(ProjectRuntimeStatus {
         project_id,
         spec,
@@ -933,7 +952,7 @@ async fn stop_runtime_impl(
     })
 }
 
-async fn tail_runtime_logs_impl(
+pub(crate) async fn tail_runtime_logs_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
@@ -950,6 +969,33 @@ async fn tail_runtime_logs_impl(
     };
 
     let Some(handle) = handle else {
+        let record = {
+            let db = state_db.lock().map_err(|e| e.to_string())?;
+            db.latest_runtime_session(&project_id)?
+        };
+        if let Some(record) = record {
+            if let Some(path) = record.session.log_path.clone() {
+                if Path::new(&path).exists() {
+                    let raw = tokio::fs::read_to_string(&path)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let requested = limit.unwrap_or(120).max(1);
+                    let lines = raw
+                        .lines()
+                        .rev()
+                        .take(requested)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .map(str::to_string)
+                        .collect();
+                    return Ok(RuntimeLogTail {
+                        path: Some(path),
+                        lines,
+                    });
+                }
+            }
+        }
         return Ok(RuntimeLogTail {
             path: None,
             lines: Vec::new(),
@@ -995,7 +1041,7 @@ async fn tail_runtime_logs_impl(
     }
 }
 
-async fn verify_runtime_impl(
+pub(crate) async fn verify_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
@@ -1059,6 +1105,148 @@ async fn verify_runtime_impl(
         return Err(format!("Runtime health check failed with status {}", response.status()));
     }
     Ok(format!("Runtime responded successfully at {url}"))
+}
+
+pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
+    state_db: &std::sync::Mutex<Database>,
+    app_handle: &AppHandle<R>,
+    project_id: String,
+) -> Result<Option<ProjectRuntimeSpec>, String> {
+    let (project, working_directory, provider_name, api_key, model, base_url) = {
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        let project = db.get_project(&project_id)?;
+        let wd = project
+            .settings
+            .working_directory
+            .clone()
+            .ok_or_else(|| "Project has no working directory configured".to_string())?;
+        let (provider_name, api_key, model, base_url) = resolve_llm_config(&project.settings);
+        (project, PathBuf::from(wd), provider_name, api_key, model, base_url)
+    };
+
+    if !working_directory.exists() {
+        return Err(format!(
+            "Working directory does not exist: {}",
+            working_directory.display()
+        ));
+    }
+
+    if api_key.is_empty() {
+        warn!(project_id = %project_id, "No API key available for runtime detection agent");
+        return Ok(None);
+    }
+
+    let file_listing = collect_file_listing(&working_directory, 3);
+    let source_extensions = [
+        ".rs", ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".rb",
+        ".html", ".css", ".toml", ".json", ".yaml", ".yml",
+    ];
+    let config_names = [
+        "package.json", "Cargo.toml", "go.mod", "requirements.txt",
+        "pyproject.toml", "Makefile", "index.html",
+    ];
+    let has_recognizable_files = file_listing.iter().any(|f| {
+        let lower = f.to_lowercase();
+        source_extensions.iter().any(|ext| lower.ends_with(ext))
+            || config_names.iter().any(|name| lower.ends_with(name))
+    });
+    if !has_recognizable_files {
+        warn!(
+            project_id = %project_id,
+            file_count = file_listing.len(),
+            "Skipping LLM runtime detection: no recognizable source or config files found"
+        );
+        return Ok(None);
+    }
+
+    let key_files = [
+        ("package.json", 200usize),
+        ("Cargo.toml", 200),
+        ("go.mod", 100),
+        ("requirements.txt", 100),
+        ("pyproject.toml", 100),
+        ("Makefile", 100),
+        ("index.html", 200),
+        ("app.py", 200),
+        ("main.py", 200),
+        ("server.py", 200),
+        ("run.py", 200),
+    ];
+
+    let mut snippets = Vec::new();
+    for (name, max_lines) in key_files {
+        let path = working_directory.join(name);
+        if path.exists() {
+            if let Some(content) = read_file_head(&path, max_lines) {
+                snippets.push((name.to_string(), content));
+            }
+        }
+    }
+
+    let messages = build_runtime_detection_prompt(&project.name, &file_listing, &snippets);
+    let provider = llm::create_provider(&provider_name);
+    let config = LlmConfig {
+        api_key,
+        model,
+        base_url,
+        max_tokens: 1024,
+    };
+
+    let (tx, mut rx) = mpsc::channel::<String>(64);
+    let project_id_for_chunks = project_id.clone();
+    let app_handle_for_chunks = app_handle.clone();
+    let full_output = Arc::new(AsyncMutex::new(String::new()));
+    let full_output_writer = full_output.clone();
+    let chunk_forwarder = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            full_output_writer.lock().await.push_str(&chunk);
+            let _ = app_handle_for_chunks.emit(
+                "runtime-detection-chunk",
+                serde_json::json!({
+                    "projectId": project_id_for_chunks,
+                    "chunk": chunk,
+                    "done": false
+                }),
+            );
+        }
+    });
+
+    let _ = provider.chat_stream(&messages, &config, tx).await;
+
+    let _ = chunk_forwarder.await;
+    let _ = app_handle.emit(
+        "runtime-detection-chunk",
+        serde_json::json!({
+            "projectId": project_id,
+            "chunk": "",
+            "done": true
+        }),
+    );
+
+    let raw_output = full_output.lock().await.clone();
+    let cleaned = raw_output.trim();
+    let cleaned = if cleaned.starts_with("```") {
+        let after_fence = cleaned.find('\n').map(|i| &cleaned[i + 1..]).unwrap_or(cleaned);
+        after_fence.rfind("```").map(|i| &after_fence[..i]).unwrap_or(after_fence)
+    } else {
+        cleaned
+    };
+
+    let start = cleaned.find('{');
+    let end = cleaned.rfind('}');
+    let (start, end) = match (start, end) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return Ok(None),
+    };
+    let json_str = &cleaned[start..=end];
+
+    if json_str.trim().is_empty() || json_str.trim().eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+
+    let spec = serde_json::from_str::<ProjectRuntimeSpec>(json_str).map_err(|e| e.to_string())?;
+    validate_runtime_spec(&spec)?;
+    Ok(Some(spec))
 }
 
 #[tracing::instrument(skip(state))]
@@ -1192,160 +1380,7 @@ pub async fn detect_runtime_with_agent(
     project_id: String,
 ) -> Result<Option<ProjectRuntimeSpec>, String> {
     info!(project_id = %project_id, "IPC: detect_runtime_with_agent");
-
-    let (project, working_directory, provider_name, api_key, model, base_url) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let project = db.get_project(&project_id)?;
-        let wd = project
-            .settings
-            .working_directory
-            .clone()
-            .ok_or_else(|| "Project has no working directory configured".to_string())?;
-        let (provider_name, api_key, model, base_url) = resolve_llm_config(&project.settings);
-        (project, PathBuf::from(wd), provider_name, api_key, model, base_url)
-    };
-
-    if !working_directory.exists() {
-        return Err(format!(
-            "Working directory does not exist: {}",
-            working_directory.display()
-        ));
-    }
-
-    if api_key.is_empty() {
-        warn!(project_id = %project_id, "No API key available for runtime detection agent");
-        return Ok(None);
-    }
-
-    // Build file context
-    let file_listing = collect_file_listing(&working_directory, 3);
-
-    // Guard: skip the LLM call entirely if there are no recognizable source or config files.
-    // Without real project files the LLM has nothing to reason about and tends to hallucinate
-    // a run command based on the project name rather than returning null.
-    let source_extensions = [
-        ".rs", ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".rb",
-        ".html", ".css", ".toml", ".json", ".yaml", ".yml",
-    ];
-    let config_names = [
-        "package.json", "Cargo.toml", "go.mod", "requirements.txt",
-        "pyproject.toml", "Makefile", "index.html",
-    ];
-    let has_recognizable_files = file_listing.iter().any(|f| {
-        let lower = f.to_lowercase();
-        source_extensions.iter().any(|ext| lower.ends_with(ext))
-            || config_names.iter().any(|name| lower.ends_with(name))
-    });
-    if !has_recognizable_files {
-        warn!(
-            project_id = %project_id,
-            file_count = file_listing.len(),
-            "Skipping LLM runtime detection: no recognizable source or config files found"
-        );
-        return Ok(None);
-    }
-
-    let key_files = [
-        ("package.json", 200usize),
-        ("Cargo.toml", 200),
-        ("go.mod", 100),
-        ("requirements.txt", 100),
-        ("pyproject.toml", 100),
-        ("Makefile", 100),
-        ("index.html", 200),
-        ("README.md", 100),
-    ];
-    let mut file_contents: Vec<(String, String)> = Vec::new();
-    for (name, max_lines) in &key_files {
-        let path = working_directory.join(name);
-        if let Some(content) = read_file_head(&path, *max_lines) {
-            file_contents.push((name.to_string(), content));
-        }
-    }
-
-    let messages = build_runtime_detection_prompt(
-        &project.name,
-        &file_listing,
-        &file_contents,
-    );
-
-    let provider = llm::create_provider(&provider_name);
-    let config = LlmConfig {
-        api_key,
-        model,
-        base_url,
-        max_tokens: 1024,
-    };
-
-    let (tx, mut rx) = mpsc::channel::<String>(256);
-    let project_id_for_stream = project_id.clone();
-    let app = app_handle.clone();
-    let full_output = Arc::new(AsyncMutex::new(String::new()));
-    let full_output_writer = full_output.clone();
-
-    let stream_handle = tokio::spawn(async move {
-        while let Some(chunk) = rx.recv().await {
-            full_output_writer.lock().await.push_str(&chunk);
-            let _ = app.emit(
-                "runtime-detection-chunk",
-                serde_json::json!({
-                    "projectId": project_id_for_stream,
-                    "chunk": chunk,
-                    "done": false,
-                }),
-            );
-        }
-    });
-
-    let _ = provider.chat_stream(&messages, &config, tx).await;
-    let _ = stream_handle.await;
-
-    let _ = app_handle.emit(
-        "runtime-detection-chunk",
-        serde_json::json!({
-            "projectId": project_id,
-            "chunk": "",
-            "done": true,
-        }),
-    );
-
-    let raw_output = full_output.lock().await.clone();
-    debug!(project_id = %project_id, output_len = raw_output.len(), "Runtime detection agent output received");
-
-    // Extract JSON from output
-    let cleaned = raw_output.trim();
-    let cleaned = if cleaned.starts_with("```") {
-        let after_fence = cleaned.find('\n').map(|i| &cleaned[i + 1..]).unwrap_or(cleaned);
-        after_fence.rfind("```").map(|i| &after_fence[..i]).unwrap_or(after_fence)
-    } else {
-        cleaned
-    };
-
-    let start = cleaned.find('{');
-    let end = cleaned.rfind('}');
-    let (start, end) = match (start, end) {
-        (Some(s), Some(e)) if e > s => (s, e),
-        _ => {
-            warn!(project_id = %project_id, "Runtime detection agent returned no JSON");
-            return Ok(None);
-        }
-    };
-    let json_str = &cleaned[start..=end];
-
-    match serde_json::from_str::<ProjectRuntimeSpec>(json_str) {
-        Ok(spec) => {
-            if let Err(e) = validate_runtime_spec(&spec) {
-                warn!(project_id = %project_id, error = %e, "Runtime detection agent returned invalid spec");
-                return Ok(None);
-            }
-            info!(project_id = %project_id, run_command = %spec.run_command, "Runtime detection agent succeeded");
-            Ok(Some(spec))
-        }
-        Err(e) => {
-            warn!(project_id = %project_id, error = %e, raw = %json_str, "Failed to parse runtime spec from agent output");
-            Ok(None)
-        }
-    }
+    detect_runtime_with_agent_impl(&state.db, &app_handle, project_id).await
 }
 
 #[cfg(test)]
@@ -1502,6 +1537,71 @@ mod tests {
             .recent_logs
             .iter()
             .any(|line| line.contains("booted")));
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_status_falls_back_to_persisted_session_without_live_process() {
+        let dir = temp_dir("persisted-status");
+        let db_path = dir.join("data.db");
+        let db = Database::new_at_path(&db_path).expect("open db");
+        let state_db = Mutex::new(db);
+        let sessions = Mutex::new(HashMap::new());
+
+        let spec = ProjectRuntimeSpec {
+            install_command: None,
+            run_command: "printf 'booted\\n'; while :; do sleep 1; done".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: None,
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: Some("http://127.0.0.1:4820".to_string()),
+            port_hint: Some(4820),
+        };
+
+        let project = {
+            let db = state_db.lock().expect("lock db");
+            db.create_project_with_settings(
+                "Runtime project",
+                "Persist runtime session history",
+                create_project_settings(&dir, spec),
+            )
+            .expect("create project")
+        };
+
+        let started = start_runtime_impl(&state_db, &sessions, project.id.clone())
+            .await
+            .expect("start runtime");
+        let started_session = started.session.expect("started session");
+        let session_id = started_session.session_id.clone();
+        assert_eq!(started_session.status, RuntimeSessionStatus::Running);
+
+        let persisted_before_stop = {
+            let db = state_db.lock().expect("lock db");
+            db.latest_runtime_session(&project.id)
+                .expect("load persisted session")
+                .expect("persisted runtime session")
+        };
+        assert_eq!(persisted_before_stop.session.session_id, session_id);
+
+        let detached_handle = {
+            let mut live_sessions = sessions.lock().expect("lock runtime sessions");
+            live_sessions
+                .remove(&project.id)
+                .expect("remove live runtime session")
+        };
+
+        let status = get_runtime_status_impl(&state_db, &sessions, project.id.clone())
+            .await
+            .expect("load runtime status");
+        let status_session = status.session.expect("runtime status session");
+        assert_eq!(status_session.session_id, session_id);
+        assert_eq!(status_session.status, RuntimeSessionStatus::Running);
+
+        if let Some(mut child) = detached_handle.child.lock().await.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
 
         cleanup(&db_path);
     }

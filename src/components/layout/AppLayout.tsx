@@ -7,7 +7,7 @@ import { useToastStore } from "../../store/useToastStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { onPhaseWarning } from "../../api/projectApi";
 
-type LeftTab = "chat" | "plan" | "agents";
+type LeftTab = "chat" | "plan" | "delivery" | "agents";
 
 const DiagramCanvas = lazy(() =>
   import("../canvas/DiagramCanvas").then((module) => ({
@@ -32,6 +32,11 @@ const ChatPanel = lazy(() =>
 const LeaderPanel = lazy(() =>
   import("../leader/LeaderPanel").then((module) => ({
     default: module.LeaderPanel,
+  })),
+);
+const DeliveryPanel = lazy(() =>
+  import("../delivery/DeliveryPanel").then((module) => ({
+    default: module.DeliveryPanel,
   })),
 );
 const AgentsPanel = lazy(() =>
@@ -190,6 +195,28 @@ export function AppLayout() {
             </button>
             <button
               onClick={() => {
+                setLeftTab("delivery");
+                setLeftOpen(true);
+              }}
+              className="rounded-lg border border-gray-700 bg-gray-900 p-2 text-gray-400 hover:text-gray-200 shadow-lg"
+              title="Open Delivery"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 7h18M6 3v4M18 3v4M4 11h16v8H4z" />
+                <path d="M8 15h8" />
+              </svg>
+            </button>
+            <button
+              onClick={() => {
                 setLeftTab("agents");
                 setLeftOpen(true);
               }}
@@ -281,6 +308,16 @@ export function AppLayout() {
               Work Plan
             </button>
             <button
+              onClick={() => setLeftTab("delivery")}
+              className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                leftTab === "delivery"
+                  ? "border-b-2 border-cyan-400 text-cyan-400"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              Delivery
+            </button>
+            <button
               onClick={() => setLeftTab("agents")}
               className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
                 leftTab === "agents"
@@ -297,6 +334,11 @@ export function AppLayout() {
           </div>
           <div className={leftTab === "plan" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
             {renderLeaderPanel()}
+          </div>
+          <div className={leftTab === "delivery" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
+            <Suspense fallback={<LoadingPane label="Loading delivery..." />}>
+              <DeliveryPanel />
+            </Suspense>
           </div>
           <div className={leftTab === "agents" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
             {renderAgentsPanel()}

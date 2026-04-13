@@ -18,6 +18,10 @@ fn sql_to_goal_run_status(value: &str) -> GoalRunStatus {
     serde_json::from_str(&format!("\"{}\"", value)).unwrap_or(GoalRunStatus::Running)
 }
 
+fn sql_to_goal_run_event_kind(value: &str) -> GoalRunEventKind {
+    serde_json::from_str(&format!("\"{}\"", value)).unwrap_or(GoalRunEventKind::Note)
+}
+
 impl Database {
     pub fn create_goal_run(&self, project_id: &str, prompt: &str) -> Result<GoalRun, String> {
         debug!(project_id, "Creating goal run");
@@ -48,7 +52,7 @@ impl Database {
         debug!(goal_run_id = id, "Getting goal run");
         self.conn
             .query_row(
-                "SELECT id, project_id, prompt, phase, status, blocker_reason, current_plan_id, runtime_status_summary, verification_summary, retry_count, last_failure_summary, created_at, updated_at FROM goal_runs WHERE id = ?1",
+                "SELECT id, project_id, prompt, phase, status, blocker_reason, current_plan_id, runtime_status_summary, verification_summary, retry_count, last_failure_summary, stop_requested, current_piece_id, current_task_id, retry_backoff_until, last_failure_fingerprint, attention_required, created_at, updated_at FROM goal_runs WHERE id = ?1",
                 params![id],
                 |row| {
                     let phase: String = row.get(3)?;
@@ -65,8 +69,14 @@ impl Database {
                         verification_summary: row.get(8)?,
                         retry_count: row.get(9)?,
                         last_failure_summary: row.get(10)?,
-                        created_at: row.get(11)?,
-                        updated_at: row.get(12)?,
+                        stop_requested: row.get::<_, i64>(11)? != 0,
+                        current_piece_id: row.get(12)?,
+                        current_task_id: row.get(13)?,
+                        retry_backoff_until: row.get(14)?,
+                        last_failure_fingerprint: row.get(15)?,
+                        attention_required: row.get::<_, i64>(16)? != 0,
+                        created_at: row.get(17)?,
+                        updated_at: row.get(18)?,
                     })
                 },
             )
@@ -191,6 +201,54 @@ impl Database {
                 )
                 .map_err(|e| e.to_string())?;
         }
+        if let Some(stop_requested) = updates.stop_requested {
+            self.conn
+                .execute(
+                    "UPDATE goal_runs SET stop_requested = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![if stop_requested { 1 } else { 0 }, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(ref current_piece_id) = updates.current_piece_id {
+            self.conn
+                .execute(
+                    "UPDATE goal_runs SET current_piece_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![current_piece_id, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(ref current_task_id) = updates.current_task_id {
+            self.conn
+                .execute(
+                    "UPDATE goal_runs SET current_task_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![current_task_id, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(ref retry_backoff_until) = updates.retry_backoff_until {
+            self.conn
+                .execute(
+                    "UPDATE goal_runs SET retry_backoff_until = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![retry_backoff_until, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(ref last_failure_fingerprint) = updates.last_failure_fingerprint {
+            self.conn
+                .execute(
+                    "UPDATE goal_runs SET last_failure_fingerprint = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![last_failure_fingerprint, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(attention_required) = updates.attention_required {
+            self.conn
+                .execute(
+                    "UPDATE goal_runs SET attention_required = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![if attention_required { 1 } else { 0 }, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
 
         self.get_goal_run(id)
     }
@@ -206,6 +264,61 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
         Ok(count)
+    }
+
+    pub fn append_goal_run_event(
+        &self,
+        goal_run_id: &str,
+        phase: GoalRunPhase,
+        kind: GoalRunEventKind,
+        summary: &str,
+        payload_json: Option<&str>,
+    ) -> Result<GoalRunEvent, String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let phase = enum_to_sql(&phase)?;
+        let kind = enum_to_sql(&kind)?;
+        self.conn
+            .execute(
+                "INSERT INTO goal_run_events (id, goal_run_id, phase, kind, summary, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, goal_run_id, phase, kind, summary, payload_json, now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(GoalRunEvent {
+            id,
+            goal_run_id: goal_run_id.to_string(),
+            phase: sql_to_goal_run_phase(&phase),
+            kind: sql_to_goal_run_event_kind(&kind),
+            summary: summary.to_string(),
+            payload_json: payload_json.map(str::to_string),
+            created_at: now,
+        })
+    }
+
+    pub fn list_goal_run_events(&self, goal_run_id: &str) -> Result<Vec<GoalRunEvent>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, goal_run_id, phase, kind, summary, payload_json, created_at
+                 FROM goal_run_events WHERE goal_run_id = ?1 ORDER BY created_at ASC, rowid ASC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt.query_map(params![goal_run_id], |row| {
+            let phase: String = row.get(2)?;
+            let kind: String = row.get(3)?;
+            Ok(GoalRunEvent {
+                id: row.get(0)?,
+                goal_run_id: row.get(1)?,
+                phase: sql_to_goal_run_phase(&phase),
+                kind: sql_to_goal_run_event_kind(&kind),
+                summary: row.get(4)?,
+                payload_json: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 }
 
@@ -281,5 +394,47 @@ mod tests {
 
         cleanup(&db_path);
     }
-}
 
+    #[test]
+    fn goal_run_events_roundtrip_in_order() {
+        let db_path = temp_db_path("events");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let project = db
+            .create_project("Goal run project", "Testing goal run events")
+            .expect("create project");
+        let created = db
+            .create_goal_run(&project.id, "Create a todo app")
+            .expect("create goal run");
+
+        let first = db
+            .append_goal_run_event(
+                &created.id,
+                GoalRunPhase::Planning,
+                GoalRunEventKind::PhaseStarted,
+                "Planning started",
+                Some("{\"step\":1}"),
+            )
+            .expect("append first event");
+        let second = db
+            .append_goal_run_event(
+                &created.id,
+                GoalRunPhase::Implementation,
+                GoalRunEventKind::PhaseCompleted,
+                "Implementation finished",
+                None,
+            )
+            .expect("append second event");
+
+        let events = db
+            .list_goal_run_events(&created.id)
+            .expect("list goal run events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, first.id);
+        assert_eq!(events[0].kind, GoalRunEventKind::PhaseStarted);
+        assert_eq!(events[0].payload_json.as_deref(), Some("{\"step\":1}"));
+        assert_eq!(events[1].id, second.id);
+        assert_eq!(events[1].kind, GoalRunEventKind::PhaseCompleted);
+
+        cleanup(&db_path);
+    }
+}

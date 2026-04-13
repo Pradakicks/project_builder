@@ -1,7 +1,8 @@
+use crate::commands::goal_run_executor::spawn_goal_run_executor;
 use crate::db::Database;
-use crate::models::{GoalRun, GoalRunUpdate};
+use crate::models::{GoalRun, GoalRunEvent, GoalRunStatus, GoalRunUpdate};
 use crate::AppState;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 pub(crate) fn create_goal_run_impl(
     db: &std::sync::Mutex<Database>,
@@ -31,6 +32,19 @@ pub fn create_goal_run(
     create_goal_run_impl(&state.db, project_id, prompt)
 }
 
+#[tracing::instrument(skip(state, app_handle))]
+#[tauri::command]
+pub fn start_goal_run(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    prompt: String,
+) -> Result<GoalRun, String> {
+    let goal_run = create_goal_run_impl(&state.db, project_id, prompt)?;
+    spawn_goal_run_executor(app_handle, goal_run.id.clone());
+    Ok(goal_run)
+}
+
 #[tracing::instrument(skip(state))]
 #[tauri::command]
 pub fn get_goal_run(state: State<'_, AppState>, goal_run_id: String) -> Result<GoalRun, String> {
@@ -56,6 +70,55 @@ pub fn update_goal_run(
     updates: GoalRunUpdate,
 ) -> Result<GoalRun, String> {
     update_goal_run_impl(&state.db, goal_run_id, updates)
+}
+
+#[tracing::instrument(skip(state, app_handle))]
+#[tauri::command]
+pub fn resume_goal_run(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    goal_run_id: String,
+) -> Result<GoalRun, String> {
+    let updated = update_goal_run_impl(
+        &state.db,
+        goal_run_id.clone(),
+        GoalRunUpdate {
+            stop_requested: Some(false),
+            status: Some(GoalRunStatus::Running),
+            blocker_reason: Some(None),
+            ..Default::default()
+        },
+    )?;
+    spawn_goal_run_executor(app_handle, goal_run_id);
+    Ok(updated)
+}
+
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn stop_goal_run(
+    state: State<'_, AppState>,
+    goal_run_id: String,
+) -> Result<GoalRun, String> {
+    update_goal_run_impl(
+        &state.db,
+        goal_run_id,
+        GoalRunUpdate {
+            stop_requested: Some(true),
+            status: Some(GoalRunStatus::Blocked),
+            blocker_reason: Some(Some("Stopped by operator".to_string())),
+            ..Default::default()
+        },
+    )
+}
+
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn get_goal_run_events(
+    state: State<'_, AppState>,
+    goal_run_id: String,
+) -> Result<Vec<GoalRunEvent>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_goal_run_events(&goal_run_id)
 }
 
 #[cfg(test)]
@@ -119,4 +182,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&db_path);
     }
 }
-

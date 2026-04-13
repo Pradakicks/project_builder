@@ -1,14 +1,7 @@
 import { create } from "zustand";
-import type {
-  GoalRun,
-  GoalRunPhase,
-  GoalRunStatus,
-  ProjectRuntimeStatus,
-} from "../types";
+import type { GoalRun, GoalRunEvent, ProjectRuntimeStatus } from "../types";
 import { devLog } from "../utils/devLog";
 import * as goalRunApi from "../api/goalRunApi";
-import * as leaderApi from "../api/leaderApi";
-import * as projectApi from "../api/projectApi";
 import * as runtimeApi from "../api/runtimeApi";
 import { useToastStore } from "./useToastStore";
 
@@ -16,52 +9,97 @@ interface GoalRunStore {
   projectId: string | null;
   goalRuns: GoalRun[];
   currentGoalRun: GoalRun | null;
+  goalRunEvents: GoalRunEvent[];
   runtimeStatus: ProjectRuntimeStatus | null;
   runtimeLogs: string[];
   loading: boolean;
   orchestrating: boolean;
   lastError: string | null;
   loadGoalRuns: (projectId: string) => Promise<void>;
+  loadGoalRunEvents: (goalRunId: string) => Promise<void>;
+  selectGoalRun: (goalRunId: string) => Promise<void>;
   beginPromptRun: (projectId: string, prompt: string) => Promise<GoalRun>;
   continueAutopilot: (goalRunId: string) => Promise<void>;
   retryGoalRun: (goalRunId: string) => Promise<void>;
+  stopGoalRun: (goalRunId: string) => Promise<void>;
   refreshRuntimeStatus: (projectId?: string) => Promise<void>;
   startRuntime: (projectId?: string) => Promise<void>;
   stopRuntime: (projectId?: string) => Promise<void>;
   reset: () => void;
 }
 
+let pollTimer: ReturnType<typeof window.setInterval> | null = null;
+let polledGoalRunId: string | null = null;
+
 function toast(message: string, kind: "info" | "warning" = "warning") {
   useToastStore.getState().addToast(message, kind);
 }
 
-async function setGoalRunPhase(
-  goalRunId: string,
-  phase: GoalRunPhase,
-  status: GoalRunStatus,
-  extras: Partial<GoalRun> = {},
-): Promise<GoalRun> {
-  return goalRunApi.updateGoalRun(goalRunId, {
-    phase,
-    status,
-    blockerReason:
-      extras.blockerReason !== undefined ? extras.blockerReason : undefined,
-    currentPlanId:
-      extras.currentPlanId !== undefined ? extras.currentPlanId : undefined,
-    runtimeStatusSummary:
-      extras.runtimeStatusSummary !== undefined
-        ? extras.runtimeStatusSummary
-        : undefined,
-    verificationSummary:
-      extras.verificationSummary !== undefined
-        ? extras.verificationSummary
-        : undefined,
-    retryCount:
-      extras.retryCount !== undefined ? extras.retryCount : undefined,
-    lastFailureSummary:
-      extras.lastFailureSummary !== undefined
-        ? extras.lastFailureSummary
-        : undefined,
+function syncGoalRunState(goalRun: GoalRun) {
+  useGoalRunStore.setState((state) => ({
+    currentGoalRun: goalRun,
+    goalRuns: [goalRun, ...state.goalRuns.filter((run) => run.id !== goalRun.id)],
+    orchestrating: goalRun.status === "running",
+  }));
+}
+
+async function refreshGoalRunState(goalRunId: string) {
+  const store = useGoalRunStore.getState();
+  const activeProjectId = store.projectId;
+  const goalRun = await goalRunApi.getGoalRun(goalRunId);
+  const [events, runtimeStatus, logs] = await Promise.all([
+    goalRunApi.getGoalRunEvents(goalRunId).catch(() => []),
+    activeProjectId
+      ? runtimeApi.getRuntimeStatus(activeProjectId).catch(() => null)
+      : Promise.resolve(null),
+    activeProjectId
+      ? runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
+          path: null,
+          lines: [],
+        }))
+      : Promise.resolve({ path: null, lines: [] }),
+  ]);
+
+  useGoalRunStore.setState((state) => ({
+    currentGoalRun:
+      state.currentGoalRun?.id === goalRun.id ? goalRun : state.currentGoalRun,
+    goalRuns: [goalRun, ...state.goalRuns.filter((run) => run.id !== goalRun.id)],
+    goalRunEvents: state.currentGoalRun?.id === goalRun.id ? events : state.goalRunEvents,
+    runtimeStatus: runtimeStatus ?? state.runtimeStatus,
+    runtimeLogs: logs.lines,
+    orchestrating: goalRun.status === "running",
+    lastError:
+      goalRun.status === "failed" || goalRun.status === "blocked"
+        ? goalRun.lastFailureSummary ?? goalRun.blockerReason ?? state.lastError
+        : null,
+  }));
+
+  if (goalRun.status !== "running") {
+    stopPolling();
+  }
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  polledGoalRunId = null;
+}
+
+function ensurePolling(goalRunId: string) {
+  if (polledGoalRunId === goalRunId && pollTimer) {
+    return;
+  }
+  stopPolling();
+  polledGoalRunId = goalRunId;
+  pollTimer = window.setInterval(() => {
+    void refreshGoalRunState(goalRunId).catch((error) => {
+      devLog("warn", "Store:GoalRun", "Failed to refresh running goal run", error);
+    });
+  }, 2000);
+  void refreshGoalRunState(goalRunId).catch((error) => {
+    devLog("warn", "Store:GoalRun", "Failed to prime running goal run", error);
   });
 }
 
@@ -69,6 +107,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   projectId: null,
   goalRuns: [],
   currentGoalRun: null,
+  goalRunEvents: [],
   runtimeStatus: null,
   runtimeLogs: [],
   loading: false,
@@ -82,13 +121,24 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         goalRunApi.listGoalRuns(projectId),
         runtimeApi.getRuntimeStatus(projectId).catch(() => null),
       ]);
+      const currentGoalRun = goalRuns[0] ?? null;
+      const goalRunEvents = currentGoalRun
+        ? await goalRunApi.getGoalRunEvents(currentGoalRun.id).catch(() => [])
+        : [];
       set({
         projectId,
         goalRuns,
-        currentGoalRun: goalRuns[0] ?? null,
+        currentGoalRun,
+        goalRunEvents,
         runtimeStatus,
         loading: false,
+        orchestrating: currentGoalRun?.status === "running",
       });
+      if (currentGoalRun?.status === "running") {
+        ensurePolling(currentGoalRun.id);
+      } else {
+        stopPolling();
+      }
     } catch (error) {
       const message = `Failed to load goal runs: ${error}`;
       set({ loading: false, lastError: message });
@@ -96,195 +146,52 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     }
   },
 
+  loadGoalRunEvents: async (goalRunId) => {
+    try {
+      const events = await goalRunApi.getGoalRunEvents(goalRunId);
+      set((state) => ({
+        goalRunEvents:
+          state.currentGoalRun?.id === goalRunId ? events : state.goalRunEvents,
+      }));
+    } catch (error) {
+      devLog("warn", "Store:GoalRun", "Failed to load goal run events", error);
+    }
+  },
+
+  selectGoalRun: async (goalRunId) => {
+    const current =
+      get().goalRuns.find((run) => run.id === goalRunId) ??
+      (await goalRunApi.getGoalRun(goalRunId));
+    syncGoalRunState(current);
+    const events = await goalRunApi.getGoalRunEvents(goalRunId).catch(() => []);
+    set({ goalRunEvents: events });
+    if (current.status === "running") {
+      ensurePolling(goalRunId);
+    }
+  },
+
   beginPromptRun: async (projectId, prompt) => {
     const goalRun = await goalRunApi.createGoalRun(projectId, prompt);
-    set((state) => ({
-      projectId,
-      goalRuns: [goalRun, ...state.goalRuns.filter((run) => run.id !== goalRun.id)],
-      currentGoalRun: goalRun,
-      lastError: null,
-    }));
+    set({ projectId, lastError: null });
+    syncGoalRunState(goalRun);
+    set({ goalRunEvents: [] });
     return goalRun;
   },
 
   continueAutopilot: async (goalRunId) => {
-    const state = get();
-    if (state.orchestrating) return;
-    const goalRun =
-      state.currentGoalRun?.id === goalRunId
-        ? state.currentGoalRun
-        : state.goalRuns.find((run) => run.id === goalRunId) ?? null;
-    if (!goalRun) {
+    const run =
+      get().currentGoalRun?.id === goalRunId
+        ? get().currentGoalRun
+        : get().goalRuns.find((item) => item.id === goalRunId) ?? null;
+    if (!run) {
       throw new Error("Goal run not loaded");
     }
 
-    set({ orchestrating: true, lastError: null });
-    let lastKnownPhase: GoalRunPhase = goalRun.phase;
-    try {
-      let currentGoalRun = goalRun;
-
-      devLog("info", "Store:GoalRun", "Autopilot planning started", {
-        goalRunId,
-        projectId: goalRun.projectId,
-      });
-
-      // If the project has no pieces yet, the leader agent has nothing to reference by UUID
-      // and will hallucinate piece IDs. Scaffold one implementation piece from the goal
-      // prompt so the planner has something real to work against.
-      const existingPieces = await projectApi.listPieces(goalRun.projectId);
-      if (existingPieces.length === 0) {
-        const scaffold = await projectApi.createPiece(
-          goalRun.projectId,
-          null,
-          "Implementation",
-          0,
-          0,
-          {
-            responsibilities: goalRun.prompt,
-            agentPrompt: goalRun.prompt,
-            outputMode: "code-only",
-            phase: "approved",
-            agentConfig: {
-              provider: null,
-              model: null,
-              tokenBudget: null,
-              activeAgents: [],
-              executionEngine: null,
-              timeout: null,
-            },
-          },
-        );
-        devLog("info", "Store:GoalRun", "Scaffolded implementation piece for empty project", {
-          pieceId: scaffold.id,
-        });
-      }
-
-      let plans = await leaderApi.listWorkPlans(goalRun.projectId);
-      let plan = plans.find((item) => item.status === "approved") ?? plans[0] ?? null;
-      if (!plan || plan.status === "rejected" || plan.status === "superseded") {
-        currentGoalRun = await setGoalRunPhase(goalRun.id, "planning", "running");
-        lastKnownPhase = "planning";
-        plan = await leaderApi.generateWorkPlan(goalRun.projectId, goalRun.prompt);
-      }
-
-      currentGoalRun = await setGoalRunPhase(goalRun.id, "planning", "running", {
-        currentPlanId: plan.id,
-        blockerReason: null,
-      });
-      lastKnownPhase = "planning";
-
-      if (plan.status === "draft") {
-        plan = await leaderApi.updatePlanStatus(plan.id, "approved");
-      }
-
-      currentGoalRun = await setGoalRunPhase(goalRun.id, "implementation", "running", {
-        currentPlanId: plan.id,
-      });
-      lastKnownPhase = "implementation";
-      await leaderApi.runAllPlanTasks(plan.id);
-
-      plans = await leaderApi.listWorkPlans(goalRun.projectId);
-      const finalPlan =
-        plans.find((item) => item.id === plan!.id) ??
-        (await leaderApi.getWorkPlan(plan.id));
-
-      currentGoalRun = await setGoalRunPhase(goalRun.id, "runtime-configuration", "running");
-      lastKnownPhase = "runtime-configuration";
-      let runtimeStatus = await runtimeApi.getRuntimeStatus(goalRun.projectId);
-      if (!runtimeStatus.spec) {
-        // Layer 1: static pattern detection
-        let detected = await runtimeApi.detectRuntime(goalRun.projectId);
-
-        // Layer 2: LLM agent fallback
-        if (!detected) {
-          detected = await runtimeApi.detectRuntimeWithAgent(goalRun.projectId);
-        }
-
-        if (!detected) {
-          currentGoalRun = await setGoalRunPhase(goalRun.id, "runtime-configuration", "blocked", {
-            blockerReason: "Automatic runtime detection failed. Review or configure the run command below.",
-            lastFailureSummary: "Runtime detection failed after all automatic strategies",
-            runtimeStatusSummary: "runtime not configured",
-          });
-          set((store) => ({
-            currentGoalRun,
-            goalRuns: store.goalRuns.map((run) =>
-              run.id === currentGoalRun.id ? currentGoalRun : run,
-            ),
-            runtimeStatus,
-          }));
-          return;
-        }
-
-        await runtimeApi.configureRuntime(goalRun.projectId, detected);
-        runtimeStatus = await runtimeApi.getRuntimeStatus(goalRun.projectId);
-      }
-
-      currentGoalRun = await setGoalRunPhase(goalRun.id, "runtime-execution", "running", {
-        runtimeStatusSummary: runtimeStatus.spec?.runCommand
-          ? `configured: ${runtimeStatus.spec.runCommand}`
-          : "runtime configured",
-      });
-      lastKnownPhase = "runtime-execution";
-
-      runtimeStatus = await runtimeApi.startRuntime(goalRun.projectId);
-      const verificationSummary = await runtimeApi.verifyRuntime(goalRun.projectId);
-      const runtimeLogs = await runtimeApi.tailRuntimeLogs(goalRun.projectId, 120);
-
-      lastKnownPhase = "verification";
-      currentGoalRun = await setGoalRunPhase(goalRun.id, "verification", "completed", {
-        blockerReason: null,
-        lastFailureSummary: null,
-        runtimeStatusSummary: runtimeStatus.session?.url ?? "runtime running",
-        verificationSummary:
-          finalPlan.integrationReview?.trim()
-            ? `${verificationSummary}\n\nIntegration review:\n${finalPlan.integrationReview.trim()}`
-            : verificationSummary,
-      });
-
-      set((store) => ({
-        currentGoalRun,
-        goalRuns: [currentGoalRun, ...store.goalRuns.filter((run) => run.id !== currentGoalRun.id)],
-        runtimeStatus,
-        runtimeLogs: runtimeLogs.lines,
-        orchestrating: false,
-        lastError: null,
-      }));
-      toast("Autopilot run completed", "info");
-    } catch (error) {
-      const current = get().currentGoalRun;
-      if (current?.id === goalRunId) {
-        const failure =
-          error instanceof Error ? error.message : String(error);
-        // Use lastKnownPhase rather than current.phase — the store isn't updated
-        // on each phase transition, so current.phase can be stale (e.g. "prompt-received"
-        // when we've already advanced to "runtime-execution").
-        const phase = lastKnownPhase;
-        const blocked =
-          phase === "runtime-configuration" ||
-          phase === "runtime-execution" ||
-          failure.toLowerCase().includes("runtime");
-        const updated = await setGoalRunPhase(
-          goalRunId,
-          phase,
-          blocked ? "blocked" : "failed",
-          {
-            blockerReason: blocked ? failure : null,
-            lastFailureSummary: failure,
-          },
-        );
-        set((state) => ({
-          currentGoalRun: updated,
-          goalRuns: state.goalRuns.map((run) => (run.id === updated.id ? updated : run)),
-          orchestrating: false,
-          lastError: failure,
-        }));
-      } else {
-        set({ orchestrating: false, lastError: String(error) });
-      }
-      devLog("error", "Store:GoalRun", "Autopilot failed", error);
-      toast(`Autopilot failed: ${error}`);
-    }
+    set({ lastError: null });
+    const resumed = await goalRunApi.resumeGoalRun(goalRunId);
+    syncGoalRunState(resumed);
+    ensurePolling(goalRunId);
+    toast("Autopilot resumed", "info");
   },
 
   retryGoalRun: async (goalRunId) => {
@@ -293,16 +200,23 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         ? get().currentGoalRun
         : get().goalRuns.find((item) => item.id === goalRunId) ?? null;
     if (!run) return;
-    const updated = await goalRunApi.updateGoalRun(goalRunId, {
+
+    await goalRunApi.updateGoalRun(goalRunId, {
       retryCount: run.retryCount + 1,
-      status: "running",
       blockerReason: null,
+      lastFailureSummary: null,
+      attentionRequired: false,
+      stopRequested: false,
     });
-    set((state) => ({
-      currentGoalRun: updated,
-      goalRuns: state.goalRuns.map((item) => (item.id === updated.id ? updated : item)),
-    }));
     await get().continueAutopilot(goalRunId);
+  },
+
+  stopGoalRun: async (goalRunId) => {
+    const stopped = await goalRunApi.stopGoalRun(goalRunId);
+    syncGoalRunState(stopped);
+    await get().loadGoalRunEvents(goalRunId);
+    stopPolling();
+    toast("Autopilot stopped", "info");
   },
 
   refreshRuntimeStatus: async (projectId) => {
@@ -340,15 +254,18 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     set({ runtimeStatus, runtimeLogs: logs.lines });
   },
 
-  reset: () =>
+  reset: () => {
+    stopPolling();
     set({
       projectId: null,
       goalRuns: [],
       currentGoalRun: null,
+      goalRunEvents: [],
       runtimeStatus: null,
       runtimeLogs: [],
       loading: false,
       orchestrating: false,
       lastError: null,
-    }),
+    });
+  },
 }));

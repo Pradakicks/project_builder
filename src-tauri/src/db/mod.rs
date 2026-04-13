@@ -2,6 +2,7 @@ mod queries;
 mod agent_queries;
 mod artifact_queries;
 mod goal_run_queries;
+mod runtime_session_queries;
 mod plan_queries;
 mod cto_queries;
 
@@ -11,12 +12,14 @@ pub use agent_queries::*;
 pub use plan_queries::*;
 #[allow(unused_imports)]
 pub use goal_run_queries::*;
+#[allow(unused_imports)]
+pub use runtime_session_queries::*;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
 use tracing::{error, info};
 
-const CURRENT_SCHEMA_VERSION: i32 = 3;
+const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 type MigrationFn = fn(&Connection) -> Result<(), String>;
 
@@ -35,9 +38,13 @@ const MIGRATIONS: &[Migration] = &[Migration {
     description: "Add structured CTO audit records",
     apply: migrate_v2,
 }, Migration {
-    version: CURRENT_SCHEMA_VERSION,
+    version: 3,
     description: "Add goal run orchestration state",
     apply: migrate_v3,
+}, Migration {
+    version: CURRENT_SCHEMA_VERSION,
+    description: "Persist goal run executor state, events, and runtime sessions",
+    apply: migrate_v4,
 }];
 
 pub struct Database {
@@ -261,6 +268,12 @@ fn migrate_v3(conn: &Connection) -> Result<(), String> {
     ensure_goal_runs_schema(conn)
 }
 
+fn migrate_v4(conn: &Connection) -> Result<(), String> {
+    ensure_goal_runs_schema(conn)?;
+    ensure_goal_run_events_schema(conn)?;
+    ensure_runtime_sessions_schema(conn)
+}
+
 fn ensure_agent_history_metadata_column(conn: &Connection) -> Result<(), String> {
     let mut stmt = conn
         .prepare("PRAGMA table_info(agent_history)")
@@ -361,12 +374,126 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             verification_summary TEXT,
             retry_count INTEGER NOT NULL DEFAULT 0,
             last_failure_summary TEXT,
+            stop_requested INTEGER NOT NULL DEFAULT 0,
+            current_piece_id TEXT,
+            current_task_id TEXT,
+            retry_backoff_until TEXT,
+            last_failure_fingerprint TEXT,
+            attention_required INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_goal_runs_project ON goal_runs(project_id);
         CREATE INDEX IF NOT EXISTS idx_goal_runs_status ON goal_runs(status, updated_at DESC);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(goal_runs)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_stop_requested = false;
+    let mut has_current_piece_id = false;
+    let mut has_current_task_id = false;
+    let mut has_retry_backoff_until = false;
+    let mut has_last_failure_fingerprint = false;
+    let mut has_attention_required = false;
+
+    for column in columns {
+        match column.map_err(|e| e.to_string())?.as_str() {
+            "stop_requested" => has_stop_requested = true,
+            "current_piece_id" => has_current_piece_id = true,
+            "current_task_id" => has_current_task_id = true,
+            "retry_backoff_until" => has_retry_backoff_until = true,
+            "last_failure_fingerprint" => has_last_failure_fingerprint = true,
+            "attention_required" => has_attention_required = true,
+            _ => {}
+        }
+    }
+
+    if !has_stop_requested {
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_current_piece_id {
+        conn.execute("ALTER TABLE goal_runs ADD COLUMN current_piece_id TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    if !has_current_task_id {
+        conn.execute("ALTER TABLE goal_runs ADD COLUMN current_task_id TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    if !has_retry_backoff_until {
+        conn.execute("ALTER TABLE goal_runs ADD COLUMN retry_backoff_until TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    if !has_last_failure_fingerprint {
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN last_failure_fingerprint TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_attention_required {
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN attention_required INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn ensure_goal_run_events_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS goal_run_events (
+            id TEXT PRIMARY KEY,
+            goal_run_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            payload_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (goal_run_id) REFERENCES goal_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_run_events_goal_run ON goal_run_events(goal_run_id, created_at ASC);
+        ",
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn ensure_runtime_sessions_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS runtime_sessions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            goal_run_id TEXT,
+            session_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            url TEXT,
+            port_hint INTEGER,
+            log_path TEXT,
+            pid INTEGER,
+            last_error TEXT,
+            exit_code INTEGER,
+            started_at TEXT,
+            updated_at TEXT NOT NULL,
+            ended_at TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (goal_run_id) REFERENCES goal_runs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_sessions_project ON runtime_sessions(project_id, updated_at DESC);
         ",
     )
     .map_err(|e| e.to_string())

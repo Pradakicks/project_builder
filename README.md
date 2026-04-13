@@ -112,10 +112,11 @@ The app now persists a per-project goal-run record for top-level prompts such as
 - prompt, phase, and status
 - linked plan id
 - retry count and last failure summary
+- stop/retry executor state and backend event history
 - runtime status summary
 - verification summary
 
-In `autopilot` mode, a successful reviewed CTO action can now chain into:
+In `autopilot` mode, a successful reviewed CTO action now hands off to a Rust-side goal-run executor that can continue after the UI reloads. That executor can chain into:
 
 1. plan generation or reuse
 1. plan approval
@@ -125,6 +126,8 @@ In `autopilot` mode, a successful reviewed CTO action can now chain into:
 1. runtime start and verification
 
 This does not guarantee a fully working app for every prompt yet, but it does give the product a real end-to-end control loop instead of a chat-only handoff.
+
+The editor also now includes a dedicated **Delivery** tab that reads persisted goal-run events and runtime history so you can inspect the full prompt → plan → runtime path in one place.
 
 Runtime configuration is stored on project settings and currently supports:
 
