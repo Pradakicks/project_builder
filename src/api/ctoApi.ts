@@ -79,3 +79,17 @@ export function onCtoChatChunk(
 ): Promise<import("@tauri-apps/api/event").UnlistenFn> {
   return listenToEvent<CtoChatChunk>("cto-chat-chunk", callback);
 }
+
+export interface CtoActionStepEvent {
+  projectId: string;
+  step: number;
+  total: number;
+  action: string;
+  status: "started" | "completed" | "failed";
+}
+
+export function onCtoActionStep(
+  callback: (payload: CtoActionStepEvent) => void,
+): Promise<import("@tauri-apps/api/event").UnlistenFn> {
+  return listenToEvent<CtoActionStepEvent>("cto-action-step", callback);
+}

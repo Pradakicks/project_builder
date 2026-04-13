@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../../store/useChatStore";
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
@@ -144,6 +144,12 @@ export function ChatPanel({
     review: CtoDecisionReview;
   } | null>(null);
   const [executingReview, setExecutingReview] = useState(false);
+  const [executionStep, setExecutionStep] = useState<{
+    step: number;
+    total: number;
+    action: string;
+    status: string;
+  } | null>(null);
   const [runtimeDetecting, setRuntimeDetecting] = useState(false);
   const [runtimeAgentOutput, setRuntimeAgentOutput] = useState("");
   const [showManualRuntime, setShowManualRuntime] = useState(false);
@@ -225,6 +231,7 @@ export function ChatPanel({
     setExpandedDecision(null);
     setPendingReview(null);
     setExecutingReview(false);
+    setExecutionStep(null);
   }, [projectId]);
 
   // Load decisions when switching to decisions tab
@@ -562,8 +569,29 @@ export function ChatPanel({
     }
 
     setExecutingReview(true);
+    setExecutionStep(null);
     const addToast = useToastStore.getState().addToast;
     let executedDecision: CtoDecisionRecordInput | null = null;
+
+    // Actions that mutate project/canvas state — reload immediately when each completes
+    const RELOAD_ON_COMPLETE = new Set([
+      "createPiece", "updatePiece", "createConnection", "updateConnection",
+      "configureRuntime", "approvePlan", "rejectPlan", "runPiece",
+    ]);
+
+    const { onCtoActionStep } = await import("../../api/ctoApi");
+    const unlistenStep = await onCtoActionStep((payload) => {
+      if (payload.projectId !== currentReview.projectId) return;
+      setExecutionStep({ step: payload.step, total: payload.total, action: payload.action, status: payload.status });
+      if (
+        (payload.status === "completed" || payload.status === "failed") &&
+        RELOAD_ON_COMPLETE.has(payload.action) &&
+        useAppStore.getState().activeProjectId === payload.projectId
+      ) {
+        void useProjectStore.getState().loadProject(payload.projectId);
+      }
+    });
+
     try {
       const result = await executeCtoActions(
         currentReview.projectId,
@@ -659,6 +687,8 @@ export function ChatPanel({
           : `CTO execution failed for "${currentReview.projectName}": ${error}`,
       );
     } finally {
+      unlistenStep();
+      setExecutionStep(null);
       setExecutingReview(false);
     }
   };
@@ -1033,15 +1063,41 @@ export function ChatPanel({
 
               <div className="mt-2 space-y-1">
                 {pendingReview.review.actions.length > 0 ? (
-                  pendingReview.review.actions.map((action: CtoAction, index: number) => (
-                    <div
-                      key={`${pendingReview.requestId}-${index}`}
-                      className="flex items-start gap-2 text-[11px] text-gray-200"
-                    >
-                      <span className="mt-0.5 text-blue-300">•</span>
-                      <span>{describeAction(action)}</span>
-                    </div>
-                  ))
+                  pendingReview.review.actions.map((action: CtoAction, index: number) => {
+                    const stepNum = index + 1;
+                    const currentStep = executionStep;
+                    let indicator: React.ReactNode = <span className="mt-0.5 text-blue-300">•</span>;
+                    if (executingReview && currentStep) {
+                      if (stepNum < currentStep.step) {
+                        indicator = <span className="mt-0.5 text-emerald-400">✓</span>;
+                      } else if (stepNum === currentStep.step) {
+                        if (currentStep.status === "completed") {
+                          indicator = <span className="mt-0.5 text-emerald-400">✓</span>;
+                        } else if (currentStep.status === "failed") {
+                          indicator = <span className="mt-0.5 text-red-400">✗</span>;
+                        } else {
+                          indicator = (
+                            <span className="mt-0.5 inline-flex gap-0.5">
+                              <span className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                              <span className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                              <span className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                            </span>
+                          );
+                        }
+                      } else {
+                        indicator = <span className="mt-0.5 text-gray-600">•</span>;
+                      }
+                    }
+                    return (
+                      <div
+                        key={`${pendingReview.requestId}-${index}`}
+                        className="flex items-start gap-2 text-[11px] text-gray-200"
+                      >
+                        {indicator}
+                        <span>{describeAction(action)}</span>
+                      </div>
+                    );
+                  })
                 ) : pendingReview.review.validationErrors.length > 0 ? (
                   <p className="text-[11px] text-gray-400">
                     No valid actions were extracted, so nothing was queued for execution.

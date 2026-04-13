@@ -10,7 +10,7 @@ use crate::AppState;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 struct ActionBlockCandidate {
     start: usize,
@@ -457,6 +457,7 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
     let mut created_piece_refs = HashMap::new();
     let mut switch_to_tab = None;
     let mut reload_current_project = false;
+    let total_actions = review.actions.len();
 
     for (index, action) in review.actions.iter().enumerate() {
         let action_name = action
@@ -466,6 +467,14 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
             .to_string();
         let description = action_name.clone();
         let mut rollback_step: Option<CtoRollbackStep> = None;
+
+        let _ = app_handle.emit("cto-action-step", json!({
+            "projectId": &project_id,
+            "step": index + 1,
+            "total": total_actions,
+            "action": &action_name,
+            "status": "started"
+        }));
 
         let action_result: Result<(), String> = match action_name.as_str() {
             "updatePiece" => {
@@ -853,6 +862,13 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
                     error: None,
                     rollback,
                 });
+                let _ = app_handle.emit("cto-action-step", json!({
+                    "projectId": &project_id,
+                    "step": index + 1,
+                    "total": total_actions,
+                    "action": &steps.last().unwrap().action,
+                    "status": "completed"
+                }));
             }
             Err(error) => {
                 let message = format!("{action_name} failed: {error}");
@@ -874,6 +890,13 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
                     error: Some(message),
                     rollback: Some(fallback_rollback),
                 });
+                let _ = app_handle.emit("cto-action-step", json!({
+                    "projectId": &project_id,
+                    "step": index + 1,
+                    "total": total_actions,
+                    "action": &steps.last().unwrap().action,
+                    "status": "failed"
+                }));
             }
         }
     }
