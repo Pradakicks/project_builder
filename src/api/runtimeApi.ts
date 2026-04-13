@@ -25,6 +25,12 @@ export async function detectRuntime(
   return loggedInvoke("detect_runtime", { projectId });
 }
 
+export async function detectRuntimeWithAgent(
+  projectId: string,
+): Promise<ProjectRuntimeSpec | null> {
+  return loggedInvoke("detect_runtime_with_agent", { projectId });
+}
+
 export async function startRuntime(
   projectId: string,
 ): Promise<ProjectRuntimeStatus> {

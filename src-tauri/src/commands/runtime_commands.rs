@@ -1,4 +1,7 @@
+use crate::agent::build_runtime_detection_prompt;
+use crate::agent::runner::resolve_llm_config;
 use crate::db::Database;
+use crate::llm::{self, LlmConfig};
 use crate::models::{
     Project, ProjectRuntimeSession, ProjectRuntimeSpec, ProjectRuntimeStatus,
     RuntimeLogTail, RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
@@ -8,11 +11,13 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const RUNTIME_ROOT_DIR: &str = "project-builder-dashboard-runtime";
 const INSTALL_TIMEOUT_SECS: u64 = 900;
@@ -113,6 +118,106 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             app_url,
             port_hint,
         }));
+    }
+
+    // Static HTML site (no package.json)
+    let index_html = working_dir.join("index.html");
+    if index_html.exists() {
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command: None,
+            run_command: "python3 -m http.server 8080".to_string(),
+            readiness_check: RuntimeReadinessCheck::Http {
+                path: "/".to_string(),
+                expected_status: 200,
+                timeout_seconds: 15,
+                poll_interval_ms: 250,
+            },
+            verify_command: None,
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: Some("http://127.0.0.1:8080".to_string()),
+            port_hint: Some(8080),
+        }));
+    }
+
+    // Rust project
+    let cargo_toml = working_dir.join("Cargo.toml");
+    if cargo_toml.exists() {
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command: Some("cargo build".to_string()),
+            run_command: "cargo run".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: Some("cargo check".to_string()),
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: None,
+            port_hint: None,
+        }));
+    }
+
+    // Go module
+    let go_mod = working_dir.join("go.mod");
+    if go_mod.exists() {
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command: None,
+            run_command: "go run .".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: Some("go build ./...".to_string()),
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: None,
+            port_hint: None,
+        }));
+    }
+
+    // Python app
+    let has_requirements = working_dir.join("requirements.txt").exists();
+    let has_pyproject = working_dir.join("pyproject.toml").exists();
+    if has_requirements || has_pyproject {
+        // Look for a common entrypoint
+        let entrypoints = ["app.py", "main.py", "server.py", "run.py"];
+        if let Some(entry) = entrypoints.iter().find(|f| working_dir.join(f).exists()) {
+            // Sniff the entrypoint for web framework clues
+            let content = std::fs::read_to_string(working_dir.join(entry)).unwrap_or_default();
+            let is_web = content.contains("flask")
+                || content.contains("fastapi")
+                || content.contains("uvicorn")
+                || content.contains("http.server")
+                || content.contains("Flask")
+                || content.contains("FastAPI");
+            let port = if content.contains("8000") || content.contains("fastapi") || content.contains("uvicorn") {
+                8000u16
+            } else {
+                5000u16
+            };
+            let readiness_check = if is_web {
+                RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 30,
+                    poll_interval_ms: 500,
+                }
+            } else {
+                RuntimeReadinessCheck::None
+            };
+            let app_url = if is_web {
+                Some(format!("http://127.0.0.1:{port}"))
+            } else {
+                None
+            };
+            let port_hint = if is_web { Some(port) } else { None };
+            let install_command = if has_requirements {
+                Some("pip install -r requirements.txt".to_string())
+            } else {
+                None
+            };
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command,
+                run_command: format!("python3 {entry}"),
+                readiness_check,
+                verify_command: None,
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url,
+                port_hint,
+            }));
+        }
     }
 
     Ok(None)
@@ -996,6 +1101,195 @@ pub async fn verify_runtime(
 ) -> Result<String, String> {
     info!(project_id = %project_id, "IPC: verify_runtime");
     verify_runtime_impl(&state.db, &state.runtime_sessions, project_id).await
+}
+
+/// Walk `dir` to `max_depth`, collecting relative path strings, skipping common noise dirs.
+fn collect_file_listing(dir: &Path, max_depth: usize) -> Vec<String> {
+    let mut results = Vec::new();
+    let skip_dirs = ["node_modules", "target", ".git", "dist", "build", ".next", "__pycache__"];
+
+    fn walk(
+        base: &Path,
+        current: &Path,
+        depth: usize,
+        max_depth: usize,
+        skip_dirs: &[&str],
+        results: &mut Vec<String>,
+    ) {
+        if depth > max_depth || results.len() >= 50 {
+            return;
+        }
+        let entries = match std::fs::read_dir(current) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            if results.len() >= 50 {
+                break;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if path.is_dir() {
+                if skip_dirs.contains(&name_str.as_ref()) {
+                    continue;
+                }
+                walk(base, &path, depth + 1, max_depth, skip_dirs, results);
+            } else {
+                if let Ok(rel) = path.strip_prefix(base) {
+                    results.push(rel.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    walk(dir, dir, 0, max_depth, &skip_dirs, &mut results);
+    results
+}
+
+/// Read the first `max_lines` of a file as a string.
+fn read_file_head(path: &Path, max_lines: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().take(max_lines).collect();
+    Some(lines.join("\n"))
+}
+
+#[tracing::instrument(skip(state, app_handle))]
+#[tauri::command]
+pub async fn detect_runtime_with_agent(
+    state: tauri::State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+) -> Result<Option<ProjectRuntimeSpec>, String> {
+    info!(project_id = %project_id, "IPC: detect_runtime_with_agent");
+
+    let (project, working_directory, provider_name, api_key, model, base_url) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let project = db.get_project(&project_id)?;
+        let wd = project
+            .settings
+            .working_directory
+            .clone()
+            .ok_or_else(|| "Project has no working directory configured".to_string())?;
+        let (provider_name, api_key, model, base_url) = resolve_llm_config(&project.settings);
+        (project, PathBuf::from(wd), provider_name, api_key, model, base_url)
+    };
+
+    if !working_directory.exists() {
+        return Err(format!(
+            "Working directory does not exist: {}",
+            working_directory.display()
+        ));
+    }
+
+    if api_key.is_empty() {
+        warn!(project_id = %project_id, "No API key available for runtime detection agent");
+        return Ok(None);
+    }
+
+    // Build file context
+    let file_listing = collect_file_listing(&working_directory, 3);
+    let key_files = [
+        ("package.json", 200usize),
+        ("Cargo.toml", 200),
+        ("go.mod", 100),
+        ("requirements.txt", 100),
+        ("pyproject.toml", 100),
+        ("Makefile", 100),
+        ("index.html", 200),
+        ("README.md", 100),
+    ];
+    let mut file_contents: Vec<(String, String)> = Vec::new();
+    for (name, max_lines) in &key_files {
+        let path = working_directory.join(name);
+        if let Some(content) = read_file_head(&path, *max_lines) {
+            file_contents.push((name.to_string(), content));
+        }
+    }
+
+    let messages = build_runtime_detection_prompt(
+        &project.name,
+        &file_listing,
+        &file_contents,
+    );
+
+    let provider = llm::create_provider(&provider_name);
+    let config = LlmConfig {
+        api_key,
+        model,
+        base_url,
+        max_tokens: 1024,
+    };
+
+    let (tx, mut rx) = mpsc::channel::<String>(256);
+    let project_id_for_stream = project_id.clone();
+    let app = app_handle.clone();
+    let full_output = Arc::new(AsyncMutex::new(String::new()));
+    let full_output_writer = full_output.clone();
+
+    let stream_handle = tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            full_output_writer.lock().await.push_str(&chunk);
+            let _ = app.emit(
+                "runtime-detection-chunk",
+                serde_json::json!({
+                    "projectId": project_id_for_stream,
+                    "chunk": chunk,
+                    "done": false,
+                }),
+            );
+        }
+    });
+
+    let _ = provider.chat_stream(&messages, &config, tx).await;
+    let _ = stream_handle.await;
+
+    let _ = app_handle.emit(
+        "runtime-detection-chunk",
+        serde_json::json!({
+            "projectId": project_id,
+            "chunk": "",
+            "done": true,
+        }),
+    );
+
+    let raw_output = full_output.lock().await.clone();
+    debug!(project_id = %project_id, output_len = raw_output.len(), "Runtime detection agent output received");
+
+    // Extract JSON from output
+    let cleaned = raw_output.trim();
+    let cleaned = if cleaned.starts_with("```") {
+        let after_fence = cleaned.find('\n').map(|i| &cleaned[i + 1..]).unwrap_or(cleaned);
+        after_fence.rfind("```").map(|i| &after_fence[..i]).unwrap_or(after_fence)
+    } else {
+        cleaned
+    };
+
+    let start = cleaned.find('{');
+    let end = cleaned.rfind('}');
+    let (start, end) = match (start, end) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => {
+            warn!(project_id = %project_id, "Runtime detection agent returned no JSON");
+            return Ok(None);
+        }
+    };
+    let json_str = &cleaned[start..=end];
+
+    match serde_json::from_str::<ProjectRuntimeSpec>(json_str) {
+        Ok(spec) => {
+            if let Err(e) = validate_runtime_spec(&spec) {
+                warn!(project_id = %project_id, error = %e, "Runtime detection agent returned invalid spec");
+                return Ok(None);
+            }
+            info!(project_id = %project_id, run_command = %spec.run_command, "Runtime detection agent succeeded");
+            Ok(Some(spec))
+        }
+        Err(e) => {
+            warn!(project_id = %project_id, error = %e, raw = %json_str, "Failed to parse runtime spec from agent output");
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -155,11 +155,18 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       currentGoalRun = await setGoalRunPhase(goalRun.id, "runtime-configuration", "running");
       let runtimeStatus = await runtimeApi.getRuntimeStatus(goalRun.projectId);
       if (!runtimeStatus.spec) {
-        const detected = await runtimeApi.detectRuntime(goalRun.projectId);
+        // Layer 1: static pattern detection
+        let detected = await runtimeApi.detectRuntime(goalRun.projectId);
+
+        // Layer 2: LLM agent fallback
+        if (!detected) {
+          detected = await runtimeApi.detectRuntimeWithAgent(goalRun.projectId);
+        }
+
         if (!detected) {
           currentGoalRun = await setGoalRunPhase(goalRun.id, "runtime-configuration", "blocked", {
-            blockerReason: "Runtime could not be auto-detected from the generated project.",
-            lastFailureSummary: "Runtime detection failed",
+            blockerReason: "Automatic runtime detection failed. Review or configure the run command below.",
+            lastFailureSummary: "Runtime detection failed after all automatic strategies",
             runtimeStatusSummary: "runtime not configured",
           });
           set((store) => ({

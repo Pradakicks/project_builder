@@ -144,6 +144,12 @@ export function ChatPanel({
     review: CtoActionReview;
   } | null>(null);
   const [executingReview, setExecutingReview] = useState(false);
+  const [runtimeDetecting, setRuntimeDetecting] = useState(false);
+  const [runtimeAgentOutput, setRuntimeAgentOutput] = useState("");
+  const [showManualRuntime, setShowManualRuntime] = useState(false);
+  const [manualRunCommand, setManualRunCommand] = useState("");
+  const [manualAppUrl, setManualAppUrl] = useState("http://127.0.0.1:8080");
+  const [manualPort, setManualPort] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const messages = thread?.messages ?? [];
   const streaming = thread?.streaming ?? false;
@@ -464,6 +470,61 @@ export function ChatPanel({
     }
   };
 
+  const retryRuntimeWithAgent = async () => {
+    if (!project || !currentGoalRun || runtimeDetecting) return;
+    setRuntimeDetecting(true);
+    setRuntimeAgentOutput("");
+    const goalRunId = currentGoalRun.id;
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      const unlisten = await listen<{ projectId: string; chunk: string; done: boolean }>(
+        "runtime-detection-chunk",
+        (event) => {
+          if (event.payload.projectId === project.id && !event.payload.done) {
+            setRuntimeAgentOutput((prev) => prev + event.payload.chunk);
+          }
+        },
+      );
+      const runtimeApi = await import("../../api/runtimeApi");
+      const spec = await runtimeApi.detectRuntimeWithAgent(project.id);
+      unlisten();
+      if (spec) {
+        await runtimeApi.configureRuntime(project.id, spec);
+        await useGoalRunStore.getState().retryGoalRun(goalRunId);
+      } else {
+        useToastStore.getState().addToast(
+          "Agent could not detect runtime — use the manual form below.",
+          "warning",
+        );
+      }
+    } catch (error) {
+      useToastStore.getState().addToast(`Runtime agent error: ${error}`, "warning");
+    } finally {
+      setRuntimeDetecting(false);
+    }
+  };
+
+  const applyManualRuntime = async () => {
+    if (!project || !currentGoalRun || !manualRunCommand.trim()) return;
+    const goalRunId = currentGoalRun.id;
+    try {
+      const runtimeApi = await import("../../api/runtimeApi");
+      const port = manualPort ? parseInt(manualPort, 10) : undefined;
+      await runtimeApi.configureRuntime(project.id, {
+        installCommand: null,
+        runCommand: manualRunCommand.trim(),
+        verifyCommand: null,
+        readinessCheck: { kind: "none" },
+        stopBehavior: { kind: "kill" },
+        appUrl: manualAppUrl.trim() || null,
+        portHint: port ?? null,
+      });
+      await useGoalRunStore.getState().retryGoalRun(goalRunId);
+    } catch (error) {
+      useToastStore.getState().addToast(`Failed to configure runtime: ${error}`, "warning");
+    }
+  };
+
   const send = async () => {
     await sendPrompt(input);
   };
@@ -763,6 +824,77 @@ export function ChatPanel({
                   {currentGoalRun.lastFailureSummary ?? goalRunError}
                 </div>
               ) : null}
+
+              {/* Blocked at runtime-configuration: show agent retry + manual form */}
+              {currentGoalRun.status === "blocked" &&
+               currentGoalRun.phase === "runtime-configuration" && (
+                <div className="mt-3 space-y-2">
+                  <p className="text-[11px] text-gray-400">
+                    The autopilot could not determine how to run the generated project.
+                  </p>
+                  <button
+                    onClick={() => void retryRuntimeWithAgent()}
+                    disabled={runtimeDetecting}
+                    className="w-full rounded border border-blue-700 bg-blue-900/30 px-2.5 py-1.5 text-[11px] font-medium text-blue-200 hover:bg-blue-900/50 disabled:opacity-50"
+                  >
+                    {runtimeDetecting ? "Agent detecting…" : "Retry with agent"}
+                  </button>
+                  {runtimeAgentOutput && (
+                    <div className="rounded border border-gray-700 bg-gray-900 p-2 text-[10px] font-mono text-gray-400 max-h-24 overflow-y-auto whitespace-pre-wrap">
+                      {runtimeAgentOutput}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setShowManualRuntime((v) => !v)}
+                    className="w-full text-left text-[10px] text-gray-500 hover:text-gray-300"
+                  >
+                    {showManualRuntime ? "▾" : "▸"} Configure manually
+                  </button>
+                  {showManualRuntime && (
+                    <div className="space-y-1.5 rounded border border-gray-700 bg-gray-900/60 p-2">
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-0.5">Run command *</label>
+                        <input
+                          type="text"
+                          value={manualRunCommand}
+                          onChange={(e) => setManualRunCommand(e.target.value)}
+                          placeholder="e.g. python3 app.py"
+                          className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 text-[11px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-blue-600"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-0.5">App URL</label>
+                          <input
+                            type="text"
+                            value={manualAppUrl}
+                            onChange={(e) => setManualAppUrl(e.target.value)}
+                            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 text-[11px] text-gray-100 focus:outline-none focus:border-blue-600"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-0.5">Port</label>
+                          <input
+                            type="number"
+                            value={manualPort}
+                            onChange={(e) => setManualPort(e.target.value)}
+                            placeholder="8080"
+                            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 text-[11px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-blue-600"
+                          />
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => void applyManualRuntime()}
+                        disabled={!manualRunCommand.trim()}
+                        className="w-full rounded border border-gray-600 bg-gray-800 px-2.5 py-1 text-[11px] text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+                      >
+                        Save &amp; continue
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="mt-2 flex justify-end">
                 <button
                   onClick={() => onSwitchTab?.("plan")}

@@ -433,6 +433,59 @@ Rules:
     messages
 }
 
+/// Build the runtime detection agent prompt.
+/// The agent is asked to output a single JSON object matching `ProjectRuntimeSpec`.
+pub fn build_runtime_detection_prompt(
+    project_name: &str,
+    file_listing: &[String],
+    file_contents: &[(String, String)],
+) -> Vec<Message> {
+    let schema = r#"{
+  "installCommand": "string or null",
+  "runCommand": "string (required — how to start the project)",
+  "verifyCommand": "string or null",
+  "readinessCheck": { "kind": "none" } | { "kind": "http", "path": "/", "expectedStatus": 200, "timeoutSeconds": 30, "pollIntervalMs": 500 } | { "kind": "tcpPort", "timeoutSeconds": 30, "pollIntervalMs": 500 },
+  "stopBehavior": { "kind": "kill" } | { "kind": "graceful", "timeoutSeconds": 5 },
+  "appUrl": "http://127.0.0.1:PORT or null",
+  "portHint": number_or_null
+}"#;
+
+    let system = format!(
+        "You are a runtime detection agent for the project builder tool. \
+Given a listing of project files and their contents, determine how to run the project locally. \
+Output ONLY a single valid JSON object matching the schema below — no markdown fences, no explanation, no text before or after. \
+\n\nSchema:\n{schema}\n\n\
+Rules:\n\
+- runCommand is required and must be a shell command that starts the project (e.g. \"npm start\", \"python3 app.py\", \"./server\")\n\
+- installCommand is optional — only include if there is a clear install step (e.g. npm install, pip install -r requirements.txt)\n\
+- readinessCheck should be \"http\" for web apps, \"tcpPort\" for non-HTTP servers, \"none\" for CLI tools\n\
+- appUrl and portHint should be provided for web apps\n\
+- stopBehavior should almost always be \"kill\" unless the project has graceful shutdown support"
+    );
+
+    let listing_text = if file_listing.is_empty() {
+        "(no files found)".to_string()
+    } else {
+        file_listing.join("\n")
+    };
+
+    let mut user_parts = vec![
+        format!("Project: {project_name}"),
+        format!("## File listing\n{listing_text}"),
+    ];
+
+    for (name, content) in file_contents {
+        user_parts.push(format!("## {name}\n```\n{content}\n```"));
+    }
+
+    user_parts.push("Analyze the files above and output the JSON runtime spec.".to_string());
+
+    vec![
+        Message { role: "system".to_string(), content: system },
+        Message { role: "user".to_string(), content: user_parts.join("\n\n") },
+    ]
+}
+
 /// Build a (system_prompt, user_prompt) pair for external tool execution.
 /// Reuses the same context as `build_agent_prompt` but returns plain strings
 /// instead of LLM Message structs.
