@@ -2,6 +2,8 @@
 
 Use the captured desktop session workflow when iterating on CTO, IPC, task, merge, or review failures.
 
+The current dev baseline also includes goal-run and runtime orchestration. When debugging “one prompt to running app” work, inspect both the CTO decision trail and the active goal-run/runtime state before changing prompts or planner behavior.
+
 ## Start A Captured Session
 
 Run the standard desktop loop with log capture:
@@ -37,6 +39,7 @@ The panel exposes:
 - recent frontend log and IPC events
 - current debug session metadata
 - the latest captured CTO failure/rejection scenario
+- current goal-run phase/status and runtime summary
 - a tail of the current captured desktop log
 - a copied JSON debug report for pasting into follow-up investigations
 

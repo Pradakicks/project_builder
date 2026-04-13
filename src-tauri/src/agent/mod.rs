@@ -122,7 +122,24 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
     ];
 
     if let Ok(project) = db.get_project(project_id) {
-        system_parts.push(format!("Project: {}\nDescription: {}", project.name, project.description));
+        let runtime_summary = project
+            .settings
+            .runtime_spec
+            .as_ref()
+            .map(|spec| format!("configured ({})", spec.run_command))
+            .unwrap_or_else(|| "not configured".to_string());
+        system_parts.push(format!(
+            "Project: {}\nDescription: {}\nAutonomy mode: {:?}\nWorking directory: {}\nRuntime: {}",
+            project.name,
+            project.description,
+            project.settings.autonomy_mode,
+            project
+                .settings
+                .working_directory
+                .clone()
+                .unwrap_or_else(|| "not configured".to_string()),
+            runtime_summary
+        ));
     }
 
     let pieces_list = db.list_pieces(project_id).unwrap_or_default();
@@ -191,6 +208,22 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
         system_parts.push(plan_section);
     }
 
+    if let Ok(goal_runs) = db.list_goal_runs(project_id) {
+        if let Some(goal_run) = goal_runs.first() {
+            system_parts.push(format!(
+                "Latest Goal Run [id={}] (phase: {:?}, status: {:?}):\n  Prompt: {}\n  Current plan: {}\n  Runtime summary: {}\n  Verification summary: {}\n  Last failure: {}",
+                goal_run.id,
+                goal_run.phase,
+                goal_run.status,
+                goal_run.prompt,
+                goal_run.current_plan_id.clone().unwrap_or_else(|| "none".to_string()),
+                goal_run.runtime_status_summary.clone().unwrap_or_else(|| "none".to_string()),
+                goal_run.verification_summary.clone().unwrap_or_else(|| "none".to_string()),
+                goal_run.last_failure_summary.clone().unwrap_or_else(|| "none".to_string()),
+            ));
+        }
+    }
+
     system_parts.push(r#"Make changes by including action blocks in your response. Your response is reviewed before anything executes.
 Wrap each action in a fenced code block with the language tag "action" and put only a single JSON object inside the fence.
 Do not claim the change has already been applied. Do not wrap the JSON in markdown prose.
@@ -216,10 +249,21 @@ Available actions (work plan):
 - {"action": "mergeBranches", "planId": "<id>"}
   Merge all piece branches back to main. Only after all tasks are complete.
 
+Available actions (runtime / delivery):
+- {"action": "configureRuntime", "spec": {"runCommand": "...", "installCommand": "...", "appUrl": "...", "portHint": 3000, "readinessCheck": {"kind": "http"}, "stopBehavior": {"kind": "kill"}}}
+  Configure how the generated project is installed, started, and verified.
+- {"action": "runProject"}
+  Start the configured project runtime.
+- {"action": "stopProject"}
+  Stop the current project runtime.
+- {"action": "retryGoalStep", "goalRunId": "<id>"}
+  Retry the latest blocked or failed goal run.
+
 Rules:
 - Briefly explain what you're doing, then include the action block
 - When you create multiple pieces and then connect them in the same response, give each new piece a unique ref and connect them with sourceRef/targetRef. Do not invent UUIDs.
 - Use piece/connection/plan/task IDs from the lists above only for entities that already exist
+- Use runtime actions only when they directly help complete the current goal run
 - Fenced action blocks are the primary contract; the app may recover a simple inline `action { ... }` fallback, but you should not rely on that.
 - If you are proposing a `generatePlan`, include only the JSON object for the action and keep the guidance concise"#.to_string());
 

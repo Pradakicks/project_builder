@@ -13,11 +13,13 @@ export interface Project {
 export interface ProjectSettings {
   llmConfigs: LlmConfig[];
   defaultTokenBudget: number;
+  autonomyMode: AutonomyMode;
   phaseControl: PhaseControlPolicy;
   conflictResolution: ConflictResolutionPolicy;
   workingDirectory: string | null;
   defaultExecutionEngine: string | null;
   postRunValidationCommand: string | null;
+  runtimeSpec: ProjectRuntimeSpec | null;
 }
 
 export interface LlmConfig {
@@ -29,6 +31,7 @@ export interface LlmConfig {
 
 export type PhaseControlPolicy = "manual" | "gated-auto-advance" | "fully-autonomous";
 export type ConflictResolutionPolicy = "manual" | "ai-assisted" | "auto-resolve";
+export type AutonomyMode = "manual" | "guided" | "autopilot";
 
 export interface Piece {
   id: string;
@@ -152,6 +155,107 @@ export interface ValidationResult {
   output: string;
 }
 
+export type RuntimeSessionStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "failed";
+
+export type RuntimeReadinessCheck =
+  | { kind: "none" }
+  | {
+      kind: "http";
+      path?: string;
+      expectedStatus?: number;
+      timeoutSeconds?: number;
+      pollIntervalMs?: number;
+    }
+  | {
+      kind: "tcpPort";
+      timeoutSeconds?: number;
+      pollIntervalMs?: number;
+    };
+
+export type RuntimeStopBehavior =
+  | { kind: "kill" }
+  | {
+      kind: "graceful";
+      timeoutSeconds?: number;
+    };
+
+export interface ProjectRuntimeSpec {
+  installCommand: string | null;
+  runCommand: string;
+  readinessCheck: RuntimeReadinessCheck;
+  verifyCommand: string | null;
+  stopBehavior: RuntimeStopBehavior;
+  appUrl: string | null;
+  portHint: number | null;
+}
+
+export interface ProjectRuntimeSession {
+  sessionId: string;
+  status: RuntimeSessionStatus;
+  startedAt: string | null;
+  updatedAt: string;
+  endedAt: string | null;
+  url: string | null;
+  portHint: number | null;
+  logPath: string | null;
+  recentLogs: string[];
+  lastError: string | null;
+  exitCode: number | null;
+  pid: number | null;
+}
+
+export interface ProjectRuntimeStatus {
+  projectId: string;
+  spec: ProjectRuntimeSpec | null;
+  session: ProjectRuntimeSession | null;
+}
+
+export interface RuntimeLogTail {
+  path: string | null;
+  lines: string[];
+}
+
+// ── Goal Runs ───────────────────────────────────────────
+
+export type GoalRunPhase =
+  | "prompt-received"
+  | "planning"
+  | "implementation"
+  | "merging"
+  | "runtime-configuration"
+  | "runtime-execution"
+  | "verification";
+
+export type GoalRunStatus = "running" | "blocked" | "completed" | "failed";
+
+export interface GoalRun {
+  id: string;
+  projectId: string;
+  prompt: string;
+  phase: GoalRunPhase;
+  status: GoalRunStatus;
+  blockerReason: string | null;
+  currentPlanId: string | null;
+  runtimeStatusSummary: string | null;
+  verificationSummary: string | null;
+  retryCount: number;
+  lastFailureSummary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoalRunUpdate {
+  prompt?: string;
+  phase?: GoalRunPhase;
+  status?: GoalRunStatus;
+  blockerReason?: string | null;
+  currentPlanId?: string | null;
+  runtimeStatusSummary?: string | null;
+  verificationSummary?: string | null;
+  retryCount?: number;
+  lastFailureSummary?: string | null;
+}
+
 export interface AgentHistoryMetadata {
   usage?: TokenUsage | null;
   success?: boolean | null;
@@ -248,7 +352,11 @@ export type CtoActionName =
   | "approvePlan"
   | "rejectPlan"
   | "runAllTasks"
-  | "mergeBranches";
+  | "mergeBranches"
+  | "configureRuntime"
+  | "runProject"
+  | "stopProject"
+  | "retryGoalStep";
 
 export interface CtoAction {
   action: CtoActionName;

@@ -17,6 +17,8 @@ pub struct Project {
 pub struct ProjectSettings {
     pub llm_configs: Vec<LlmConfig>,
     pub default_token_budget: i64,
+    #[serde(default)]
+    pub autonomy_mode: AutonomyMode,
     pub phase_control: PhaseControlPolicy,
     /// How to handle merge conflicts when combining piece branches
     pub conflict_resolution: ConflictResolutionPolicy,
@@ -26,6 +28,9 @@ pub struct ProjectSettings {
     pub default_execution_engine: Option<String>,
     /// Optional shell command run after successful external implementation runs
     pub post_run_validation_command: Option<String>,
+    /// Normalized runtime contract for running the project locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_spec: Option<super::runtime::ProjectRuntimeSpec>,
 }
 
 impl Default for ProjectSettings {
@@ -33,12 +38,28 @@ impl Default for ProjectSettings {
         Self {
             llm_configs: vec![],
             default_token_budget: 100_000,
+            autonomy_mode: AutonomyMode::Autopilot,
             phase_control: PhaseControlPolicy::Manual,
             conflict_resolution: ConflictResolutionPolicy::AiAssisted,
             working_directory: None,
             default_execution_engine: None,
             post_run_validation_command: None,
+            runtime_spec: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutonomyMode {
+    Manual,
+    Guided,
+    Autopilot,
+}
+
+impl Default for AutonomyMode {
+    fn default() -> Self {
+        Self::Autopilot
     }
 }
 
@@ -77,4 +98,26 @@ pub struct ProjectFile {
     pub project: Project,
     pub pieces: Vec<super::piece::Piece>,
     pub connections: Vec<super::connection::Connection>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn project_settings_defaults_autonomy_mode_for_legacy_payloads() {
+        let settings: ProjectSettings = serde_json::from_value(json!({
+            "llmConfigs": [],
+            "defaultTokenBudget": 100000,
+            "phaseControl": "manual",
+            "conflictResolution": "ai-assisted",
+            "workingDirectory": null,
+            "defaultExecutionEngine": null,
+            "postRunValidationCommand": null
+        }))
+        .expect("deserialize legacy project settings");
+
+        assert!(matches!(settings.autonomy_mode, AutonomyMode::Autopilot));
+    }
 }

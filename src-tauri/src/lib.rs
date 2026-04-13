@@ -14,6 +14,7 @@ pub struct AppState {
     pub db: Mutex<Database>,
     /// Tracks which pieces currently have an agent running (prevents double-runs).
     pub running_pieces: Mutex<HashSet<String>>,
+    pub runtime_sessions: Mutex<commands::runtime_commands::RuntimeSessions>,
 }
 
 pub fn run() {
@@ -42,6 +43,7 @@ pub fn run() {
         .manage(AppState {
             db: Mutex::new(database),
             running_pieces: Mutex::new(HashSet::new()),
+            runtime_sessions: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::project_commands::create_project,
@@ -79,6 +81,13 @@ pub fn run() {
             commands::settings_commands::delete_api_key,
             commands::settings_commands::update_project_settings,
             commands::settings_commands::validate_working_directory,
+            commands::runtime_commands::configure_runtime,
+            commands::runtime_commands::get_runtime_status,
+            commands::runtime_commands::detect_runtime,
+            commands::runtime_commands::start_runtime,
+            commands::runtime_commands::stop_runtime,
+            commands::runtime_commands::tail_runtime_logs,
+            commands::runtime_commands::verify_runtime,
             commands::plan_commands::generate_work_plan,
             commands::plan_commands::get_work_plan,
             commands::plan_commands::list_work_plans,

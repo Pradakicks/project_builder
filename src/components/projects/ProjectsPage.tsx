@@ -4,6 +4,7 @@ import type { Project } from "../../types";
 import { useAppStore } from "../../store/useAppStore";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useLeaderStore } from "../../store/useLeaderStore";
+import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useDialogStore } from "../../store/useDialogStore";
 import { useToastStore } from "../../store/useToastStore";
 
@@ -47,6 +48,7 @@ export function ProjectsPage() {
   useEffect(() => {
     resetProject();
     useLeaderStore.getState().reset();
+    useGoalRunStore.getState().reset();
     fetchProjects();
   }, [resetProject]);
 

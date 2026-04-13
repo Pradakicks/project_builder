@@ -2,6 +2,8 @@
 
 Desktop app for composing projects, pieces, agents, plans, and CTO-driven workflows.
 
+The current delivery baseline is no longer just diagram editing: each project can now track a top-level goal run, operate in `manual`, `guided`, or `autopilot` mode, and use a normalized runtime spec to start and verify a generated app from inside the desktop UI.
+
 ## Setup
 
 1. Install Node.js and Rust.
@@ -98,6 +100,40 @@ Each CTO decision now stores structured audit data:
 - rollback metadata for the reversible action subset
 
 Rollback is exposed only for the safest reversible CTO actions. Destructive or ambiguous actions remain non-rollbackable.
+
+The CTO prompt also includes the current goal-run and runtime context, and it can now use runtime-oriented actions such as `configureRuntime`, `runProject`, `stopProject`, and `retryGoalStep` when the project has enough structure to continue autonomously.
+
+## Goal Runs And Runtime
+
+The app now persists a per-project goal-run record for top-level prompts such as “create a simple todo web app.” A goal run tracks:
+
+- prompt, phase, and status
+- linked plan id
+- retry count and last failure summary
+- runtime status summary
+- verification summary
+
+In `autopilot` mode, a successful reviewed CTO action can now chain into:
+
+1. plan generation or reuse
+1. plan approval
+1. task execution
+1. merge and integration review
+1. runtime detection/configuration
+1. runtime start and verification
+
+This does not guarantee a fully working app for every prompt yet, but it does give the product a real end-to-end control loop instead of a chat-only handoff.
+
+Runtime configuration is stored on project settings and currently supports:
+
+- install command
+- run command
+- readiness check
+- verify command
+- stop behavior
+- app URL / port hint
+
+If no runtime spec is configured, the desktop app will first try to auto-detect one from the working directory before blocking the goal run.
 
 ## Operator Runbook
 

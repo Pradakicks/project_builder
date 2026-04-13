@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useLeaderStore } from "../../store/useLeaderStore";
 import { useAppStore } from "../../store/useAppStore";
+import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 
 export function Toolbar() {
@@ -11,9 +12,18 @@ export function Toolbar() {
   const openProject = useAppStore((s) => s.openProject);
   const goToSettings = useAppStore((s) => s.goToSettings);
   const addToast = useToastStore((s) => s.addToast);
+  const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
+  const orchestrating = useGoalRunStore((s) => s.orchestrating);
+  const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
+  const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
+  const startRuntime = useGoalRunStore((s) => s.startRuntime);
+  const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const autonomyMode = project?.settings.autonomyMode ?? "autopilot";
+  const runtimeSpec = project?.settings.runtimeSpec ?? null;
+  const runtimeConfigured = Boolean(runtimeSpec?.runCommand?.trim());
 
   useEffect(() => {
     if (editing) inputRef.current?.focus();
@@ -76,6 +86,7 @@ export function Toolbar() {
   const handleBackToProjects = () => {
     reset();
     useLeaderStore.getState().reset();
+    useGoalRunStore.getState().reset();
     goToProjects();
   };
 
@@ -89,6 +100,90 @@ export function Toolbar() {
         &larr; Projects
       </button>
       <div className="w-px h-4 bg-gray-700" />
+      {project && (
+        <span
+          className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+            autonomyMode === "autopilot"
+              ? "bg-emerald-900/60 text-emerald-300"
+              : autonomyMode === "guided"
+                ? "bg-blue-900/60 text-blue-300"
+                : "bg-gray-800 text-gray-300"
+          }`}
+          title={`Autonomy mode: ${autonomyMode}`}
+        >
+          {autonomyMode}
+        </span>
+      )}
+      {currentGoalRun && (
+        <>
+          <span
+            className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+              currentGoalRun.status === "completed"
+                ? "bg-green-900/60 text-green-300"
+                : currentGoalRun.status === "running"
+                  ? "bg-blue-900/60 text-blue-300"
+                  : "bg-red-900/60 text-red-300"
+            }`}
+            title={`Goal run phase: ${currentGoalRun.phase}`}
+          >
+            {currentGoalRun.status} · {currentGoalRun.phase}
+          </span>
+          {runtimeStatus?.session?.status === "running" ? (
+            <button
+              onClick={() => void stopRuntime(project?.id ?? undefined)}
+              className="rounded border border-red-700 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950/40"
+            >
+              Stop App
+            </button>
+            ) : (
+              <button
+                onClick={() => void startRuntime(project?.id ?? undefined)}
+                disabled={!runtimeConfigured}
+                className="rounded border border-green-700 px-2.5 py-1 text-xs text-green-300 hover:bg-green-950/40"
+                title={
+                  runtimeConfigured
+                    ? "Start the configured app runtime"
+                    : "Configure a runtime contract in Settings first"
+                }
+              >
+              Run App
+            </button>
+          )}
+          {currentGoalRun.status !== "completed" && (
+            <button
+              onClick={() => void retryGoalRun(currentGoalRun.id)}
+              disabled={orchestrating}
+              className="rounded border border-amber-700 px-2.5 py-1 text-xs text-amber-300 hover:bg-amber-950/40 disabled:opacity-50"
+            >
+              {orchestrating ? "Running…" : "Retry Goal"}
+            </button>
+          )}
+        </>
+      )}
+      {project && (
+        <span
+          className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+            runtimeStatus?.session?.status === "running"
+              ? "bg-green-900/60 text-green-300"
+              : runtimeConfigured
+                ? "bg-gray-800 text-gray-300"
+                : "bg-red-900/60 text-red-300"
+          }`}
+          title={
+            runtimeConfigured
+              ? runtimeStatus?.session?.status === "running"
+                ? "Runtime is running"
+                : "Runtime contract configured"
+              : "Runtime contract missing"
+          }
+        >
+          {runtimeStatus?.session?.status === "running"
+            ? "runtime:running"
+            : runtimeConfigured
+              ? "runtime:ready"
+              : "runtime:missing"}
+        </span>
+      )}
       {editing ? (
         <input
           ref={inputRef}

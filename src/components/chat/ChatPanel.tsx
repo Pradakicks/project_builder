@@ -5,6 +5,7 @@ import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
 import { useDialogStore } from "../../store/useDialogStore";
 import { useDebugStore } from "../../store/useDebugStore";
+import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { Markdown } from "../ui/Markdown";
 import { devLog } from "../../utils/devLog";
 import {
@@ -130,6 +131,7 @@ export function ChatPanel({
   const [pendingReview, setPendingReview] = useState<{
     projectId: string;
     projectName: string;
+    goalRunId: string | null;
     requestId: string;
     prompt: string;
     conversation: DebugConversationMessage[];
@@ -260,6 +262,14 @@ export function ChatPanel({
     setInput("");
     setPendingReview(null);
 
+    let goalRunId: string | null = null;
+    try {
+      const goalRun = await useGoalRunStore.getState().beginPromptRun(project.id, text);
+      goalRunId = goalRun.id;
+    } catch (error) {
+      devLog("warn", "Chat", "Failed to create goal run for CTO prompt", error);
+    }
+
     const originProjectId = project.id;
     const originProjectName = project.name;
     let streamBuffer = "";
@@ -305,6 +315,7 @@ export function ChatPanel({
             setPendingReview({
               projectId: originProjectId,
               projectName: originProjectName,
+              goalRunId,
               requestId,
               prompt: text,
               conversation,
@@ -336,6 +347,20 @@ export function ChatPanel({
                 scenarioProjectName: originProjectName,
               }),
             );
+            if (goalRunId) {
+              try {
+                await import("../../api/goalRunApi").then(({ updateGoalRun }) =>
+                  updateGoalRun(goalRunId!, {
+                    status: "blocked",
+                    blockerReason: review.validationErrors.join("; "),
+                    lastFailureSummary: "CTO action validation failed",
+                  }),
+                );
+                await useGoalRunStore.getState().loadGoalRuns(originProjectId);
+              } catch (goalRunError) {
+                devLog("warn", "Chat", "Failed to update blocked goal run after CTO rejection", goalRunError);
+              }
+            }
             try {
               const { logCtoDecision } = await import("../../api/ctoApi");
               const decision = await logCtoDecision(
@@ -369,6 +394,21 @@ export function ChatPanel({
             }
           }
 
+          if (review.actions.length === 0 && review.validationErrors.length === 0 && goalRunId) {
+            try {
+              await import("../../api/goalRunApi").then(({ updateGoalRun }) =>
+                updateGoalRun(goalRunId!, {
+                  status: "blocked",
+                  blockerReason: "CTO returned no actionable changes.",
+                  lastFailureSummary: "No CTO actions were emitted",
+                }),
+              );
+              await useGoalRunStore.getState().loadGoalRuns(originProjectId);
+            } catch (goalRunError) {
+              devLog("warn", "Chat", "Failed to update blocked goal run after empty CTO response", goalRunError);
+            }
+          }
+
           devLog("info", "Chat", `CTO response complete (${streamBuffer.length} chars)`);
           unlisten();
         } else {
@@ -396,6 +436,19 @@ export function ChatPanel({
           scenarioProjectName: originProjectName,
         }),
       );
+      if (goalRunId) {
+        try {
+          await import("../../api/goalRunApi").then(({ updateGoalRun }) =>
+            updateGoalRun(goalRunId!, {
+              status: "failed",
+              lastFailureSummary: `CTO chat error: ${e}`,
+            }),
+          );
+          await useGoalRunStore.getState().loadGoalRuns(originProjectId);
+        } catch (goalRunError) {
+          devLog("warn", "Chat", "Failed to update failed goal run after CTO error", goalRunError);
+        }
+      }
       useChatStore
         .getState()
         .failRequest(originProjectId, requestId, "(Failed to connect to LLM)");
@@ -490,6 +543,18 @@ export function ChatPanel({
         onSwitchTab?.(result.switchToTab);
       }
 
+      if (
+        currentReview.goalRunId &&
+        useProjectStore.getState().project?.settings.autonomyMode === "autopilot"
+      ) {
+        void useGoalRunStore
+          .getState()
+          .continueAutopilot(currentReview.goalRunId)
+          .catch((error) =>
+            devLog("error", "Chat", "Autopilot continuation failed", error),
+          );
+      }
+
       setPendingReview(null);
     } catch (error) {
       devLog("error", "Chat", "Failed to execute CTO review", error);
@@ -507,6 +572,19 @@ export function ChatPanel({
           scenarioProjectName: currentReview.projectName,
         }),
       );
+      if (currentReview.goalRunId) {
+        try {
+          await import("../../api/goalRunApi").then(({ updateGoalRun }) =>
+            updateGoalRun(currentReview.goalRunId!, {
+              status: "failed",
+              lastFailureSummary: `CTO execution failed: ${error}`,
+            }),
+          );
+          await useGoalRunStore.getState().loadGoalRuns(currentReview.projectId);
+        } catch (goalRunError) {
+          devLog("warn", "Chat", "Failed to update goal run after CTO execution failure", goalRunError);
+        }
+      }
       addToast(
         useAppStore.getState().activeProjectId === currentReview.projectId
           ? `CTO execution failed: ${error}`

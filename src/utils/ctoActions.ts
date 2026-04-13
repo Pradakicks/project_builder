@@ -1,6 +1,7 @@
 import { useProjectStore } from "../store/useProjectStore";
 import { useLeaderStore } from "../store/useLeaderStore";
 import { useAppStore } from "../store/useAppStore";
+import { useGoalRunStore } from "../store/useGoalRunStore";
 import { devLog } from "./devLog";
 import * as api from "../api/tauriApi";
 import type {
@@ -20,6 +21,10 @@ const supportedActions = new Set<CtoActionName>([
   "rejectPlan",
   "runAllTasks",
   "mergeBranches",
+  "configureRuntime",
+  "runProject",
+  "stopProject",
+  "retryGoalStep",
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -328,6 +333,25 @@ function normalizeAction(
         const planId = readString(raw.planId, "planId", actionIndex);
         return { action: { action: "mergeBranches", planId } };
       }
+      case "configureRuntime": {
+        ensureAllowedKeys(raw, ["action", "spec"], actionIndex);
+        const spec = readOptionalPlainObject(raw.spec, "spec", actionIndex);
+        if (!spec) {
+          throw new Error("spec is required");
+        }
+        return { action: { action: "configureRuntime", spec } };
+      }
+      case "runProject":
+        ensureAllowedKeys(raw, ["action"], actionIndex);
+        return { action: { action: "runProject" } };
+      case "stopProject":
+        ensureAllowedKeys(raw, ["action"], actionIndex);
+        return { action: { action: "stopProject" } };
+      case "retryGoalStep": {
+        ensureAllowedKeys(raw, ["action", "goalRunId"], actionIndex);
+        const goalRunId = readOptionalString(raw.goalRunId);
+        return { action: { action: "retryGoalStep", goalRunId } };
+      }
       default:
         return {
           error: buildActionError(
@@ -421,6 +445,14 @@ export function describeAction(action: CtoAction): string {
       return "Run all plan tasks";
     case "mergeBranches":
       return "Merge all piece branches to main";
+    case "configureRuntime":
+      return "Configure project runtime";
+    case "runProject":
+      return "Run project runtime";
+    case "stopProject":
+      return "Stop project runtime";
+    case "retryGoalStep":
+      return "Retry goal run";
     default:
       return `Unknown action: ${(action as { action: string }).action}`;
   }
@@ -715,6 +747,96 @@ export async function executeActions(
           }
           switchToTab = "plan";
           executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+            rollback: rollbackStep,
+          });
+          rollbackSteps.push(rollbackStep);
+          break;
+        }
+        case "configureRuntime": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Runtime configuration rollback is not implemented",
+          };
+          await api.configureRuntime(projectId, action.spec as any);
+          executed += 1;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+            rollback: rollbackStep,
+          });
+          rollbackSteps.push(rollbackStep);
+          break;
+        }
+        case "runProject": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Runtime process control is not rollback-safe",
+          };
+          await useGoalRunStore.getState().startRuntime(projectId);
+          executed += 1;
+          switchToTab = "plan";
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+            rollback: rollbackStep,
+          });
+          rollbackSteps.push(rollbackStep);
+          break;
+        }
+        case "stopProject": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Runtime stop is not rollback-safe",
+          };
+          await useGoalRunStore.getState().stopRuntime(projectId);
+          executed += 1;
+          switchToTab = "plan";
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+            rollback: rollbackStep,
+          });
+          rollbackSteps.push(rollbackStep);
+          break;
+        }
+        case "retryGoalStep": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Goal-run retries are not rollback-safe",
+          };
+          const currentGoalRun =
+            useGoalRunStore.getState().currentGoalRun;
+          const goalRunId =
+            (action.goalRunId as string | undefined) ?? currentGoalRun?.id;
+          if (!goalRunId) {
+            throw new Error("No goal run is available to retry");
+          }
+          await useGoalRunStore.getState().retryGoalRun(goalRunId);
+          executed += 1;
+          switchToTab = "plan";
           steps.push({
             index,
             action: action.action,

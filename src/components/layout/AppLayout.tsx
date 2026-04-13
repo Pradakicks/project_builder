@@ -4,6 +4,7 @@ import { Toolbar } from "./Toolbar";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useToastStore } from "../../store/useToastStore";
+import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { onPhaseWarning } from "../../api/projectApi";
 
 type LeftTab = "chat" | "plan";
@@ -79,6 +80,14 @@ export function AppLayout() {
       unlisten.then((fn) => fn());
     };
   }, [addToast]);
+
+  useEffect(() => {
+    if (project?.id) {
+      void useGoalRunStore.getState().loadGoalRuns(project.id);
+    } else {
+      useGoalRunStore.getState().reset();
+    }
+  }, [project?.id]);
 
   const renderCanvas = () => (
     <Suspense fallback={<LoadingPane label="Loading canvas..." />}>

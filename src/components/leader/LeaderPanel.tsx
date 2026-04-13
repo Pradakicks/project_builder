@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useLeaderStore } from "../../store/useLeaderStore";
 import { useProjectStore } from "../../store/useProjectStore";
+import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { onLeaderPlanChunk } from "../../api/leaderApi";
 import { PlanTaskCard } from "./PlanTaskCard";
 import { MergeSection } from "./MergeSection";
@@ -25,6 +26,11 @@ export function LeaderPanel({
   embedded?: boolean;
 }) {
   const project = useProjectStore((s) => s.project);
+  const autonomyMode = project?.settings.autonomyMode ?? "autopilot";
+  const runtimeConfigured = Boolean(project?.settings.runtimeSpec?.runCommand?.trim());
+  const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
+  const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
+  const runtimeLogs = useGoalRunStore((s) => s.runtimeLogs);
   const {
     currentPlan,
     generating,
@@ -321,6 +327,22 @@ export function LeaderPanel({
               </div>
               <p className="text-gray-300 leading-relaxed">{posture.message}</p>
               <div className="flex flex-wrap gap-1.5">
+                <span
+                  className={`rounded border border-gray-700 px-1.5 py-0.5 ${
+                    autonomyMode === "autopilot"
+                      ? "bg-emerald-950/40 text-emerald-300"
+                      : autonomyMode === "guided"
+                        ? "bg-blue-950/40 text-blue-300"
+                        : "bg-gray-900 text-gray-400"
+                  }`}
+                >
+                  Autonomy: {autonomyMode}
+                </span>
+                {currentGoalRun && (
+                  <span className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-gray-400">
+                    Goal run: {currentGoalRun.status} / {currentGoalRun.phase}
+                  </span>
+                )}
                 {taskCounts && (
                   <span className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-gray-400">
                     Tasks: {taskCounts.complete + taskCounts.skipped}/{currentPlan.tasks.length} done
@@ -332,12 +354,47 @@ export function LeaderPanel({
                 <span className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-gray-400">
                   Review: {reviewStatus === "idle" ? "waiting" : reviewStatus}
                 </span>
+                <span
+                  className={`rounded border border-gray-700 px-1.5 py-0.5 ${
+                    runtimeStatus?.session?.status === "running"
+                      ? "bg-green-950/40 text-green-300"
+                      : runtimeConfigured
+                        ? "bg-gray-900 text-gray-400"
+                        : "bg-red-950/40 text-red-300"
+                  }`}
+                >
+                  Runtime: {runtimeStatus?.session?.status ?? (runtimeConfigured ? "ready" : "missing")}
+                </span>
               </div>
               {(runAllError || mergeError || reviewError) && (
                 <div className="space-y-0.5 rounded border border-gray-700 bg-gray-950/70 px-2 py-1 text-[10px]">
                   {runAllError && <p className="text-red-300">{runAllError}</p>}
                   {mergeError && <p className="text-red-300">{mergeError}</p>}
                   {reviewError && <p className="text-red-300">{reviewError}</p>}
+                </div>
+              )}
+              {currentGoalRun?.runtimeStatusSummary && (
+                <div className="rounded border border-gray-700 bg-gray-950/70 px-2 py-1 text-[10px] text-gray-300">
+                  <p className="text-gray-500">Runtime</p>
+                  <p>{currentGoalRun.runtimeStatusSummary}</p>
+                </div>
+              )}
+              {currentGoalRun?.verificationSummary && (
+                <div className="rounded border border-gray-700 bg-gray-950/70 px-2 py-1 text-[10px] text-gray-300">
+                  <p className="text-gray-500">Verification</p>
+                  <pre className="whitespace-pre-wrap">{currentGoalRun.verificationSummary}</pre>
+                </div>
+              )}
+              {runtimeStatus?.session?.url && (
+                <div className="rounded border border-gray-700 bg-gray-950/70 px-2 py-1 text-[10px] text-gray-300">
+                  <p className="text-gray-500">App URL</p>
+                  <p className="font-mono">{runtimeStatus.session.url}</p>
+                </div>
+              )}
+              {runtimeLogs.length > 0 && (
+                <div className="rounded border border-gray-700 bg-gray-950/70 px-2 py-1 text-[10px] text-gray-300">
+                  <p className="text-gray-500">Runtime logs</p>
+                  <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap">{runtimeLogs.join("\n")}</pre>
                 </div>
               )}
             </div>

@@ -5,5 +5,6 @@ pub mod goal_run_commands;
 pub mod merge_commands;
 pub mod piece_commands;
 pub mod plan_commands;
+pub mod runtime_commands;
 pub mod project_commands;
 pub mod settings_commands;
