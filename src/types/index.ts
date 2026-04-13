@@ -346,6 +346,7 @@ export interface CtoDecisionRecordInput {
 export type CtoActionName =
   | "updatePiece"
   | "createPiece"
+  | "runPiece"
   | "createConnection"
   | "updateConnection"
   | "generatePlan"

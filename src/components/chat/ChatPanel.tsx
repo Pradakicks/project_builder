@@ -121,6 +121,10 @@ export function ChatPanel({
   const project = useProjectStore((s) => s.project);
   const projectId = project?.id ?? null;
   const showConfirm = useDialogStore((s) => s.showConfirm);
+  const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
+  const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
+  const orchestrating = useGoalRunStore((s) => s.orchestrating);
+  const goalRunError = useGoalRunStore((s) => s.lastError);
   const thread = useChatStore((s) =>
     projectId ? s.threads[projectId] : undefined,
   );
@@ -718,6 +722,58 @@ export function ChatPanel({
 
       {tab === "chat" && (
         <>
+          {currentGoalRun && currentGoalRun.projectId === projectId ? (
+            <div className="mx-3 mt-3 rounded border border-emerald-900/50 bg-emerald-950/20 p-3 text-xs">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-semibold text-emerald-200">
+                    Goal run in progress
+                  </p>
+                  <p className="mt-1 text-[11px] text-gray-300">
+                    {currentGoalRun.prompt}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="rounded bg-emerald-900/40 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
+                    {currentGoalRun.status} / {currentGoalRun.phase}
+                  </p>
+                  {orchestrating ? (
+                    <p className="mt-1 text-[10px] text-emerald-300">
+                      Autopilot advancing
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              <div className="mt-2 grid gap-2 text-[11px] text-gray-300 md:grid-cols-2">
+                <p>
+                  Plan:{" "}
+                  <span className="font-mono text-gray-100">
+                    {currentGoalRun.currentPlanId ?? "none"}
+                  </span>
+                </p>
+                <p>
+                  Runtime:{" "}
+                  <span className="font-mono text-gray-100">
+                    {runtimeStatus?.session?.status ?? currentGoalRun.runtimeStatusSummary ?? "idle"}
+                  </span>
+                </p>
+              </div>
+              {currentGoalRun.lastFailureSummary || goalRunError ? (
+                <div className="mt-2 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-1 text-[11px] text-amber-100">
+                  {currentGoalRun.lastFailureSummary ?? goalRunError}
+                </div>
+              ) : null}
+              <div className="mt-2 flex justify-end">
+                <button
+                  onClick={() => onSwitchTab?.("plan")}
+                  className="rounded border border-gray-700 px-2.5 py-1 text-[11px] text-gray-200 hover:bg-gray-800"
+                >
+                  Open work plan
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           <div ref={listRef} className="flex-1 overflow-y-auto p-3 space-y-2">
             {messages.length === 0 && (
               <p className="text-[11px] text-gray-600 text-center mt-8">

@@ -61,6 +61,7 @@ export async function createPiece(
   name: string,
   positionX: number,
   positionY: number,
+  updates?: PieceUpdate | null,
 ): Promise<Piece> {
   return loggedInvoke("create_piece", {
     projectId,
@@ -68,6 +69,7 @@ export async function createPiece(
     name,
     positionX,
     positionY,
+    updates: updates ?? null,
   });
 }
 

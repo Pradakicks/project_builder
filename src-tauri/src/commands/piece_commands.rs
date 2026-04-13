@@ -14,9 +14,15 @@ pub fn create_piece(
     name: String,
     position_x: f64,
     position_y: f64,
+    updates: Option<crate::db::PieceUpdate>,
 ) -> Result<Piece, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.create_piece(&project_id, parent_id.as_deref(), &name, position_x, position_y)
+    let piece = db.create_piece(&project_id, parent_id.as_deref(), &name, position_x, position_y)?;
+    if let Some(updates) = updates {
+        db.update_piece(&piece.id, &updates)
+    } else {
+        Ok(piece)
+    }
 }
 
 #[tracing::instrument(skip(state))]
@@ -69,4 +75,56 @@ pub fn list_pieces(state: State<AppState>, project_id: String) -> Result<Vec<Pie
 pub fn list_children(state: State<AppState>, piece_id: String) -> Result<Vec<Piece>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_children(&piece_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::{Database, PieceUpdate};
+    use crate::models::{OutputMode, Phase};
+    use std::sync::Mutex;
+
+    #[test]
+    fn create_piece_applies_initial_updates() {
+        let db_path = std::env::temp_dir().join(format!(
+            "project-builder-piece-command-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&db_path).expect("create temp directory");
+        let sqlite_path = db_path.join("data.db");
+        let db = Database::new_at_path(&sqlite_path).expect("open db");
+        let state = Mutex::new(db);
+
+        let project = {
+            let db = state.lock().expect("lock db");
+            db.create_project("Command project", "Testing piece commands")
+                .expect("create project")
+        };
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "Todo App", 10.0, 20.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    piece_type: Some("web-app".to_string()),
+                    responsibilities: Some("Build the todo app".to_string()),
+                    agent_prompt: Some("Write the project files".to_string()),
+                    output_mode: Some(OutputMode::CodeOnly),
+                    phase: Some(Phase::Approved),
+                    ..Default::default()
+                },
+            )
+            .expect("update piece")
+        };
+
+        assert_eq!(piece.piece_type, "web-app");
+        assert_eq!(piece.responsibilities, "Build the todo app");
+        assert_eq!(piece.agent_prompt, "Write the project files");
+        assert!(matches!(piece.output_mode, OutputMode::CodeOnly));
+        assert!(matches!(piece.phase, Phase::Approved));
+
+        let _ = std::fs::remove_dir_all(&db_path);
+    }
 }

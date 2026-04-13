@@ -103,6 +103,8 @@ Rollback is exposed only for the safest reversible CTO actions. Destructive or a
 
 The CTO prompt also includes the current goal-run and runtime context, and it can now use runtime-oriented actions such as `configureRuntime`, `runProject`, `stopProject`, and `retryGoalStep` when the project has enough structure to continue autonomously.
 
+It can also create a more concrete implementation piece in one step by attaching `agentPrompt`, `outputMode`, and `executionEngine` to `createPiece`, then dispatch that work immediately with `runPiece`. That is the current shortest path from a reviewed CTO response to real files appearing in the working directory.
+
 ## Goal Runs And Runtime
 
 The app now persists a per-project goal-run record for top-level prompts such as “create a simple todo web app.” A goal run tracks:

@@ -231,7 +231,10 @@ Do not claim the change has already been applied. Do not wrap the JSON in markdo
 Available actions (diagram):
 - {"action": "updatePiece", "pieceId": "<id>", "updates": {...}}
   Fields: name, pieceType, phase (design|review|approved|implementing), responsibilities, notes
-- {"action": "createPiece", "ref": "frontend", "name": "...", "pieceType": "...", "responsibilities": "..."}
+- {"action": "createPiece", "ref": "frontend", "name": "...", "pieceType": "...", "responsibilities": "...", "agentPrompt": "...", "outputMode": "code-only", "executionEngine": "codex"}
+  Optional fields: parentRef/parentPieceId, notes, phase, outputMode (docs-only|code-only|both), executionEngine (built-in|claude-code|codex)
+- {"action": "runPiece", "pieceRef": "frontend"}
+  Immediately run an existing piece or one created earlier in the same response.
 - {"action": "createConnection", "sourceRef": "frontend", "targetRef": "api", "label": "..."}
   Use sourceRef/targetRef for pieces created earlier in the same response.
 - {"action": "createConnection", "sourcePieceId": "<existing id>", "targetPieceId": "<existing id>", "label": "..."}
@@ -264,6 +267,7 @@ Rules:
 - When you create multiple pieces and then connect them in the same response, give each new piece a unique ref and connect them with sourceRef/targetRef. Do not invent UUIDs.
 - Use piece/connection/plan/task IDs from the lists above only for entities that already exist
 - Use runtime actions only when they directly help complete the current goal run
+- If the user wants a real app scaffold or code written into the working directory, prefer creating a concrete implementation piece with an agentPrompt, outputMode, and executionEngine, then run it with `runPiece` or through an approved work plan
 - Fenced action blocks are the primary contract; the app may recover a simple inline `action { ... }` fallback, but you should not rely on that.
 - If you are proposing a `generatePlan`, include only the JSON object for the action and keep the guidance concise"#.to_string());
 

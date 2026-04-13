@@ -1,5 +1,6 @@
 import { useProjectStore } from "../store/useProjectStore";
 import { useLeaderStore } from "../store/useLeaderStore";
+import { useAgentStore } from "../store/useAgentStore";
 import { useAppStore } from "../store/useAppStore";
 import { useGoalRunStore } from "../store/useGoalRunStore";
 import { devLog } from "./devLog";
@@ -14,6 +15,7 @@ import type {
 const supportedActions = new Set<CtoActionName>([
   "updatePiece",
   "createPiece",
+  "runPiece",
   "createConnection",
   "updateConnection",
   "generatePlan",
@@ -178,6 +180,55 @@ async function loadLeaderApi() {
   return import("../api/leaderApi");
 }
 
+async function executePieceRun(
+  pieceId: string,
+  feedback?: string,
+): Promise<void> {
+  const leaderApi = await loadLeaderApi();
+  const agentStore = useAgentStore.getState();
+  if (feedback?.trim()) {
+    agentStore.startFeedbackRun(pieceId);
+  } else {
+    agentStore.startRun(pieceId);
+  }
+
+  const unlisten = await leaderApi.onAgentOutputChunk((payload) => {
+    if (payload.pieceId !== pieceId) return;
+    const store = useAgentStore.getState();
+    if (payload.done) {
+      store.completeRun(pieceId, {
+        usage: payload.usage ?? { input: 0, output: 0 },
+        success: payload.success ?? (payload.exitCode ?? 0) === 0,
+        exitCode: payload.exitCode,
+        phaseProposal: payload.phaseProposal,
+        phaseChanged: payload.phaseChanged,
+        gitBranch: payload.gitBranch,
+        gitCommitSha: payload.gitCommitSha,
+        gitDiffStat: payload.gitDiffStat,
+        validation: payload.validation,
+      });
+      unlisten();
+      return;
+    }
+
+    if (payload.streamKind === "validation") {
+      store.appendValidationChunk(pieceId, payload.chunk);
+    } else {
+      store.appendChunk(pieceId, payload.chunk);
+    }
+  });
+
+  try {
+    await leaderApi.runPieceAgent(pieceId, feedback);
+  } catch (error) {
+    unlisten();
+    useAgentStore
+      .getState()
+      .completeRun(pieceId, { usage: { input: 0, output: 0 } });
+    throw error;
+  }
+}
+
 async function resolvePieceReference(
   projectId: string,
   reference: string | undefined,
@@ -251,7 +302,20 @@ function normalizeAction(
       case "createPiece": {
         ensureAllowedKeys(
           raw,
-          ["action", "name", "ref", "pieceType", "responsibilities"],
+          [
+            "action",
+            "name",
+            "ref",
+            "parentRef",
+            "parentPieceId",
+            "pieceType",
+            "responsibilities",
+            "agentPrompt",
+            "notes",
+            "phase",
+            "outputMode",
+            "executionEngine",
+          ],
           actionIndex,
         );
         const name = readString(raw.name, "name", actionIndex);
@@ -261,11 +325,34 @@ function normalizeAction(
         };
         const ref = readOptionalString(raw.ref);
         if (ref) normalized.ref = ref;
+        const parentRef =
+          readOptionalString(raw.parentRef) ?? readOptionalString(raw.parentPieceId);
+        if (parentRef) normalized.parentRef = parentRef;
         const pieceType = readOptionalString(raw.pieceType);
         if (pieceType) normalized.pieceType = pieceType;
         const responsibilities = readOptionalString(raw.responsibilities);
         if (responsibilities) normalized.responsibilities = responsibilities;
+        const agentPrompt = readOptionalString(raw.agentPrompt);
+        if (agentPrompt) normalized.agentPrompt = agentPrompt;
+        const notes = readOptionalString(raw.notes);
+        if (notes) normalized.notes = notes;
+        const phase = readOptionalString(raw.phase);
+        if (phase) normalized.phase = phase;
+        const outputMode = readOptionalString(raw.outputMode);
+        if (outputMode) normalized.outputMode = outputMode;
+        const executionEngine = readOptionalString(raw.executionEngine);
+        if (executionEngine) normalized.executionEngine = executionEngine;
         return { action: normalized };
+      }
+      case "runPiece": {
+        ensureAllowedKeys(raw, ["action", "pieceRef", "pieceId", "feedback"], actionIndex);
+        const pieceRef =
+          readOptionalString(raw.pieceRef) ?? readOptionalString(raw.pieceId);
+        if (!pieceRef) {
+          throw new Error("pieceRef or pieceId is required");
+        }
+        const feedback = readOptionalString(raw.feedback);
+        return { action: { action: "runPiece", pieceRef, feedback } };
       }
       case "createConnection": {
         ensureAllowedKeys(
@@ -429,6 +516,10 @@ export function describeAction(action: CtoAction): string {
     }
     case "createPiece":
       return `Create "${action.name}"`;
+    case "runPiece":
+      return typeof action.pieceRef === "string"
+        ? `Run piece "${action.pieceRef}"`
+        : "Run piece";
     case "createConnection":
       return `Connect pieces`;
     case "updateConnection":
@@ -506,12 +597,33 @@ export async function executeActions(
         case "createPiece": {
           const randomX = 200 + Math.random() * 400;
           const randomY = 150 + Math.random() * 300;
+          const parentId = await resolvePieceReference(
+            projectId,
+            action.parentRef as string | undefined,
+            createdPieceRefs,
+          ).catch((error) => {
+            if (action.parentRef) throw error;
+            return null;
+          });
+          const initialUpdates: Record<string, unknown> = {};
+          if (action.pieceType) initialUpdates.pieceType = action.pieceType;
+          if (action.responsibilities) initialUpdates.responsibilities = action.responsibilities;
+          if (action.agentPrompt) initialUpdates.agentPrompt = action.agentPrompt;
+          if (action.notes) initialUpdates.notes = action.notes;
+          if (action.phase) initialUpdates.phase = action.phase;
+          if (action.outputMode) initialUpdates.outputMode = action.outputMode;
+          if (action.executionEngine) {
+            initialUpdates.agentConfig = {
+              executionEngine: action.executionEngine,
+            };
+          }
           const piece = await api.createPiece(
             projectId,
-            null,
+            parentId,
             (action.name as string) || "New Component",
             randomX,
             randomY,
+            Object.keys(initialUpdates).length > 0 ? initialUpdates : null,
           );
           if (typeof action.ref === "string" && action.ref.trim()) {
             createdPieceRefs.set(action.ref.trim(), piece.id);
@@ -523,12 +635,32 @@ export async function executeActions(
             supported: true,
             kind: { kind: "deletePiece", pieceId: piece.id },
           };
-          const extraUpdates: Record<string, unknown> = {};
-          if (action.pieceType) extraUpdates.pieceType = action.pieceType;
-          if (action.responsibilities) extraUpdates.responsibilities = action.responsibilities;
-          if (Object.keys(extraUpdates).length > 0) {
-            await api.updatePiece(piece.id, extraUpdates);
-          }
+          executed += 1;
+          reloadCurrentProject = true;
+          steps.push({
+            index,
+            action: action.action,
+            description,
+            status: "executed",
+            rollback: rollbackStep,
+          });
+          rollbackSteps.push(rollbackStep);
+          break;
+        }
+        case "runPiece": {
+          rollbackStep = {
+            index,
+            action: action.action,
+            description,
+            supported: false,
+            reason: "Piece execution changes workspace state and is not rollback-safe",
+          };
+          const pieceId = await resolvePieceReference(
+            projectId,
+            action.pieceRef as string | undefined,
+            createdPieceRefs,
+          );
+          await executePieceRun(pieceId, action.feedback as string | undefined);
           executed += 1;
           reloadCurrentProject = true;
           steps.push({

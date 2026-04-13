@@ -4,6 +4,8 @@ Use the captured desktop session workflow when iterating on CTO, IPC, task, merg
 
 The current dev baseline also includes goal-run and runtime orchestration. When debugging “one prompt to running app” work, inspect both the CTO decision trail and the active goal-run/runtime state before changing prompts or planner behavior.
 
+When a CTO response uses `createPiece` plus `runPiece`, also inspect the created piece's `agentPrompt`, `executionEngine`, and generated-file artifacts. That path is now the shortest verified bridge from chat actions to real repo mutations.
+
 ## Start A Captured Session
 
 Run the standard desktop loop with log capture:
