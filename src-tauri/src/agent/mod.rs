@@ -165,7 +165,7 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
         system_parts.push(format!("Pieces:\n{}", piece_desc.join("\n")));
     } else if has_working_directory {
         system_parts.push(
-            "There are no pieces yet, but the project has a working directory. If the user asked you to build something concrete, prefer creating one implementation piece with a specific agentPrompt, outputMode, and executionEngine, then run it so code is actually written into the repo."
+            "There are no pieces yet, but the project has a working directory. Create one implementation piece with a concrete agentPrompt, outputMode, and executionEngine, then run it so code is actually written into the repo. Infer what to build from the project description and the user's message — do not ask clarifying questions."
                 .to_string(),
         );
     }
@@ -281,7 +281,7 @@ Rules:
 - When you create multiple pieces and then connect them in the same response, give each new piece a unique ref and connect them with sourceRef/targetRef. Do not invent UUIDs.
 - Use piece/connection/plan/task IDs from the lists above only for entities that already exist
 - Use runtime actions only when they directly help complete the current goal run
-- If the user wants a real app scaffold or code written into the working directory, prefer creating a concrete implementation piece with an agentPrompt, outputMode, and executionEngine, then run it with `runPiece` or through an approved work plan
+- When the user wants a real app scaffold or code written into the working directory, create a concrete implementation piece with an agentPrompt, outputMode, and executionEngine, then run it with `runPiece` or through an approved work plan — do not describe what you would do, do it
 - Fenced action blocks are the primary contract; the app may recover a simple inline `action { ... }` fallback, but you should not rely on that.
 - If you are proposing a `generatePlan`, include only the JSON object for the action and keep the guidance concise"#.to_string());
 
