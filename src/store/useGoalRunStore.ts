@@ -8,6 +8,7 @@ import type {
 import { devLog } from "../utils/devLog";
 import * as goalRunApi from "../api/goalRunApi";
 import * as leaderApi from "../api/leaderApi";
+import * as projectApi from "../api/projectApi";
 import * as runtimeApi from "../api/runtimeApi";
 import { useToastStore } from "./useToastStore";
 
@@ -126,6 +127,37 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         goalRunId,
         projectId: goalRun.projectId,
       });
+
+      // If the project has no pieces yet, the leader agent has nothing to reference by UUID
+      // and will hallucinate piece IDs. Scaffold one implementation piece from the goal
+      // prompt so the planner has something real to work against.
+      const existingPieces = await projectApi.listPieces(goalRun.projectId);
+      if (existingPieces.length === 0) {
+        const scaffold = await projectApi.createPiece(
+          goalRun.projectId,
+          null,
+          "Implementation",
+          0,
+          0,
+          {
+            responsibilities: goalRun.prompt,
+            agentPrompt: goalRun.prompt,
+            outputMode: "code-only",
+            phase: "approved",
+            agentConfig: {
+              provider: null,
+              model: null,
+              tokenBudget: null,
+              activeAgents: [],
+              executionEngine: null,
+              timeout: null,
+            },
+          },
+        );
+        devLog("info", "Store:GoalRun", "Scaffolded implementation piece for empty project", {
+          pieceId: scaffold.id,
+        });
+      }
 
       let plans = await leaderApi.listWorkPlans(goalRun.projectId);
       let plan = plans.find((item) => item.status === "approved") ?? plans[0] ?? null;

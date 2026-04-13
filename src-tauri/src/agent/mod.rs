@@ -403,7 +403,8 @@ pub fn build_leader_prompt(db: &Database, project_id: &str, user_guidance: &str)
 Rules:
 - Write for non-technical users
 - Each task targets exactly one piece (use the piece ID and name from the list above)
-- Consider the current phase of each piece — don't suggest work for pieces already implementing unless there's a problem
+- Strongly prefer `implementing` as suggestedPhase — the user's goal is working code written to disk, and that only happens in the implementing phase. For pieces in `Approved` phase, always use `implementing`. For pieces in `Design` phase, use `implementing` if the piece has concrete responsibilities defined; only use `design` when the piece is a stub with no responsibilities or interfaces.
+- Never suggest work for pieces already in the implementing phase unless there is a concrete problem to fix (failed validation, missing feature, bug).
 - Order tasks so dependencies come first
 - Output ONLY valid JSON, no markdown fences"#
             .to_string(),

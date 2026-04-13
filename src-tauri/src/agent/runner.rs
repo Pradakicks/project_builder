@@ -429,6 +429,9 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
         return Ok(());
     }
 
+    let total_tasks = tasks.len();
+    let mut skipped_tasks = 0usize;
+
     for task in tasks {
         // Validate the piece exists before attempting to run — skip tasks that
         // reference non-existent or hallucinated piece IDs.
@@ -443,6 +446,7 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
                 piece_id = %task.piece_id,
                 "Skipping task: piece not found"
             );
+            skipped_tasks += 1;
             continue;
         }
 
@@ -493,6 +497,17 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
                 return Err(format!("Task '{}' failed: {}", task.title, error));
             }
         }
+    }
+
+    // If every task was skipped (all piece IDs were hallucinated or invalid),
+    // fail loudly so the autopilot surfaces a blocked state instead of advancing
+    // to runtime detection on an empty working directory.
+    if skipped_tasks > 0 && skipped_tasks == total_tasks {
+        return Err(format!(
+            "All {total_tasks} plan tasks were skipped because their pieces do not exist. \
+             The plan appears to reference hallucinated piece IDs. Ensure pieces are created \
+             before running the plan."
+        ));
     }
 
     let merge_summary = super::merge::merge_plan_branches(plan_id, db, app_handle).await?;
