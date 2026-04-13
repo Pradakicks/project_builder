@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAgentStore } from "../../store/useAgentStore";
 import { useProjectStore } from "../../store/useProjectStore";
 
@@ -110,6 +110,49 @@ export function AgentsPanel() {
   const pieces = useProjectStore((s) => s.pieces);
   const selectPiece = useProjectStore((s) => s.selectPiece);
   const runs = useAgentStore((s) => s.runs);
+
+  // Restore run state for all pieces on mount so the panel is populated
+  // without requiring the user to open each piece editor individually.
+  useEffect(() => {
+    if (pieces.length === 0) return;
+
+    const restore = async () => {
+      const { getAgentHistory } = await import("../../api/leaderApi");
+      await Promise.allSettled(
+        pieces.map(async (piece) => {
+          const existing = useAgentStore.getState().runs[piece.id];
+          if (existing?.running) return;
+          try {
+            const history = await getAgentHistory(piece.id);
+            const latest = history[0];
+            if (!latest) return;
+            const meta = latest.metadata ?? {};
+            useAgentStore.getState().restoreRun(piece.id, {
+              running: false,
+              output: latest.outputText,
+              usage: meta.usage ?? { input: 0, output: 0 },
+              success: meta.success ?? true,
+              exitCode: meta.exitCode ?? undefined,
+              phaseProposal: meta.phaseProposal ?? undefined,
+              phaseChanged: meta.phaseChanged ?? undefined,
+              gitBranch: meta.gitBranch ?? undefined,
+              gitCommitSha: meta.gitCommitSha ?? undefined,
+              gitDiffStat: meta.gitDiffStat ?? undefined,
+              iterationCount: 1,
+              validation: meta.validation ?? undefined,
+              validationOutput: meta.validation?.output ?? "",
+            });
+          } catch {
+            // Non-fatal — best-effort restore.
+          }
+        }),
+      );
+    };
+
+    void restore();
+  // Re-run whenever the piece list changes (e.g. new piece created by CTO).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pieces.map((p) => p.id).join(",")]);
 
   const running = pieces.filter((p) => runs[p.id]?.running === true);
   const failed = pieces.filter(
