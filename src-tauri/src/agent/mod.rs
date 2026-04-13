@@ -122,6 +122,9 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
         "You are the CTO of this project. You make decisions — you don't ask permission or suggest options. When something needs to change, you propose the change directly. When the architecture needs a new component, you create it. When responsibilities need updating, you update them.\n\nBe direct and assertive. State what you're doing and why, then include the action block. Your response is reviewed before execution.".to_string(),
     ];
 
+    // Build capability snapshot early so every section below can reference it.
+    let snapshot = capability::build_capability_snapshot(db, project_id);
+
     let mut has_working_directory = false;
     if let Ok(project) = db.get_project(project_id) {
         has_working_directory = project
@@ -130,25 +133,17 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
             .as_ref()
             .map(|path| !path.trim().is_empty())
             .unwrap_or(false);
-        let runtime_summary = project
-            .settings
-            .runtime_spec
-            .as_ref()
-            .map(|spec| format!("configured ({})", spec.run_command))
-            .unwrap_or_else(|| "not configured".to_string());
         system_parts.push(format!(
-            "Project: {}\nDescription: {}\nAutonomy mode: {:?}\nWorking directory: {}\nRuntime: {}",
+            "Project: {}\nDescription: {}\nAutonomy mode: {:?}",
             project.name,
             project.description,
             project.settings.autonomy_mode,
-            project
-                .settings
-                .working_directory
-                .clone()
-                .unwrap_or_else(|| "not configured".to_string()),
-            runtime_summary
         ));
     }
+
+    // Capability snapshot — surfaces available engines, working-dir state,
+    // runtime config, verification support, and the latest goal-run failure.
+    system_parts.push(capability::render_capability_section(&snapshot));
 
     let pieces_list = db.list_pieces(project_id).unwrap_or_default();
 
@@ -223,8 +218,8 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
 
     if let Ok(goal_runs) = db.list_goal_runs(project_id) {
         if let Some(goal_run) = goal_runs.first() {
-            system_parts.push(format!(
-                "Latest Goal Run [id={}] (phase: {:?}, status: {:?}):\n  Prompt: {}\n  Current plan: {}\n  Runtime summary: {}\n  Verification summary: {}\n  Last failure: {}",
+            let mut run_section = format!(
+                "Latest Goal Run [id={}] (phase: {:?}, status: {:?}):\n  Prompt: {}\n  Current plan: {}\n  Runtime summary: {}\n  Verification summary: {}",
                 goal_run.id,
                 goal_run.phase,
                 goal_run.status,
@@ -232,8 +227,27 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
                 goal_run.current_plan_id.clone().unwrap_or_else(|| "none".to_string()),
                 goal_run.runtime_status_summary.clone().unwrap_or_else(|| "none".to_string()),
                 goal_run.verification_summary.clone().unwrap_or_else(|| "none".to_string()),
-                goal_run.last_failure_summary.clone().unwrap_or_else(|| "none".to_string()),
-            ));
+            );
+            // Append richer failure context when available.
+            if let Some(f) = &snapshot.latest_failure {
+                run_section.push_str(&format!(
+                    "\n  Failure: phase={}, status={}, retry_count={}, fingerprint={}, attention_required={}",
+                    f.phase,
+                    f.status,
+                    f.retry_count,
+                    f.fingerprint.as_deref().unwrap_or("none"),
+                    f.attention_required,
+                ));
+                if let Some(summary) = &f.summary {
+                    run_section.push_str(&format!("\n  Failure summary: {}", summary));
+                }
+                if let Some(blocker) = &f.blocker_reason {
+                    run_section.push_str(&format!("\n  Blocker: {}", blocker));
+                }
+            } else if let Some(summary) = &goal_run.last_failure_summary {
+                run_section.push_str(&format!("\n  Last failure: {}", summary));
+            }
+            system_parts.push(run_section);
         }
     }
 
@@ -718,5 +732,45 @@ mod tests {
         assert!(system_prompt.contains("run it so code is actually written into the repo"));
 
         cleanup(&db_path);
+    }
+
+    #[test]
+    fn cto_prompt_includes_capability_snapshot_for_repo_backed_project() {
+        let db_path = temp_db_path("repo-backed-capability");
+        let db = Database::new_at_path(&db_path).expect("open temp db");
+
+        let (project, _piece, _goal_run) = make_repo_backed_project_fixture(&db, "cap-test");
+
+        let system_prompt = build_cto_prompt(&db, &project.id)
+            .into_iter()
+            .find(|message| message.role == "system")
+            .map(|message| message.content)
+            .expect("system prompt");
+
+        // Capability section is present
+        assert!(system_prompt.contains("Capabilities:"), "missing Capabilities section");
+        assert!(system_prompt.contains("Execution engines:"), "missing execution engines");
+
+        // Working directory exists and is a git repo
+        assert!(system_prompt.contains("exists: true"), "wd should exist");
+        assert!(system_prompt.contains("git repo: true"), "wd should be a git repo");
+
+        // Runtime is configured with the expected run command
+        assert!(system_prompt.contains("npm run dev"), "missing run_command");
+        assert!(system_prompt.contains("npm test"), "missing verify_command");
+
+        // Latest goal-run failure surfaces retry_count and fingerprint
+        assert!(system_prompt.contains("retry_count=2"), "missing retry_count");
+        assert!(system_prompt.contains("implementation:npm-exit-1"), "missing failure fingerprint");
+        assert!(system_prompt.contains("attention_required=true"), "missing attention_required");
+
+        // built-in engine is listed
+        assert!(system_prompt.contains("built-in"), "missing built-in engine entry");
+
+        cleanup(&db_path);
+        // Clean up the working directory created by the fixture
+        if let Some(wd) = project.settings.working_directory.as_deref() {
+            let _ = std::fs::remove_dir_all(wd);
+        }
     }
 }
