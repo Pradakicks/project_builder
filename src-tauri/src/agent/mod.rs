@@ -243,10 +243,11 @@ Do not claim the change has already been applied. Do not wrap the JSON in markdo
 Available actions (diagram):
 - {"action": "updatePiece", "pieceId": "<id>", "updates": {...}}
   Fields: name, pieceType, phase (design|review|approved|implementing), responsibilities, notes
-- {"action": "createPiece", "ref": "frontend", "name": "...", "pieceType": "...", "responsibilities": "...", "agentPrompt": "...", "outputMode": "code-only", "executionEngine": "codex"}
-  Optional fields: parentRef/parentPieceId, notes, phase, outputMode (docs-only|code-only|both), executionEngine (built-in|claude-code|codex)
+- {"action": "createPiece", "ref": "frontend", "name": "...", "pieceType": "...", "responsibilities": "...", "agentPrompt": "...", "outputMode": "code-only", "executionEngine": "codex", "phase": "implementing"}
+  Optional fields: parentRef/parentPieceId, notes, outputMode (docs-only|code-only|both), executionEngine (built-in|claude-code|codex)
+  Always include "phase": "implementing" when you plan to run the piece immediately. Pieces default to Design phase, which instructs the agent to write docs instead of code.
 - {"action": "runPiece", "pieceRef": "frontend"}
-  Immediately run an existing piece or one created earlier in the same response.
+  Immediately run an existing piece or one created earlier in the same response. The piece will be set to implementing phase automatically.
 - {"action": "createConnection", "sourceRef": "frontend", "targetRef": "api", "label": "..."}
   Use sourceRef/targetRef for pieces created earlier in the same response.
 - {"action": "createConnection", "sourcePieceId": "<existing id>", "targetPieceId": "<existing id>", "label": "..."}

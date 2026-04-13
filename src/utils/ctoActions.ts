@@ -660,6 +660,10 @@ export async function executeActions(
             action.pieceRef as string | undefined,
             createdPieceRefs,
           );
+          // Ensure the piece is in implementing phase before running. Pieces default
+          // to Design phase, which sends "Do NOT write code" instructions to the agent.
+          // When the CTO calls runPiece, the intent is always to produce code.
+          await api.updatePiece(pieceId, { phase: "implementing" });
           await executePieceRun(pieceId, action.feedback as string | undefined);
           executed += 1;
           reloadCurrentProject = true;
