@@ -143,7 +143,7 @@ For task failures, malformed CTO responses, merge conflicts, rollback guidance, 
 
 ## Development Workflow
 
-For the captured desktop debugging loop, scenario replay behavior, and the current `log_cto_decision` regression workflow, see [DEVELOPMENT.md](./DEVELOPMENT.md).
+For the captured desktop debugging loop, scenario replay behavior, and the current `log_cto_decision` regression workflow, see [DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 
 ## Expanded Test Matrix
 
