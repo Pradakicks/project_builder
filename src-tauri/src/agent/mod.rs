@@ -121,7 +121,14 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
         "You are the CTO of this project. You make decisions — you don't ask permission or suggest options. When something needs to change, you propose the change directly. When the architecture needs a new component, you create it. When responsibilities need updating, you update them.\n\nBe direct and assertive. State what you're doing and why, then include the action block. Your response is reviewed before execution.".to_string(),
     ];
 
+    let mut has_working_directory = false;
     if let Ok(project) = db.get_project(project_id) {
+        has_working_directory = project
+            .settings
+            .working_directory
+            .as_ref()
+            .map(|path| !path.trim().is_empty())
+            .unwrap_or(false);
         let runtime_summary = project
             .settings
             .runtime_spec
@@ -155,6 +162,11 @@ pub fn build_cto_prompt(db: &Database, project_id: &str) -> Vec<Message> {
             })
             .collect();
         system_parts.push(format!("Pieces:\n{}", piece_desc.join("\n")));
+    } else if has_working_directory {
+        system_parts.push(
+            "There are no pieces yet, but the project has a working directory. If the user asked you to build something concrete, prefer creating one implementation piece with a specific agentPrompt, outputMode, and executionEngine, then run it so code is actually written into the repo."
+                .to_string(),
+        );
     }
 
     if let Ok(connections) = db.list_connections(project_id) {
@@ -538,6 +550,34 @@ mod tests {
         assert!(system_prompt.contains("fenced code block"));
         assert!(system_prompt.contains("inline `action { ... }` fallback"));
         assert!(!system_prompt.contains("applied automatically"));
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn cto_prompt_biases_empty_repo_toward_implementation_runs() {
+        let db_path = temp_db_path("empty-repo-run");
+        let db = Database::new_at_path(&db_path).expect("open temp db");
+        let settings = ProjectSettings {
+            working_directory: Some("/tmp/repo".to_string()),
+            ..ProjectSettings::default()
+        };
+        let project = db
+            .create_project_with_settings(
+                "Prompt project",
+                "Generate an app from scratch",
+                settings,
+            )
+            .expect("create project");
+
+        let system_prompt = build_cto_prompt(&db, &project.id)
+            .into_iter()
+            .find(|message| message.role == "system")
+            .map(|message| message.content)
+            .expect("system prompt");
+
+        assert!(system_prompt.contains("There are no pieces yet"));
+        assert!(system_prompt.contains("run it so code is actually written into the repo"));
 
         cleanup(&db_path);
     }
