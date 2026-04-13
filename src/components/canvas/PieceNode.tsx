@@ -1,5 +1,6 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { Phase, PieceInterface } from "../../types";
+import { useAgentStore } from "../../store/useAgentStore";
 
 interface PieceNodeData {
   label: string;
@@ -17,8 +18,13 @@ const phaseColors: Record<string, string> = {
   implementing: "bg-blue-500/20 text-blue-400",
 };
 
-export function PieceNode({ data, selected }: NodeProps) {
+export function PieceNode({ id, data, selected }: NodeProps) {
   const nodeData = data as unknown as PieceNodeData;
+  const running = useAgentStore((s) => s.runs[id]?.running);
+  const success = useAgentStore((s) => s.runs[id]?.success);
+  const validationFailed = useAgentStore(
+    (s) => s.runs[id]?.validation?.passed === false,
+  );
   const borderColor = nodeData.color ?? "#3b82f6";
   const interfaces = nodeData.interfaces ?? [];
   const inPorts = interfaces.filter((i) => i.direction === "in");
@@ -75,8 +81,30 @@ export function PieceNode({ data, selected }: NodeProps) {
             {nodeData.pieceType}
           </div>
         )}
-        <div className={`inline-flex self-start rounded px-1.5 py-0.5 text-[10px] font-medium ${phaseColors[nodeData.phase] ?? phaseColors.design}`}>
-          {nodeData.phase.charAt(0).toUpperCase() + nodeData.phase.slice(1)}
+        <div className="flex items-center gap-1 flex-wrap">
+          <div className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium ${phaseColors[nodeData.phase] ?? phaseColors.design}`}>
+            {nodeData.phase.charAt(0).toUpperCase() + nodeData.phase.slice(1)}
+          </div>
+          {running && (
+            <div className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-medium bg-purple-700 text-purple-200 animate-pulse">
+              ●
+            </div>
+          )}
+          {!running && success === true && !validationFailed && (
+            <div className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-medium bg-green-900/40 text-green-300">
+              ✓
+            </div>
+          )}
+          {!running && success === false && (
+            <div className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-medium bg-red-900/50 text-red-300">
+              ✗
+            </div>
+          )}
+          {!running && success === true && validationFailed && (
+            <div className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-medium bg-red-900/50 text-red-300">
+              !
+            </div>
+          )}
         </div>
 
         {/* Interface port indicators */}

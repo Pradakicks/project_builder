@@ -7,7 +7,7 @@ import { useToastStore } from "../../store/useToastStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { onPhaseWarning } from "../../api/projectApi";
 
-type LeftTab = "chat" | "plan";
+type LeftTab = "chat" | "plan" | "agents";
 
 const DiagramCanvas = lazy(() =>
   import("../canvas/DiagramCanvas").then((module) => ({
@@ -32,6 +32,11 @@ const ChatPanel = lazy(() =>
 const LeaderPanel = lazy(() =>
   import("../leader/LeaderPanel").then((module) => ({
     default: module.LeaderPanel,
+  })),
+);
+const AgentsPanel = lazy(() =>
+  import("../agents/AgentsPanel").then((module) => ({
+    default: module.AgentsPanel,
   })),
 );
 
@@ -126,6 +131,12 @@ export function AppLayout() {
     </Suspense>
   );
 
+  const renderAgentsPanel = () => (
+    <Suspense fallback={<LoadingPane label="Loading agents..." />}>
+      <AgentsPanel />
+    </Suspense>
+  );
+
   if (!leftOpen) {
     return (
       <div className="flex h-full flex-col bg-gray-950 text-gray-100">
@@ -175,6 +186,28 @@ export function AppLayout() {
                 <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
                 <rect x="9" y="3" width="6" height="4" rx="1" />
                 <path d="M9 14l2 2 4-4" />
+              </svg>
+            </button>
+            <button
+              onClick={() => {
+                setLeftTab("agents");
+                setLeftOpen(true);
+              }}
+              className="rounded-lg border border-gray-700 bg-gray-900 p-2 text-gray-400 hover:text-gray-200 shadow-lg"
+              title="Open Agents"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" />
               </svg>
             </button>
           </div>
@@ -247,6 +280,16 @@ export function AppLayout() {
             >
               Work Plan
             </button>
+            <button
+              onClick={() => setLeftTab("agents")}
+              className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                leftTab === "agents"
+                  ? "border-b-2 border-emerald-400 text-emerald-400"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              Agents
+            </button>
           </div>
 
           <div className={leftTab === "chat" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
@@ -254,6 +297,9 @@ export function AppLayout() {
           </div>
           <div className={leftTab === "plan" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
             {renderLeaderPanel()}
+          </div>
+          <div className={leftTab === "agents" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
+            {renderAgentsPanel()}
           </div>
         </div>
 
