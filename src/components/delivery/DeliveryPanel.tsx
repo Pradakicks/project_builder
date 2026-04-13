@@ -2,11 +2,45 @@ import { useEffect, useMemo } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
-import type { GoalRunEvent, GoalRunTimelineEntry } from "../../types";
+import type { GoalRunEvent, GoalRunTimelineEntry, VerificationResult } from "../../types";
 
 function formatTime(value: string | null) {
   if (!value) return "unknown";
   return new Date(value).toLocaleString();
+}
+
+function VerificationResultBlock({ result }: { result: VerificationResult }) {
+  const passed = result.passed;
+  const totalMs = result.checks.reduce((sum, c) => sum + c.durationMs, 0);
+  const totalSecs = (totalMs / 1000).toFixed(1);
+  return (
+    <div className={`rounded border p-2 ${passed ? "border-green-900/50 bg-green-950/20" : "border-red-900/50 bg-red-950/20"}`}>
+      <div className="flex items-center justify-between">
+        <p className={`text-[11px] font-medium ${passed ? "text-green-300" : "text-red-300"}`}>
+          {passed ? "Verification passed" : "Verification failed"}
+        </p>
+        <span className="text-[10px] text-gray-500">{totalSecs}s total</span>
+      </div>
+      {result.checks.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {result.checks.map((check, i) => (
+            <li key={i} className="flex items-start gap-1.5 text-[10px]">
+              <span className={check.passed ? "text-green-400" : check.kind === "skipped" ? "text-gray-500" : "text-red-400"}>
+                {check.kind === "skipped" ? "–" : check.passed ? "✓" : "✗"}
+              </span>
+              <span className={`flex-1 truncate ${check.passed ? "text-gray-300" : check.kind === "skipped" ? "text-gray-500" : "text-red-200"}`}>
+                {check.name}
+              </span>
+              <span className="shrink-0 text-gray-600">{check.durationMs}ms</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!passed && result.message && (
+        <p className="mt-1 text-[10px] text-red-300">{result.message}</p>
+      )}
+    </div>
+  );
 }
 
 function buildCurrentTimeline(events: GoalRunEvent[]): GoalRunTimelineEntry[] {
@@ -54,6 +88,7 @@ export function DeliveryPanel() {
   const blockingPiece = deliverySnapshot?.blockingPiece ?? null;
   const blockingTask = deliverySnapshot?.blockingTask ?? null;
   const codeEvidence = deliverySnapshot?.codeEvidence ?? null;
+  const verificationResult = deliverySnapshot?.verificationResult ?? null;
   const runtimeLogs = runtimeSnapshot?.session?.recentLogs ?? [];
   const liveActivity = useGoalRunStore((s) => s.liveActivity);
 
@@ -231,13 +266,8 @@ export function DeliveryPanel() {
                   </p>
                 </div>
               ) : null}
-              {currentRun.verificationSummary ? (
-                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
-                  <p className="text-gray-500">Verification summary</p>
-                  <pre className="mt-1 whitespace-pre-wrap text-gray-200">
-                    {currentRun.verificationSummary}
-                  </pre>
-                </div>
+              {verificationResult ? (
+                <VerificationResultBlock result={verificationResult} />
               ) : null}
               {(currentRun.lastFailureSummary || currentRun.blockerReason) ? (
                 <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">

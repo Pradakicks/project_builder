@@ -315,6 +315,24 @@ export interface LiveActivity {
   total: number;
 }
 
+export type CheckKind = "shell" | "http" | "tcpPort" | "skipped";
+
+export interface VerificationCheck {
+  name: string;
+  kind: CheckKind;
+  passed: boolean;
+  detail: string;
+  durationMs: number;
+}
+
+export interface VerificationResult {
+  passed: boolean;
+  checks: VerificationCheck[];
+  startedAt: string;
+  finishedAt: string;
+  message: string;
+}
+
 export interface GoalRunDeliverySnapshot {
   goalRun: GoalRun;
   currentPlan: WorkPlan | null;
@@ -325,6 +343,7 @@ export interface GoalRunDeliverySnapshot {
   runtimeStatus: ProjectRuntimeStatus | null;
   recentEvents: GoalRunEvent[];
   liveActivity: LiveActivity | null;
+  verificationResult: VerificationResult | null;
 }
 
 export type GoalRunTimelineEntryKind =

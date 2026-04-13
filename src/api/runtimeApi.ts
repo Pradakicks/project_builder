@@ -3,6 +3,7 @@ import type {
   ProjectRuntimeSpec,
   ProjectRuntimeStatus,
   RuntimeLogTail,
+  VerificationResult,
 } from "../types";
 import { loggedInvoke } from "./runtime";
 
@@ -50,6 +51,6 @@ export async function tailRuntimeLogs(
   return loggedInvoke("tail_runtime_logs", { projectId, limit: limit ?? null });
 }
 
-export async function verifyRuntime(projectId: string): Promise<string> {
+export async function verifyRuntime(projectId: string): Promise<VerificationResult> {
   return loggedInvoke("verify_runtime", { projectId });
 }
