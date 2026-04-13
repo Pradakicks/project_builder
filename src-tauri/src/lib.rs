@@ -9,6 +9,7 @@ mod test_support;
 use db::Database;
 use std::collections::HashSet;
 use std::sync::Mutex;
+use tracing::info;
 
 pub struct AppState {
     pub db: Mutex<Database>,
@@ -37,6 +38,15 @@ pub fn run() {
     }
 
     let database = Database::new().expect("Failed to initialize database");
+
+    // On startup, mark any goal runs that were mid-execution as interrupted.
+    // This covers the case where the app was force-quit while the autopilot was running.
+    {
+        let count = database.mark_all_interrupted_runs().unwrap_or(0);
+        if count > 0 {
+            info!(count, "Marked interrupted goal runs on startup");
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

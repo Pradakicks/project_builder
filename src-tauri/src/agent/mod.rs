@@ -510,10 +510,31 @@ pub fn build_external_prompt(piece: &Piece, context: &PieceContext) -> (String, 
 /// Phase-specific instructions injected into the agent's system prompt.
 fn phase_instructions(phase: &Phase) -> String {
     match phase {
-        Phase::Design => "You are in the DESIGN phase. Focus on writing clear specifications, defining interfaces, identifying constraints, and producing a design document. Do NOT write implementation code.".into(),
+        Phase::Design => "You are in the DESIGN phase. Focus on writing clear specifications, defining interfaces, identifying constraints, and producing a design document. Do NOT write implementation code. Be explicit about: what this piece does, how it interacts with connected pieces, what APIs or events it exposes, and any constraints or tradeoffs. Your output will be captured as a design document for the rest of the team.".into(),
         Phase::Review => "You are in the REVIEW phase. Review this piece's design for completeness and consistency with connected pieces. List any problems found and suggest fixes. If the design looks good, say so explicitly.".into(),
         Phase::Approved => "This piece's design is APPROVED and ready for implementation. Break down the work into specific coding tasks, identify files to create or modify, and list acceptance criteria.".into(),
-        Phase::Implementing => "You are in the IMPLEMENTING phase. Write the actual code to implement this piece according to its design. Be thorough and complete.".into(),
+        Phase::Implementing => {
+            r#"You are in the IMPLEMENTING phase. Write the actual code to implement this piece according to its design. Be thorough and complete.
+
+After implementing, write a file named `runtime.json` to the root of the working directory describing how to run the project. Keep this file accurate — update it any time you change the entry point, port, dependencies, or start command. This is the project's live runtime record.
+
+runtime.json format (camelCase JSON, no comments):
+{
+  "installCommand": "npm install",
+  "runCommand": "npm run dev",
+  "verifyCommand": "npm test",
+  "readinessCheck": {"kind": "http", "path": "/", "expectedStatus": 200, "timeoutSeconds": 30, "pollIntervalMs": 500},
+  "stopBehavior": {"kind": "kill"},
+  "appUrl": "http://127.0.0.1:5173",
+  "portHint": 5173
+}
+
+Use null for fields that don't apply. readinessCheck kind options: "none" (CLI tools), "http" (web apps), "tcpPort" (non-HTTP servers). Common examples:
+- Static HTML: runCommand "python3 -m http.server 8080", portHint 8080, readinessCheck http on port 8080
+- Flask/FastAPI: runCommand "python3 app.py", portHint 5000 or 8000, readinessCheck http
+- Node/Vite: installCommand "npm install", runCommand "npm run dev", portHint 5173, readinessCheck http
+- CLI tool: runCommand "./binary", readinessCheck {"kind": "none"}"#.into()
+        }
     }
 }
 

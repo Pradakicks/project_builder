@@ -226,7 +226,7 @@ export type GoalRunPhase =
   | "runtime-execution"
   | "verification";
 
-export type GoalRunStatus = "running" | "blocked" | "completed" | "failed";
+export type GoalRunStatus = "running" | "blocked" | "completed" | "failed" | "interrupted";
 
 export interface GoalRun {
   id: string;

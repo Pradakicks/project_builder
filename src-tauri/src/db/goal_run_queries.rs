@@ -194,6 +194,19 @@ impl Database {
 
         self.get_goal_run(id)
     }
+
+    /// On app startup, mark any goal runs that were mid-execution (status="running")
+    /// as interrupted, since they can never complete now that the process died.
+    pub fn mark_all_interrupted_runs(&self) -> Result<usize, String> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let count = self.conn
+            .execute(
+                "UPDATE goal_runs SET status = 'interrupted', updated_at = ?1 WHERE status = 'running'",
+                params![now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

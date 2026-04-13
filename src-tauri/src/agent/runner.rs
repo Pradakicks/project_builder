@@ -46,14 +46,18 @@ fn load_piece_context(
         None
     };
 
-    // Load context summaries from connected pieces
+    // Load context from connected pieces: prefer context_summary (post-implementation),
+    // fall back to design_doc (pre-implementation design decisions)
     let connected_summaries: Vec<(String, String)> = connected_pieces
         .iter()
         .filter_map(|cp| {
-            db.get_artifact_by_type(&cp.id, "context_summary")
+            let context_summary = db.get_artifact_by_type(&cp.id, "context_summary")
                 .ok()
-                .flatten()
-                .map(|a| (cp.name.clone(), a.content))
+                .flatten();
+            let design_doc = db.get_artifact_by_type(&cp.id, "design_doc")
+                .ok()
+                .flatten();
+            context_summary.or(design_doc).map(|a| (cp.name.clone(), a.content))
         })
         .collect();
 
@@ -331,6 +335,9 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
             }
         }
 
+        let piece_phase = piece.phase.clone();
+        let piece_clone = piece.clone();
+
         tokio::spawn(async move {
             if let Err(e) = generate_context_summary(
                 &piece_id_owned,
@@ -343,6 +350,21 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
             .await
             {
                 warn!(piece_id = %piece_id_owned, error = %e, "Context summary generation failed");
+            }
+
+            // Design-phase runs also generate a design doc for connected pieces to reference
+            if piece_phase == Phase::Design {
+                if let Err(e) = generate_design_doc(
+                    &piece_id_owned,
+                    &piece_clone,
+                    &agent_output,
+                    &settings_clone,
+                    &app,
+                )
+                .await
+                {
+                    warn!(piece_id = %piece_id_owned, error = %e, "Design doc generation failed");
+                }
             }
         });
     }
@@ -938,6 +960,83 @@ async fn generate_context_summary<R: tauri::Runtime>(
 
     info!(piece_id, summary_len = summary.len(), "Context summary stored");
 
+    Ok(())
+}
+
+/// Generate a design document from a Design-phase agent's output and store as an artifact.
+/// Called fire-and-forget after successful Design-phase runs.
+async fn generate_design_doc<R: tauri::Runtime>(
+    piece_id: &str,
+    piece: &Piece,
+    agent_output: &str,
+    settings: &ProjectSettings,
+    app_handle: &AppHandle<R>,
+) -> Result<(), String> {
+    debug!(piece_id, piece_name = %piece.name, "Generating design doc");
+
+    if agent_output.is_empty() {
+        return Ok(());
+    }
+
+    let (provider_name, api_key, model, base_url) = resolve_llm_config(settings);
+    if api_key.is_empty() {
+        return Err("No API key available for design doc generation".to_string());
+    }
+
+    let system_msg = "You are a technical documentation agent. Given a design agent's output for a software component, produce a concise design document. Cover: purpose and scope, key architectural decisions and rationale, API contracts (interfaces, events, data types, endpoint paths), dependencies on other pieces, and any non-obvious constraints or tradeoffs. Be specific and technical. Aim for 300-500 words using bullet points.";
+
+    // Build user content from piece metadata + agent output
+    let mut user_parts = vec![format!("Component: \"{}\"", piece.name)];
+    if !piece.responsibilities.is_empty() {
+        user_parts.push(format!("Responsibilities: {}", piece.responsibilities));
+    }
+    if !piece.interfaces.is_empty() {
+        let ifaces: Vec<String> = piece.interfaces.iter()
+            .map(|i| format!("  - {} ({:?}): {}", i.name, i.direction, i.description))
+            .collect();
+        user_parts.push(format!("Interfaces:\n{}", ifaces.join("\n")));
+    }
+    if !piece.constraints.is_empty() {
+        let constraints: Vec<String> = piece.constraints.iter()
+            .map(|c| format!("  - [{}] {}", c.category, c.description))
+            .collect();
+        user_parts.push(format!("Constraints:\n{}", constraints.join("\n")));
+    }
+
+    let mut output = agent_output.to_string();
+    if output.len() > 8000 {
+        output = format!("(truncated — last portion)\n\n{}", &output[output.len() - 8000..]);
+    }
+    user_parts.push(format!("Agent output:\n{output}"));
+
+    let messages = vec![
+        Message {
+            role: "system".to_string(),
+            content: system_msg.to_string(),
+        },
+        Message {
+            role: "user".to_string(),
+            content: user_parts.join("\n\n"),
+        },
+    ];
+
+    let provider = llm::create_provider(&provider_name);
+    let config = LlmConfig {
+        api_key,
+        model,
+        base_url,
+        max_tokens: 1500,
+    };
+
+    let response = provider.chat(&messages, &config).await?;
+    let doc_text = response.content;
+
+    let state = app_handle.state::<AppState>();
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let title = format!("{} — Design Document", piece.name);
+    db.upsert_artifact(piece_id, "design_doc", &title, &doc_text)?;
+
+    info!(piece_id, doc_len = doc_text.len(), "Design document stored");
     Ok(())
 }
 

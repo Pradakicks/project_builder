@@ -825,6 +825,21 @@ export function ChatPanel({
                 </div>
               ) : null}
 
+              {/* Interrupted: run was mid-execution when the app closed */}
+              {currentGoalRun.status === "interrupted" && (
+                <div className="mt-3 space-y-2">
+                  <p className="text-[11px] text-amber-300">
+                    This run was interrupted when the app closed.
+                  </p>
+                  <button
+                    onClick={() => void useGoalRunStore.getState().retryGoalRun(currentGoalRun.id)}
+                    className="w-full rounded border border-amber-700 bg-amber-900/20 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40"
+                  >
+                    Resume from {currentGoalRun.phase}
+                  </button>
+                </div>
+              )}
+
               {/* Blocked at runtime-configuration: show agent retry + manual form */}
               {currentGoalRun.status === "blocked" &&
                currentGoalRun.phase === "runtime-configuration" && (

@@ -54,6 +54,20 @@ fn trim_command(command: &str) -> String {
 }
 
 fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<ProjectRuntimeSpec>, String> {
+    // Check for agent-authored runtime spec first — most accurate, zero cost
+    let runtime_json = working_dir.join("runtime.json");
+    if runtime_json.exists() {
+        let raw = std::fs::read_to_string(&runtime_json).map_err(|e| e.to_string())?;
+        if let Ok(spec) = serde_json::from_str::<ProjectRuntimeSpec>(&raw) {
+            if validate_runtime_spec(&spec).is_ok() {
+                debug!("Using agent-authored runtime.json");
+                return Ok(Some(spec));
+            }
+        }
+        // Malformed or invalid spec — fall through to pattern matching
+        debug!("runtime.json exists but is invalid, falling back to pattern detection");
+    }
+
     let package_json = working_dir.join("package.json");
     if package_json.exists() {
         let raw = std::fs::read_to_string(&package_json).map_err(|e| e.to_string())?;

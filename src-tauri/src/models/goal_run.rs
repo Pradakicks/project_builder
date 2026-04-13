@@ -19,6 +19,8 @@ pub enum GoalRunStatus {
     Blocked,
     Completed,
     Failed,
+    /// Was running when the app closed; can be resumed
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
