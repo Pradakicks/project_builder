@@ -52,6 +52,7 @@ pub struct AgentConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub token_budget: Option<i64>,
+    #[serde(default)]
     pub active_agents: Vec<String>,
     /// Execution engine: None or "built-in" = LLM API, "claude-code", "codex"
     pub execution_engine: Option<String>,

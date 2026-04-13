@@ -408,6 +408,22 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
     }
 
     for task in tasks {
+        // Validate the piece exists before attempting to run — skip tasks that
+        // reference non-existent or hallucinated piece IDs.
+        let piece_exists = {
+            let db = db.lock().map_err(|e| e.to_string())?;
+            db.get_piece(&task.piece_id).is_ok()
+        };
+        if !piece_exists {
+            warn!(
+                plan_id,
+                task_title = %task.title,
+                piece_id = %task.piece_id,
+                "Skipping task: piece not found"
+            );
+            continue;
+        }
+
         update_plan_task_status_in_db(db, plan_id, &task.id, TaskStatus::InProgress)?;
 
         if !task.suggested_phase.is_empty() {
