@@ -1,0 +1,20 @@
+PROJECT PROGRESS
+================
+
+Last updated: 2026-04-12
+
+CURRENT STATE
+-------------
+(empty — populate at end of each session)
+
+IN PROGRESS
+-----------
+(none)
+
+BLOCKED
+-------
+(none)
+
+NEXT
+----
+(see IMPLEMENTATION_PLAN.md)
