@@ -9,7 +9,7 @@
 
 ## Review
 Populated PRD, APP_FLOW, TECH_STACK, DESIGN_SYSTEM (stub), FRONTEND_GUIDELINES,
-BACKEND_STRUCTURE, IMPLEMENTATION_PLAN, progress.txt, LESSONS.md, and tasks/todo.md
+BACKEND_STRUCTURE, IMPLEMENTATION_PLAN, docs/progress.txt, LESSONS.md, and tasks/todo.md
 based on a survey of README.md, docs/architecture.md, docs/next-steps.md,
 package.json, src-tauri/Cargo.toml, and the directory layouts of src/ and
 src-tauri/src/.
