@@ -13,6 +13,7 @@ export function Toolbar() {
   const goToSettings = useAppStore((s) => s.goToSettings);
   const addToast = useToastStore((s) => s.addToast);
   const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
+  const deliverySnapshot = useGoalRunStore((s) => s.deliverySnapshot);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
   const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
@@ -24,6 +25,9 @@ export function Toolbar() {
   const autonomyMode = project?.settings.autonomyMode ?? "autopilot";
   const runtimeSpec = project?.settings.runtimeSpec ?? null;
   const runtimeConfigured = Boolean(runtimeSpec?.runCommand?.trim());
+  const attentionRequired = Boolean(
+    deliverySnapshot?.retryState?.attentionRequired ?? currentGoalRun?.attentionRequired,
+  );
 
   useEffect(() => {
     if (editing) inputRef.current?.focus();
@@ -120,7 +124,7 @@ export function Toolbar() {
             className={`rounded px-2 py-0.5 text-[10px] font-medium ${
               currentGoalRun.status === "completed"
                 ? "bg-green-900/60 text-green-300"
-                : currentGoalRun.status === "running"
+                : currentGoalRun.status === "running" || currentGoalRun.status === "retrying"
                   ? "bg-blue-900/60 text-blue-300"
                   : "bg-red-900/60 text-red-300"
             }`}
@@ -128,6 +132,14 @@ export function Toolbar() {
           >
             {currentGoalRun.status} · {currentGoalRun.phase}
           </span>
+          {attentionRequired ? (
+            <span
+              className="rounded px-2 py-0.5 text-[10px] font-medium bg-amber-900/60 text-amber-200"
+              title="Goal run needs operator attention"
+            >
+              attention
+            </span>
+          ) : null}
           {runtimeStatus?.session?.status === "running" ? (
             <button
               onClick={() => void stopRuntime(project?.id ?? undefined)}
@@ -135,17 +147,17 @@ export function Toolbar() {
             >
               Stop App
             </button>
-            ) : (
-              <button
-                onClick={() => void startRuntime(project?.id ?? undefined)}
-                disabled={!runtimeConfigured}
-                className="rounded border border-green-700 px-2.5 py-1 text-xs text-green-300 hover:bg-green-950/40"
-                title={
-                  runtimeConfigured
-                    ? "Start the configured app runtime"
-                    : "Configure a runtime contract in Settings first"
-                }
-              >
+          ) : (
+            <button
+              onClick={() => void startRuntime(project?.id ?? undefined)}
+              disabled={!runtimeConfigured}
+              className="rounded border border-green-700 px-2.5 py-1 text-xs text-green-300 hover:bg-green-950/40"
+              title={
+                runtimeConfigured
+                  ? "Start the configured app runtime"
+                  : "Configure a runtime contract in Settings first"
+              }
+            >
               Run App
             </button>
           )}

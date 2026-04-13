@@ -1,6 +1,7 @@
 export {
   chatWithCto,
   createGoalRun,
+  executeCtoActions,
   getGoalRun,
   getGoalRunEvents,
   getAgentHistory,
@@ -8,6 +9,7 @@ export {
   listGoalRuns,
   logCtoDecision,
   rollbackCtoDecision,
+  reviewCtoActions,
   resumeGoalRun,
   configureRuntime,
   detectRuntime,

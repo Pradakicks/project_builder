@@ -2,7 +2,7 @@
 
 Use the captured desktop session workflow when iterating on CTO, IPC, task, merge, or review failures.
 
-The current dev baseline also includes goal-run and runtime orchestration. When debugging “one prompt to running app” work, inspect both the CTO decision trail and the active goal-run/runtime state before changing prompts or planner behavior.
+The current dev baseline also includes goal-run and runtime orchestration. When debugging “one prompt to running app” work, inspect both the CTO decision trail and the active goal-run/runtime state before changing prompts or planner behavior. The Delivery tab is the canonical run-health view: it now surfaces blocking truth, retry state, generated-file evidence, git evidence, and runtime evidence from the backend snapshot.
 
 When a CTO response uses `createPiece` plus `runPiece`, also inspect the created piece's `agentPrompt`, `executionEngine`, and generated-file artifacts. That path is now the shortest verified bridge from chat actions to real repo mutations.
 

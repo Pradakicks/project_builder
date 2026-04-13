@@ -1,4 +1,9 @@
-import type { GoalRun, GoalRunEvent, GoalRunUpdate } from "../types";
+import type {
+  GoalRun,
+  GoalRunDeliverySnapshot,
+  GoalRunEvent,
+  GoalRunUpdate,
+} from "../types";
 import { loggedInvoke } from "./runtime";
 
 export async function createGoalRun(
@@ -33,6 +38,12 @@ export async function listGoalRuns(projectId: string): Promise<GoalRun[]> {
 
 export async function getGoalRunEvents(goalRunId: string): Promise<GoalRunEvent[]> {
   return loggedInvoke("get_goal_run_events", { goalRunId });
+}
+
+export async function getGoalRunDeliverySnapshot(
+  goalRunId: string,
+): Promise<GoalRunDeliverySnapshot> {
+  return loggedInvoke("get_goal_run_delivery_snapshot", { goalRunId });
 }
 
 export async function updateGoalRun(

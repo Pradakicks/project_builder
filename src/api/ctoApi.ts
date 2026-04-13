@@ -1,6 +1,9 @@
 import type {
   CtoDecision,
   CtoDecisionRecordInput,
+  CtoDecisionReview,
+  CtoActionExecutionMode,
+  CtoDecisionExecution,
 } from "../types";
 import { loggedInvoke, listenToEvent } from "./runtime";
 
@@ -28,6 +31,24 @@ export async function chatWithCto(
     userMessage,
     conversation,
     requestId,
+  });
+}
+
+export async function reviewCtoActions(
+  assistantText: string,
+): Promise<CtoDecisionReview> {
+  return loggedInvoke("review_cto_actions", { assistantText });
+}
+
+export async function executeCtoActions(
+  projectId: string,
+  review: CtoDecisionReview,
+  executionMode: CtoActionExecutionMode = "manual-review",
+): Promise<CtoDecisionExecution> {
+  return loggedInvoke("execute_cto_actions", {
+    projectId,
+    review,
+    executionMode,
   });
 }
 

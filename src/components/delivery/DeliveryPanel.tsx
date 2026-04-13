@@ -34,10 +34,10 @@ function buildCurrentTimeline(events: GoalRunEvent[]): GoalRunTimelineEntry[] {
 export function DeliveryPanel() {
   const project = useProjectStore((s) => s.project);
   const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
+  const deliverySnapshot = useGoalRunStore((s) => s.deliverySnapshot);
   const goalRuns = useGoalRunStore((s) => s.goalRuns);
   const goalRunEvents = useGoalRunStore((s) => s.goalRunEvents);
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
-  const runtimeLogs = useGoalRunStore((s) => s.runtimeLogs);
   const loading = useGoalRunStore((s) => s.loading);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const lastError = useGoalRunStore((s) => s.lastError);
@@ -48,6 +48,13 @@ export function DeliveryPanel() {
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
   const addToast = useToastStore((s) => s.addToast);
+  const runtimeSnapshot = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
+  const currentRun = deliverySnapshot?.goalRun ?? currentGoalRun;
+  const retryState = deliverySnapshot?.retryState ?? null;
+  const blockingPiece = deliverySnapshot?.blockingPiece ?? null;
+  const blockingTask = deliverySnapshot?.blockingTask ?? null;
+  const codeEvidence = deliverySnapshot?.codeEvidence ?? null;
+  const runtimeLogs = runtimeSnapshot?.session?.recentLogs ?? [];
 
   useEffect(() => {
     if (project?.id) {
@@ -56,8 +63,8 @@ export function DeliveryPanel() {
   }, [project?.id, refreshRuntimeStatus]);
 
   const currentTimeline = useMemo(
-    () => buildCurrentTimeline(goalRunEvents),
-    [goalRunEvents],
+    () => buildCurrentTimeline(deliverySnapshot?.recentEvents ?? goalRunEvents),
+    [deliverySnapshot, goalRunEvents],
   );
 
   const recentRuns = useMemo(
@@ -66,6 +73,7 @@ export function DeliveryPanel() {
   );
 
   const activeProjectId = project?.id ?? null;
+  const hasAttention = Boolean(retryState?.attentionRequired ?? currentRun?.attentionRequired);
 
   const handleStartRuntime = async () => {
     if (!activeProjectId) return;
@@ -88,9 +96,9 @@ export function DeliveryPanel() {
   };
 
   const handleRetryGoal = async () => {
-    if (!currentGoalRun) return;
+    if (!currentRun) return;
     try {
-      await retryGoalRun(currentGoalRun.id);
+      await retryGoalRun(currentRun.id);
       addToast("Retried the active goal run", "info");
     } catch (error) {
       addToast(`Failed to retry goal run: ${error}`, "warning");
@@ -98,9 +106,9 @@ export function DeliveryPanel() {
   };
 
   const handleStopGoal = async () => {
-    if (!currentGoalRun) return;
+    if (!currentRun) return;
     try {
-      await stopGoalRun(currentGoalRun.id);
+      await stopGoalRun(currentRun.id);
       addToast("Stopped the active goal run", "info");
     } catch (error) {
       addToast(`Failed to stop goal run: ${error}`, "warning");
@@ -115,8 +123,8 @@ export function DeliveryPanel() {
     );
   }
 
-  const runtimeState = runtimeStatus?.session?.status ?? "idle";
-  const runtimeUrl = runtimeStatus?.session?.url ?? null;
+  const runtimeState = runtimeSnapshot?.session?.status ?? "idle";
+  const runtimeUrl = runtimeSnapshot?.session?.url ?? null;
 
   return (
     <div className="flex h-full flex-col bg-gradient-to-b from-slate-950 to-gray-950 text-gray-100">
@@ -127,22 +135,22 @@ export function DeliveryPanel() {
               Delivery
             </p>
             <p className="mt-1 text-sm text-gray-200">
-              {currentGoalRun ? "Current run summary and lifecycle timeline" : "No active goal run"}
+              {currentRun ? "Current run summary and lifecycle timeline" : "No active goal run"}
             </p>
           </div>
-          {currentGoalRun ? (
+          {currentRun ? (
             <span
               className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-                currentGoalRun.status === "completed"
+                currentRun.status === "completed"
                   ? "bg-emerald-900/60 text-emerald-300"
-                  : currentGoalRun.status === "running"
+                  : currentRun.status === "running" || currentRun.status === "retrying"
                     ? "bg-blue-900/60 text-blue-300"
-                    : currentGoalRun.status === "blocked"
+                    : currentRun.status === "blocked"
                       ? "bg-amber-900/60 text-amber-300"
                       : "bg-red-900/60 text-red-300"
               }`}
             >
-              {currentGoalRun.status}
+              {currentRun.status}
             </span>
           ) : null}
         </div>
@@ -158,72 +166,115 @@ export function DeliveryPanel() {
           </div>
         )}
 
-        {currentGoalRun ? (
+        {currentRun ? (
           <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
             <div className="grid gap-3 text-[11px] md:grid-cols-2">
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                 <p className="text-gray-500">Prompt</p>
-                <p className="mt-1 text-gray-200">{currentGoalRun.prompt}</p>
+                <p className="mt-1 text-gray-200">{currentRun.prompt}</p>
               </div>
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                 <p className="text-gray-500">Current phase</p>
                 <p className="mt-1 text-gray-200">
-                  {currentGoalRun.status} / {currentGoalRun.phase}
+                  {currentRun.status} / {currentRun.phase}
                 </p>
               </div>
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                 <p className="text-gray-500">Plan</p>
                 <p className="mt-1 font-mono text-gray-200">
-                  {currentGoalRun.currentPlanId ?? "none"}
+                  {currentRun.currentPlanId ?? "none"}
                 </p>
               </div>
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
-                <p className="text-gray-500">Retry count</p>
-                <p className="mt-1 text-gray-200">{currentGoalRun.retryCount}</p>
+                <p className="text-gray-500">Retry state</p>
+                <p className="mt-1 text-gray-200">
+                  {retryState?.retryCount ?? currentRun.retryCount}
+                  {retryState?.stopRequested ? " · stop requested" : ""}
+                </p>
               </div>
             </div>
 
-            {(currentGoalRun.runtimeStatusSummary || currentGoalRun.verificationSummary || currentGoalRun.lastFailureSummary || currentGoalRun.blockerReason) && (
-              <div className="space-y-2 text-[11px]">
-                {currentGoalRun.runtimeStatusSummary ? (
-                  <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
-                    <p className="text-gray-500">Runtime summary</p>
-                    <p className="mt-1 whitespace-pre-wrap text-gray-200">{currentGoalRun.runtimeStatusSummary}</p>
-                  </div>
-                ) : null}
-                {currentGoalRun.verificationSummary ? (
-                  <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
-                    <p className="text-gray-500">Verification summary</p>
-                    <pre className="mt-1 whitespace-pre-wrap text-gray-200">{currentGoalRun.verificationSummary}</pre>
-                  </div>
-                ) : null}
-                {currentGoalRun.lastFailureSummary ? (
-                  <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
-                    <p className="text-amber-300">Last failure</p>
-                    <p className="mt-1 whitespace-pre-wrap">{currentGoalRun.lastFailureSummary}</p>
-                  </div>
-                ) : null}
-                {currentGoalRun.blockerReason ? (
-                  <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
-                    <p className="text-amber-300">Blocker</p>
-                    <p className="mt-1 whitespace-pre-wrap">{currentGoalRun.blockerReason}</p>
-                  </div>
-                ) : null}
+            <div className="space-y-2 text-[11px]">
+              <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                <p className="text-gray-500">Retry timing</p>
+                <p className="mt-1 text-gray-200">
+                  {retryState?.retryBackoffUntil
+                    ? `Next retry after ${formatTime(retryState.retryBackoffUntil)}`
+                    : "No backoff scheduled"}
+                </p>
               </div>
-            )}
+              {currentRun.runtimeStatusSummary ? (
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Runtime summary</p>
+                  <p className="mt-1 whitespace-pre-wrap text-gray-200">
+                    {currentRun.runtimeStatusSummary}
+                  </p>
+                </div>
+              ) : null}
+              {currentRun.verificationSummary ? (
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Verification summary</p>
+                  <pre className="mt-1 whitespace-pre-wrap text-gray-200">
+                    {currentRun.verificationSummary}
+                  </pre>
+                </div>
+              ) : null}
+              {(currentRun.lastFailureSummary || currentRun.blockerReason) ? (
+                <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
+                  <p className="text-amber-300">Blocking truth</p>
+                  {currentRun.blockerReason ? (
+                    <p className="mt-1 whitespace-pre-wrap">{currentRun.blockerReason}</p>
+                  ) : null}
+                  {currentRun.lastFailureSummary ? (
+                    <p className="mt-1 whitespace-pre-wrap">{currentRun.lastFailureSummary}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
 
             <div className="flex flex-wrap items-center gap-2 text-[11px]">
               <span className="rounded border border-gray-800 bg-gray-950/60 px-2 py-0.5 text-gray-300">
-                Updated {formatTime(currentGoalRun.updatedAt)}
+                Updated {formatTime(currentRun.updatedAt)}
               </span>
               <span className="rounded border border-gray-800 bg-gray-950/60 px-2 py-0.5 text-gray-300">
                 Runtime: {runtimeState}
               </span>
+              {hasAttention ? (
+                <span className="rounded border border-amber-700 bg-amber-950/40 px-2 py-0.5 text-amber-200">
+                  attention required
+                </span>
+              ) : null}
               {runtimeUrl ? (
                 <span className="rounded border border-gray-800 bg-gray-950/60 px-2 py-0.5 font-mono text-gray-300">
                   {runtimeUrl}
                 </span>
               ) : null}
+            </div>
+
+            <div className="grid gap-3 text-[11px] md:grid-cols-2">
+              <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                <p className="text-gray-500">Blocking piece / task</p>
+                <p className="mt-1 text-gray-200">
+                  {blockingPiece ? blockingPiece.name : "none"}
+                </p>
+                {blockingTask ? (
+                  <p className="mt-1 text-gray-400">
+                    {blockingTask.title} · {blockingTask.status}
+                  </p>
+                ) : null}
+              </div>
+              <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                <p className="text-gray-500">Code evidence</p>
+                <p className="mt-1 text-gray-200">
+                  {codeEvidence?.pieceName ?? "none"}
+                </p>
+                {codeEvidence?.gitBranch ? (
+                  <p className="mt-1 font-mono text-gray-400">
+                    {codeEvidence.gitBranch}
+                    {codeEvidence.gitCommitSha ? ` · ${codeEvidence.gitCommitSha}` : ""}
+                  </p>
+                ) : null}
+              </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
@@ -245,7 +296,7 @@ export function DeliveryPanel() {
               >
                 Stop app
               </button>
-              {currentGoalRun.status !== "completed" ? (
+              {currentRun.status !== "completed" ? (
                 <button
                   onClick={() => void handleRetryGoal()}
                   disabled={orchestrating}
@@ -254,7 +305,7 @@ export function DeliveryPanel() {
                   {orchestrating ? "Running…" : "Retry goal"}
                 </button>
               ) : null}
-              {currentGoalRun.status === "running" ? (
+              {currentRun.status === "running" || currentRun.status === "retrying" ? (
                 <button
                   onClick={() => void handleStopGoal()}
                   className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
@@ -274,6 +325,105 @@ export function DeliveryPanel() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
+                Code Evidence
+              </p>
+              <p className="text-[11px] text-gray-500">
+                Generated files and git details pulled from the latest piece evidence.
+              </p>
+            </div>
+          </div>
+
+          {codeEvidence ? (
+            <div className="space-y-3 text-[11px]">
+              <div className="grid gap-2 md:grid-cols-3">
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Git branch</p>
+                  <p className="mt-1 font-mono text-gray-200">{codeEvidence.gitBranch ?? "none"}</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Commit SHA</p>
+                  <p className="mt-1 font-mono text-gray-200">{codeEvidence.gitCommitSha ?? "none"}</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Diff stat</p>
+                  <p className="mt-1 whitespace-pre-wrap text-gray-200">{codeEvidence.gitDiffStat ?? "none"}</p>
+                </div>
+              </div>
+              {codeEvidence.generatedFilesArtifact ? (
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-gray-500">Generated files</p>
+                    <span className="text-[10px] text-gray-500">
+                      {formatTime(codeEvidence.generatedFilesArtifact.updatedAt)}
+                    </span>
+                  </div>
+                  <pre className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300">
+                    {codeEvidence.generatedFilesArtifact.content}
+                  </pre>
+                </div>
+              ) : (
+                <p className="text-[11px] text-gray-500">No generated-files artifact yet for the blocking piece.</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-[11px] text-gray-500">No code evidence available for the current run.</p>
+          )}
+        </section>
+
+        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
+                Runtime Evidence
+              </p>
+              <p className="text-[11px] text-gray-500">
+                Runtime status and tail from the persisted runtime session.
+              </p>
+            </div>
+          </div>
+
+          {runtimeSnapshot ? (
+            <div className="space-y-2 text-[11px]">
+              <div className="grid gap-2 md:grid-cols-2">
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Runtime status</p>
+                  <p className="mt-1 text-gray-200">{runtimeSnapshot.session?.status ?? "idle"}</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Runtime URL</p>
+                  <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.url ?? runtimeSnapshot.spec?.appUrl ?? "none"}</p>
+                </div>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Log path</p>
+                  <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.logPath ?? "none"}</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Last runtime error</p>
+                  <p className="mt-1 whitespace-pre-wrap text-gray-200">{runtimeSnapshot.session?.lastError ?? "none"}</p>
+                </div>
+              </div>
+              {runtimeLogs.length > 0 ? (
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Recent runtime logs</p>
+                  <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300">
+                    {runtimeLogs.join("\n")}
+                  </pre>
+                </div>
+              ) : (
+                <p className="text-[11px] text-gray-500">No recent runtime logs available.</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-[11px] text-gray-500">No runtime evidence available.</p>
+          )}
+        </section>
+
+        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
                 Timeline
               </p>
               <p className="text-[11px] text-gray-500">
@@ -288,7 +438,7 @@ export function DeliveryPanel() {
                 <div
                   key={entry.id}
                   className={`rounded border px-3 py-2 text-[11px] ${
-                    entry.active && currentGoalRun?.status === "running"
+                    entry.active && (currentRun?.status === "running" || currentRun?.status === "retrying")
                       ? "border-cyan-700 bg-cyan-950/25"
                       : "border-gray-800 bg-gray-950/60"
                   }`}
@@ -304,7 +454,7 @@ export function DeliveryPanel() {
                             : "bg-blue-900/60 text-blue-300"
                       }`}
                     >
-                      {entry.active && currentGoalRun?.status === "running" ? "active" : entry.status}
+                      {entry.active && (currentRun?.status === "running" || currentRun?.status === "retrying") ? "active" : entry.status}
                     </span>
                   </div>
                   <p className="mt-1 text-[10px] text-gray-500">{formatTime(entry.timestamp)}</p>
@@ -339,13 +489,15 @@ export function DeliveryPanel() {
                   key={run.id}
                   onClick={() => void selectGoalRun(run.id)}
                   className={`rounded border px-3 py-2 text-[11px] ${
-                    currentGoalRun?.id === run.id
+                    currentRun?.id === run.id
                       ? "border-blue-700 bg-blue-950/25"
                       : "border-gray-800 bg-gray-950/60"
                   } cursor-pointer`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <p className="font-medium text-gray-200">{run.status} / {run.phase}</p>
+                    <p className="font-medium text-gray-200">
+                      {run.status} / {run.phase}
+                    </p>
                     <span className="text-[10px] text-gray-500">{formatTime(run.updatedAt)}</span>
                   </div>
                   <p className="mt-1 line-clamp-2 text-gray-400">{run.prompt}</p>
@@ -357,21 +509,6 @@ export function DeliveryPanel() {
           )}
         </section>
 
-        {runtimeLogs.length > 0 ? (
-          <section className="space-y-2 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
-                Runtime Logs
-              </p>
-              <p className="text-[11px] text-gray-500">
-                Latest tail from the active runtime session.
-              </p>
-            </div>
-            <pre className="max-h-52 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300">
-              {runtimeLogs.join("\n")}
-            </pre>
-          </section>
-        ) : null}
       </div>
     </div>
   );

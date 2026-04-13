@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::{Artifact, Piece, PlanTask, ProjectRuntimeStatus, WorkPlan};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GoalRunPhase {
@@ -16,6 +18,7 @@ pub enum GoalRunPhase {
 #[serde(rename_all = "kebab-case")]
 pub enum GoalRunStatus {
     Running,
+    Retrying,
     Blocked,
     Completed,
     Failed,
@@ -72,6 +75,41 @@ pub struct GoalRunEvent {
     pub summary: String,
     pub payload_json: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalRunRetryState {
+    pub retry_count: i64,
+    pub stop_requested: bool,
+    pub retry_backoff_until: Option<String>,
+    pub last_failure_summary: Option<String>,
+    pub last_failure_fingerprint: Option<String>,
+    pub attention_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalRunCodeEvidence {
+    pub piece_id: String,
+    pub piece_name: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub git_diff_stat: Option<String>,
+    pub generated_files_artifact: Option<Artifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalRunDeliverySnapshot {
+    pub goal_run: GoalRun,
+    pub current_plan: Option<WorkPlan>,
+    pub blocking_piece: Option<Piece>,
+    pub blocking_task: Option<PlanTask>,
+    pub retry_state: GoalRunRetryState,
+    pub code_evidence: Option<GoalRunCodeEvidence>,
+    pub runtime_status: Option<ProjectRuntimeStatus>,
+    pub recent_events: Vec<GoalRunEvent>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

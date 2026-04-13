@@ -2,7 +2,7 @@
 
 Desktop app for composing projects, pieces, agents, plans, and CTO-driven workflows.
 
-The current delivery baseline is no longer just diagram editing: each project can now track a top-level goal run, operate in `manual`, `guided`, or `autopilot` mode, and use a normalized runtime spec to start and verify a generated app from inside the desktop UI.
+The current delivery baseline is no longer just diagram editing: each project can now track a top-level goal run, operate in `manual`, `guided`, or `autopilot` mode, and use a normalized runtime spec to start and verify a generated app from inside the desktop UI. The Delivery view now also shows backend-backed blocking truth, retry state, generated-file evidence, git evidence, and runtime evidence for the active run.
 
 ## Setup
 

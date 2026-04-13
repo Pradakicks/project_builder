@@ -226,7 +226,7 @@ export type GoalRunPhase =
   | "runtime-execution"
   | "verification";
 
-export type GoalRunStatus = "running" | "blocked" | "completed" | "failed" | "interrupted";
+export type GoalRunStatus = "running" | "retrying" | "blocked" | "completed" | "failed" | "interrupted";
 export type GoalRunEventKind =
   | "phase-started"
   | "phase-completed"
@@ -285,6 +285,35 @@ export interface GoalRunEvent {
   summary: string;
   payloadJson: string | null;
   createdAt: string;
+}
+
+export interface GoalRunRetryState {
+  retryCount: number;
+  stopRequested: boolean;
+  retryBackoffUntil: string | null;
+  lastFailureSummary: string | null;
+  lastFailureFingerprint: string | null;
+  attentionRequired: boolean;
+}
+
+export interface GoalRunCodeEvidence {
+  pieceId: string;
+  pieceName: string;
+  gitBranch: string | null;
+  gitCommitSha: string | null;
+  gitDiffStat: string | null;
+  generatedFilesArtifact: Artifact | null;
+}
+
+export interface GoalRunDeliverySnapshot {
+  goalRun: GoalRun;
+  currentPlan: WorkPlan | null;
+  blockingPiece: Piece | null;
+  blockingTask: PlanTask | null;
+  retryState: GoalRunRetryState;
+  codeEvidence: GoalRunCodeEvidence | null;
+  runtimeStatus: ProjectRuntimeStatus | null;
+  recentEvents: GoalRunEvent[];
 }
 
 export type GoalRunTimelineEntryKind =
@@ -406,6 +435,8 @@ export type CtoActionName =
   | "runProject"
   | "stopProject"
   | "retryGoalStep";
+
+export type CtoActionExecutionMode = "manual-review" | "autonomous-repair";
 
 export interface CtoAction {
   action: CtoActionName;

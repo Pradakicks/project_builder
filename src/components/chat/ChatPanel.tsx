@@ -8,15 +8,17 @@ import { useDebugStore } from "../../store/useDebugStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { Markdown } from "../ui/Markdown";
 import { devLog } from "../../utils/devLog";
+import { describeAction } from "../../utils/ctoActions";
 import {
-  reviewActions,
-  describeAction,
-  executeActions,
-} from "../../utils/ctoActions";
+  executeCtoActions,
+  reviewCtoActions,
+  logCtoDecision,
+} from "../../api/ctoApi";
 import type {
+  CtoAction,
   CtoDecision,
-  CtoActionReview,
   CtoActionExecutionResult,
+  CtoDecisionReview,
   CtoDecisionRecordInput,
   CapturedScenario,
   DebugConversationMessage,
@@ -24,7 +26,7 @@ import type {
 
 type Tab = "chat" | "decisions";
 
-function formatActionReviewDetails(review: CtoActionReview): string {
+function formatActionReviewDetails(review: CtoDecisionReview): string {
   const sections = [
     `Actions: ${review.actions.length}`,
     ...review.actions.map((action, index) => `${index + 1}. ${describeAction(action)}`),
@@ -40,16 +42,14 @@ function formatActionReviewDetails(review: CtoActionReview): string {
 }
 
 function buildExecutedDecision(
-  assistantText: string,
-  review: CtoActionReview,
+  review: CtoDecisionReview,
   result: CtoActionExecutionResult,
 ): CtoDecisionRecordInput {
-  const summary =
-    review.cleanedContent.trim() || assistantText.trim() || "CTO response";
+  const summary = review.cleanedContent.trim() || review.assistantText.trim() || "CTO response";
   return {
     summary,
     review: {
-      assistantText: assistantText.trim(),
+      assistantText: review.assistantText.trim(),
       cleanedContent: review.cleanedContent,
       actions: review.actions,
       validationErrors: review.validationErrors,
@@ -67,13 +67,12 @@ function buildExecutedDecision(
 }
 
 function buildRejectedDecision(
-  assistantText: string,
-  review: CtoActionReview,
+  review: CtoDecisionReview,
 ): CtoDecisionRecordInput {
   return {
     summary: buildRejectedDecisionSummary(review),
     review: {
-      assistantText: assistantText.trim(),
+      assistantText: review.assistantText.trim(),
       cleanedContent: review.cleanedContent,
       actions: review.actions,
       validationErrors: review.validationErrors,
@@ -83,7 +82,7 @@ function buildRejectedDecision(
   };
 }
 
-function buildRejectedDecisionSummary(review: CtoActionReview): string {
+function buildRejectedDecisionSummary(review: CtoDecisionReview): string {
   const sections = [
     "Rejected CTO action block",
     "Nothing executed because validation failed before dispatch.",
@@ -122,6 +121,7 @@ export function ChatPanel({
   const projectId = project?.id ?? null;
   const showConfirm = useDialogStore((s) => s.showConfirm);
   const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
+  const deliverySnapshot = useGoalRunStore((s) => s.deliverySnapshot);
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const goalRunError = useGoalRunStore((s) => s.lastError);
@@ -141,7 +141,7 @@ export function ChatPanel({
     conversation: DebugConversationMessage[];
     assistantText: string;
     cleanedContent: string;
-    review: CtoActionReview;
+    review: CtoDecisionReview;
   } | null>(null);
   const [executingReview, setExecutingReview] = useState(false);
   const [runtimeDetecting, setRuntimeDetecting] = useState(false);
@@ -153,6 +153,11 @@ export function ChatPanel({
   const listRef = useRef<HTMLDivElement>(null);
   const messages = thread?.messages ?? [];
   const streaming = thread?.streaming ?? false;
+  const activeGoalRun = deliverySnapshot?.goalRun ?? currentGoalRun;
+  const retryState = deliverySnapshot?.retryState ?? null;
+  const blockingPiece = deliverySnapshot?.blockingPiece ?? null;
+  const blockingTask = deliverySnapshot?.blockingTask ?? null;
+  const runtimeEvidence = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
 
   const refreshDecisions = (decision: CtoDecision) => {
     setDecisions((current) => {
@@ -189,7 +194,7 @@ export function ChatPanel({
     conversation: DebugConversationMessage[];
     assistantText: string | null;
     cleanedContent: string | null;
-    review: CtoActionReview | null;
+    review: CtoDecisionReview | null;
     decision: CtoDecisionRecordInput | null;
     error: string | null;
     scenarioProjectId: string;
@@ -296,7 +301,7 @@ export function ChatPanel({
         }
 
         if (payload.done) {
-          const review = reviewActions(streamBuffer);
+          const review = await reviewCtoActions(streamBuffer);
           useDebugStore.getState().recordEvent({
             kind: "cto-response",
             level: "info",
@@ -342,7 +347,7 @@ export function ChatPanel({
               `CTO action block rejected: ${review.validationErrors[0]}. Nothing executed.`,
               "warning",
             );
-            const rejectedDecision = buildRejectedDecision(streamBuffer, review);
+            const rejectedDecision = buildRejectedDecision(review);
             await captureScenario(
               buildScenario({
                 status: "rejected",
@@ -560,9 +565,9 @@ export function ChatPanel({
     const addToast = useToastStore.getState().addToast;
     let executedDecision: CtoDecisionRecordInput | null = null;
     try {
-      const result = await executeActions(
-        currentReview.review.actions,
+      const result = await executeCtoActions(
         currentReview.projectId,
+        currentReview.review,
       );
       const isOriginProjectActive =
         useAppStore.getState().activeProjectId === currentReview.projectId &&
@@ -584,9 +589,7 @@ export function ChatPanel({
         );
       }
 
-      const { logCtoDecision } = await import("../../api/ctoApi");
       executedDecision = buildExecutedDecision(
-        currentReview.assistantText,
         currentReview.review,
         result,
       );
@@ -783,7 +786,7 @@ export function ChatPanel({
 
       {tab === "chat" && (
         <>
-          {currentGoalRun && currentGoalRun.projectId === projectId ? (
+          {activeGoalRun && activeGoalRun.projectId === projectId ? (
             <div className="mx-3 mt-3 rounded border border-emerald-900/50 bg-emerald-950/20 p-3 text-xs">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -791,16 +794,21 @@ export function ChatPanel({
                     Goal run in progress
                   </p>
                   <p className="mt-1 text-[11px] text-gray-300">
-                    {currentGoalRun.prompt}
+                    {activeGoalRun.prompt}
                   </p>
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="rounded bg-emerald-900/40 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
-                    {currentGoalRun.status} / {currentGoalRun.phase}
+                    {activeGoalRun.status} / {activeGoalRun.phase}
                   </p>
                   {orchestrating ? (
                     <p className="mt-1 text-[10px] text-emerald-300">
                       Autopilot advancing
+                    </p>
+                  ) : null}
+                  {retryState?.attentionRequired || activeGoalRun.attentionRequired ? (
+                    <p className="mt-1 rounded bg-amber-900/40 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+                      attention required
                     </p>
                   ) : null}
                 </div>
@@ -809,40 +817,53 @@ export function ChatPanel({
                 <p>
                   Plan:{" "}
                   <span className="font-mono text-gray-100">
-                    {currentGoalRun.currentPlanId ?? "none"}
+                    {activeGoalRun.currentPlanId ?? "none"}
                   </span>
                 </p>
                 <p>
                   Runtime:{" "}
                   <span className="font-mono text-gray-100">
-                    {runtimeStatus?.session?.status ?? currentGoalRun.runtimeStatusSummary ?? "idle"}
+                    {runtimeEvidence?.session?.status ?? activeGoalRun.runtimeStatusSummary ?? "idle"}
+                  </span>
+                </p>
+                <p>
+                  Block:{" "}
+                  <span className="font-mono text-gray-100">
+                    {blockingPiece?.name ?? "none"}
+                    {blockingTask ? ` / ${blockingTask.title}` : ""}
+                  </span>
+                </p>
+                <p>
+                  Retries:{" "}
+                  <span className="font-mono text-gray-100">
+                    {retryState?.retryCount ?? activeGoalRun.retryCount}
                   </span>
                 </p>
               </div>
-              {currentGoalRun.lastFailureSummary || goalRunError ? (
+              {activeGoalRun.lastFailureSummary || goalRunError ? (
                 <div className="mt-2 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-1 text-[11px] text-amber-100">
-                  {currentGoalRun.lastFailureSummary ?? goalRunError}
+                  {activeGoalRun.lastFailureSummary ?? goalRunError}
                 </div>
               ) : null}
 
               {/* Interrupted: run was mid-execution when the app closed */}
-              {currentGoalRun.status === "interrupted" && (
+              {activeGoalRun.status === "interrupted" && (
                 <div className="mt-3 space-y-2">
                   <p className="text-[11px] text-amber-300">
                     This run was interrupted when the app closed.
                   </p>
                   <button
-                    onClick={() => void useGoalRunStore.getState().retryGoalRun(currentGoalRun.id)}
+                    onClick={() => void useGoalRunStore.getState().retryGoalRun(activeGoalRun.id)}
                     className="w-full rounded border border-amber-700 bg-amber-900/20 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40"
                   >
-                    Resume from {currentGoalRun.phase}
+                    Resume from {activeGoalRun.phase}
                   </button>
                 </div>
               )}
 
               {/* Blocked at runtime-configuration: show agent retry + manual form */}
-              {currentGoalRun.status === "blocked" &&
-               currentGoalRun.phase === "runtime-configuration" && (
+              {activeGoalRun.status === "blocked" &&
+               activeGoalRun.phase === "runtime-configuration" && (
                 <div className="mt-3 space-y-2">
                   <p className="text-[11px] text-gray-400">
                     The autopilot could not determine how to run the generated project.
@@ -1012,7 +1033,7 @@ export function ChatPanel({
 
               <div className="mt-2 space-y-1">
                 {pendingReview.review.actions.length > 0 ? (
-                  pendingReview.review.actions.map((action, index) => (
+                  pendingReview.review.actions.map((action: CtoAction, index: number) => (
                     <div
                       key={`${pendingReview.requestId}-${index}`}
                       className="flex items-start gap-2 text-[11px] text-gray-200"
@@ -1028,7 +1049,7 @@ export function ChatPanel({
                 ) : null}
                 {pendingReview.review.validationErrors.length > 0 ? (
                   <div className="rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-[11px] text-red-200">
-                    {pendingReview.review.validationErrors.map((error, index) => (
+                    {pendingReview.review.validationErrors.map((error: string, index: number) => (
                       <p key={`${pendingReview.requestId}-validation-${index}`}>{error}</p>
                     ))}
                   </div>

@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { GoalRun, GoalRunEvent, ProjectRuntimeStatus } from "../types";
+import type {
+  GoalRun,
+  GoalRunDeliverySnapshot,
+  GoalRunEvent,
+  ProjectRuntimeStatus,
+} from "../types";
 import { devLog } from "../utils/devLog";
 import * as goalRunApi from "../api/goalRunApi";
 import * as runtimeApi from "../api/runtimeApi";
@@ -9,6 +14,7 @@ interface GoalRunStore {
   projectId: string | null;
   goalRuns: GoalRun[];
   currentGoalRun: GoalRun | null;
+  deliverySnapshot: GoalRunDeliverySnapshot | null;
   goalRunEvents: GoalRunEvent[];
   runtimeStatus: ProjectRuntimeStatus | null;
   runtimeLogs: string[];
@@ -17,6 +23,7 @@ interface GoalRunStore {
   lastError: string | null;
   loadGoalRuns: (projectId: string) => Promise<void>;
   loadGoalRunEvents: (goalRunId: string) => Promise<void>;
+  refreshDeliverySnapshot: (goalRunId: string) => Promise<void>;
   selectGoalRun: (goalRunId: string) => Promise<void>;
   beginPromptRun: (projectId: string, prompt: string) => Promise<GoalRun>;
   continueAutopilot: (goalRunId: string) => Promise<void>;
@@ -39,42 +46,38 @@ function syncGoalRunState(goalRun: GoalRun) {
   useGoalRunStore.setState((state) => ({
     currentGoalRun: goalRun,
     goalRuns: [goalRun, ...state.goalRuns.filter((run) => run.id !== goalRun.id)],
-    orchestrating: goalRun.status === "running",
+    orchestrating:
+      goalRun.status === "running" || goalRun.status === "retrying",
   }));
 }
 
 async function refreshGoalRunState(goalRunId: string) {
-  const store = useGoalRunStore.getState();
-  const activeProjectId = store.projectId;
-  const goalRun = await goalRunApi.getGoalRun(goalRunId);
-  const [events, runtimeStatus, logs] = await Promise.all([
-    goalRunApi.getGoalRunEvents(goalRunId).catch(() => []),
-    activeProjectId
-      ? runtimeApi.getRuntimeStatus(activeProjectId).catch(() => null)
-      : Promise.resolve(null),
-    activeProjectId
-      ? runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
-          path: null,
-          lines: [],
-        }))
-      : Promise.resolve({ path: null, lines: [] }),
-  ]);
+  const snapshot = await goalRunApi.getGoalRunDeliverySnapshot(goalRunId);
+  const goalRun = snapshot.goalRun;
 
   useGoalRunStore.setState((state) => ({
     currentGoalRun:
       state.currentGoalRun?.id === goalRun.id ? goalRun : state.currentGoalRun,
     goalRuns: [goalRun, ...state.goalRuns.filter((run) => run.id !== goalRun.id)],
-    goalRunEvents: state.currentGoalRun?.id === goalRun.id ? events : state.goalRunEvents,
-    runtimeStatus: runtimeStatus ?? state.runtimeStatus,
-    runtimeLogs: logs.lines,
-    orchestrating: goalRun.status === "running",
+    deliverySnapshot:
+      state.currentGoalRun?.id === goalRun.id ? snapshot : state.deliverySnapshot,
+    goalRunEvents:
+      state.currentGoalRun?.id === goalRun.id
+        ? snapshot.recentEvents
+        : state.goalRunEvents,
+    runtimeStatus: snapshot.runtimeStatus ?? state.runtimeStatus,
+    runtimeLogs: snapshot.runtimeStatus?.session?.recentLogs ?? [],
+    orchestrating:
+      goalRun.status === "running" || goalRun.status === "retrying",
     lastError:
-      goalRun.status === "failed" || goalRun.status === "blocked"
+      goalRun.status === "failed" ||
+      goalRun.status === "blocked" ||
+      goalRun.status === "retrying"
         ? goalRun.lastFailureSummary ?? goalRun.blockerReason ?? state.lastError
         : null,
   }));
 
-  if (goalRun.status !== "running") {
+  if (goalRun.status !== "running" && goalRun.status !== "retrying") {
     stopPolling();
   }
 }
@@ -107,6 +110,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   projectId: null,
   goalRuns: [],
   currentGoalRun: null,
+  deliverySnapshot: null,
   goalRunEvents: [],
   runtimeStatus: null,
   runtimeLogs: [],
@@ -122,19 +126,26 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         runtimeApi.getRuntimeStatus(projectId).catch(() => null),
       ]);
       const currentGoalRun = goalRuns[0] ?? null;
-      const goalRunEvents = currentGoalRun
-        ? await goalRunApi.getGoalRunEvents(currentGoalRun.id).catch(() => [])
-        : [];
+      const snapshot = currentGoalRun
+        ? await goalRunApi.getGoalRunDeliverySnapshot(currentGoalRun.id).catch(() => null)
+        : null;
       set({
         projectId,
         goalRuns,
         currentGoalRun,
-        goalRunEvents,
-        runtimeStatus,
+        deliverySnapshot: snapshot,
+        goalRunEvents: snapshot?.recentEvents ?? [],
+        runtimeStatus: snapshot?.runtimeStatus ?? runtimeStatus,
+        runtimeLogs: snapshot?.runtimeStatus?.session?.recentLogs ?? [],
         loading: false,
-        orchestrating: currentGoalRun?.status === "running",
+        orchestrating:
+          currentGoalRun?.status === "running" ||
+          currentGoalRun?.status === "retrying",
       });
-      if (currentGoalRun?.status === "running") {
+      if (
+        currentGoalRun?.status === "running" ||
+        currentGoalRun?.status === "retrying"
+      ) {
         ensurePolling(currentGoalRun.id);
       } else {
         stopPolling();
@@ -148,14 +159,30 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
 
   loadGoalRunEvents: async (goalRunId) => {
     try {
-      const events = await goalRunApi.getGoalRunEvents(goalRunId);
+      const snapshot = await goalRunApi.getGoalRunDeliverySnapshot(goalRunId);
       set((state) => ({
+        deliverySnapshot:
+          state.currentGoalRun?.id === goalRunId ? snapshot : state.deliverySnapshot,
         goalRunEvents:
-          state.currentGoalRun?.id === goalRunId ? events : state.goalRunEvents,
+          state.currentGoalRun?.id === goalRunId
+            ? snapshot.recentEvents
+            : state.goalRunEvents,
+        runtimeStatus:
+          state.currentGoalRun?.id === goalRunId
+            ? snapshot.runtimeStatus
+            : state.runtimeStatus,
+        runtimeLogs:
+          state.currentGoalRun?.id === goalRunId
+            ? snapshot.runtimeStatus?.session?.recentLogs ?? []
+            : state.runtimeLogs,
       }));
     } catch (error) {
       devLog("warn", "Store:GoalRun", "Failed to load goal run events", error);
     }
+  },
+
+  refreshDeliverySnapshot: async (goalRunId) => {
+    await refreshGoalRunState(goalRunId);
   },
 
   selectGoalRun: async (goalRunId) => {
@@ -163,9 +190,8 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       get().goalRuns.find((run) => run.id === goalRunId) ??
       (await goalRunApi.getGoalRun(goalRunId));
     syncGoalRunState(current);
-    const events = await goalRunApi.getGoalRunEvents(goalRunId).catch(() => []);
-    set({ goalRunEvents: events });
-    if (current.status === "running") {
+    await get().refreshDeliverySnapshot(goalRunId);
+    if (current.status === "running" || current.status === "retrying") {
       ensurePolling(goalRunId);
     }
   },
@@ -174,7 +200,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     const goalRun = await goalRunApi.createGoalRun(projectId, prompt);
     set({ projectId, lastError: null });
     syncGoalRunState(goalRun);
-    set({ goalRunEvents: [] });
+    set({ deliverySnapshot: null, goalRunEvents: [] });
     return goalRun;
   },
 
@@ -209,12 +235,13 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       stopRequested: false,
     });
     await get().continueAutopilot(goalRunId);
+    await get().refreshDeliverySnapshot(goalRunId);
   },
 
   stopGoalRun: async (goalRunId) => {
     const stopped = await goalRunApi.stopGoalRun(goalRunId);
     syncGoalRunState(stopped);
-    await get().loadGoalRunEvents(goalRunId);
+    await get().refreshDeliverySnapshot(goalRunId);
     stopPolling();
     toast("Autopilot stopped", "info");
   },
@@ -260,6 +287,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       projectId: null,
       goalRuns: [],
       currentGoalRun: null,
+      deliverySnapshot: null,
       goalRunEvents: [],
       runtimeStatus: null,
       runtimeLogs: [],

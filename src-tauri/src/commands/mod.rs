@@ -1,5 +1,6 @@
 pub mod agent_commands;
 pub mod connection_commands;
+pub mod cto_action_engine;
 pub mod debug_commands;
 pub mod goal_run_executor;
 pub mod goal_run_commands;
