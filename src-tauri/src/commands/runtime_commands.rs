@@ -3,8 +3,9 @@ use crate::agent::runner::resolve_llm_config;
 use crate::db::Database;
 use crate::llm::{self, LlmConfig};
 use crate::models::{
-    Project, ProjectRuntimeSession, ProjectRuntimeSpec, ProjectRuntimeStatus,
+    CheckKind, Project, ProjectRuntimeSession, ProjectRuntimeSpec, ProjectRuntimeStatus,
     RuntimeLogTail, RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
+    VerificationCheck, VerificationResult,
 };
 use crate::AppState;
 use std::collections::{HashMap, VecDeque};
@@ -1077,7 +1078,7 @@ pub(crate) async fn verify_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
-) -> Result<String, String> {
+) -> Result<VerificationResult, String> {
     let project = {
         let db = state_db.lock().map_err(|e| e.to_string())?;
         db.get_project(&project_id)?
@@ -1102,6 +1103,10 @@ pub(crate) async fn verify_runtime_impl(
         return Err("Runtime must be running before verification".to_string());
     }
 
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let mut checks: Vec<VerificationCheck> = Vec::new();
+
+    // --- Step 1: shell verify command (if configured) ---
     if let Some(verify_command) = spec.verify_command.as_deref() {
         let handle = {
             let sessions = runtime_sessions.lock().map_err(|e| e.to_string())?;
@@ -1110,6 +1115,7 @@ pub(crate) async fn verify_runtime_impl(
                 .cloned()
                 .ok_or_else(|| "Runtime session not found".to_string())?
         };
+        let check_start = std::time::Instant::now();
         let exit_code = run_shell_command_to_completion(
             verify_command,
             &working_directory,
@@ -1118,25 +1124,100 @@ pub(crate) async fn verify_runtime_impl(
             300,
         )
         .await?;
-        if exit_code != 0 {
-            return Err(format!("Verify command exited with code {exit_code}"));
+        let duration_ms = check_start.elapsed().as_millis() as i64;
+        let passed = exit_code == 0;
+        checks.push(VerificationCheck {
+            name: "verify command".to_string(),
+            kind: CheckKind::Shell,
+            passed,
+            detail: if passed {
+                format!("exited 0 via `{verify_command}`")
+            } else {
+                format!("exited {exit_code} via `{verify_command}`")
+            },
+            duration_ms,
+        });
+        if !passed {
+            let finished_at = chrono::Utc::now().to_rfc3339();
+            return Ok(VerificationResult {
+                passed: false,
+                message: format!("Verify command failed (exit {exit_code})"),
+                checks,
+                started_at,
+                finished_at,
+            });
         }
-        return Ok(format!("Verification passed via `{verify_command}`"));
     }
 
-    let url = resolve_runtime_url(&spec).ok_or_else(|| {
-        "Runtime verification requires verifyCommand or appUrl/portHint".to_string()
-    })?;
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("Runtime health check failed with status {}", response.status()));
+    // --- Step 2: HTTP readiness check (if app URL is available) ---
+    if let Some(url) = resolve_runtime_url(&spec) {
+        let client = reqwest::Client::new();
+        let check_start = std::time::Instant::now();
+        let result = poll_http_until_ready(
+            &client,
+            &url,
+            200,
+            Duration::from_secs(60),
+            Duration::from_millis(500),
+        )
+        .await;
+        let duration_ms = check_start.elapsed().as_millis() as i64;
+        match result {
+            Ok(_) => {
+                checks.push(VerificationCheck {
+                    name: "http readiness".to_string(),
+                    kind: CheckKind::Http,
+                    passed: true,
+                    detail: format!("HTTP 200 from {url}"),
+                    duration_ms,
+                });
+            }
+            Err(err) => {
+                checks.push(VerificationCheck {
+                    name: "http readiness".to_string(),
+                    kind: CheckKind::Http,
+                    passed: false,
+                    detail: err.clone(),
+                    duration_ms,
+                });
+                let finished_at = chrono::Utc::now().to_rfc3339();
+                return Ok(VerificationResult {
+                    passed: false,
+                    message: format!("HTTP readiness check failed: {err}"),
+                    checks,
+                    started_at,
+                    finished_at,
+                });
+            }
+        }
     }
-    Ok(format!("Runtime responded successfully at {url}"))
+
+    // --- Step 3: no checks configured ---
+    if checks.is_empty() {
+        checks.push(VerificationCheck {
+            name: "no verification configured".to_string(),
+            kind: CheckKind::Skipped,
+            passed: true,
+            detail: "No verifyCommand or appUrl/portHint configured — skipping verification"
+                .to_string(),
+            duration_ms: 0,
+        });
+    }
+
+    let passed_count = checks.iter().filter(|c| c.passed).count();
+    let total_count = checks.len();
+    let finished_at = chrono::Utc::now().to_rfc3339();
+    Ok(VerificationResult {
+        passed: true,
+        message: if total_count == 1 && checks[0].kind == CheckKind::Skipped {
+            "No verification configured — skipped".to_string()
+        } else {
+            format!("{passed_count}/{total_count} checks passed")
+        },
+        checks,
+        started_at,
+        finished_at,
+    })
 }
 
 pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
@@ -1348,7 +1429,7 @@ pub async fn tail_runtime_logs(
 pub async fn verify_runtime(
     state: tauri::State<'_, AppState>,
     project_id: String,
-) -> Result<String, String> {
+) -> Result<VerificationResult, String> {
     info!(project_id = %project_id, "IPC: verify_runtime");
     verify_runtime_impl(&state.db, &state.runtime_sessions, project_id).await
 }

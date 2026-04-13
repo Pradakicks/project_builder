@@ -3,8 +3,9 @@ use crate::commands::runtime_commands::{self, RuntimeSessions};
 use crate::db::Database;
 use crate::db::AgentHistoryMetadata;
 use crate::models::{
-    GoalRun, GoalRunCodeEvidence, GoalRunDeliverySnapshot, GoalRunEvent, GoalRunPhase,
-    GoalRunRetryState, GoalRunStatus, GoalRunUpdate, LiveActivity, PlanTask, TaskStatus, WorkPlan,
+    parse_verification_result, GoalRun, GoalRunCodeEvidence, GoalRunDeliverySnapshot, GoalRunEvent,
+    GoalRunPhase, GoalRunRetryState, GoalRunStatus, GoalRunUpdate, LiveActivity, PlanTask,
+    TaskStatus, VerificationResult, WorkPlan,
 };
 use crate::AppState;
 use tauri::{AppHandle, State};
@@ -325,6 +326,11 @@ pub(crate) async fn build_goal_run_delivery_snapshot_impl(
         None
     };
 
+    let verification_result: Option<VerificationResult> = goal_run
+        .verification_summary
+        .as_deref()
+        .map(parse_verification_result);
+
     Ok(GoalRunDeliverySnapshot {
         goal_run: goal_run.clone(),
         current_plan,
@@ -342,6 +348,7 @@ pub(crate) async fn build_goal_run_delivery_snapshot_impl(
         runtime_status: Some(runtime_status),
         recent_events,
         live_activity,
+        verification_result,
     })
 }
 

@@ -4,6 +4,7 @@ use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, Message};
 use crate::models::{
     GoalRun, GoalRunEventKind, GoalRunPhase, GoalRunStatus, GoalRunUpdate, OutputMode, Phase,
+    VerificationResult,
 };
 use crate::AppState;
 use serde_json::{json, Value};
@@ -650,42 +651,23 @@ async fn advance_goal_run<R: tauri::Runtime>(
             ..Default::default()
         },
     )?;
-    let verification =
+
+    let verification_result =
         runtime_commands::verify_runtime_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await;
-    match verification {
-        Ok(summary) => {
-            update_goal_run_state(
-                &state.db,
-                goal_run_id,
-                GoalRunUpdate {
-                    phase: Some(GoalRunPhase::Verification),
-                    status: Some(GoalRunStatus::Completed),
-                    blocker_reason: Some(None),
-                    last_failure_summary: Some(None),
-                    verification_summary: Some(Some(summary.clone())),
-                    attention_required: Some(false),
-                    ..Default::default()
-                },
-            )?;
-            log_event(
-                &state.db,
-                goal_run_id,
-                GoalRunPhase::Verification,
-                GoalRunEventKind::PhaseCompleted,
-                "Verification completed",
-                Some(json!({ "summary": summary })),
-            );
-        }
-        Err(error) => {
-            let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &error);
+
+    let verification_result: VerificationResult = match verification_result {
+        Ok(result) => result,
+        Err(infra_error) => {
+            // Infrastructure error (runtime not running, spec missing, etc.) — blocked.
+            let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &infra_error);
             update_goal_run_state(
                 &state.db,
                 goal_run_id,
                 GoalRunUpdate {
                     phase: Some(GoalRunPhase::Verification),
                     status: Some(GoalRunStatus::Blocked),
-                    blocker_reason: Some(Some(error.clone())),
-                    last_failure_summary: Some(Some(error.clone())),
+                    blocker_reason: Some(Some(infra_error.clone())),
+                    last_failure_summary: Some(Some(infra_error.clone())),
                     last_failure_fingerprint: Some(Some(fingerprint.clone())),
                     attention_required: Some(true),
                     ..Default::default()
@@ -696,10 +678,63 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 goal_run_id,
                 GoalRunPhase::Verification,
                 GoalRunEventKind::Blocked,
-                &error,
+                &infra_error,
                 Some(json!({ "fingerprint": fingerprint })),
             );
+            return Ok(());
         }
+    };
+
+    let result_json = serde_json::to_string(&verification_result)
+        .unwrap_or_else(|_| verification_result.message.clone());
+
+    if verification_result.passed {
+        update_goal_run_state(
+            &state.db,
+            goal_run_id,
+            GoalRunUpdate {
+                phase: Some(GoalRunPhase::Verification),
+                status: Some(GoalRunStatus::Completed),
+                blocker_reason: Some(None),
+                last_failure_summary: Some(None),
+                verification_summary: Some(Some(result_json)),
+                attention_required: Some(false),
+                ..Default::default()
+            },
+        )?;
+        log_event(
+            &state.db,
+            goal_run_id,
+            GoalRunPhase::Verification,
+            GoalRunEventKind::PhaseCompleted,
+            "Verification completed",
+            Some(json!({ "message": verification_result.message })),
+        );
+    } else {
+        let error = verification_result.message.clone();
+        let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &error);
+        update_goal_run_state(
+            &state.db,
+            goal_run_id,
+            GoalRunUpdate {
+                phase: Some(GoalRunPhase::Verification),
+                status: Some(GoalRunStatus::Blocked),
+                blocker_reason: Some(Some(error.clone())),
+                last_failure_summary: Some(Some(error.clone())),
+                last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                verification_summary: Some(Some(result_json)),
+                attention_required: Some(true),
+                ..Default::default()
+            },
+        )?;
+        log_event(
+            &state.db,
+            goal_run_id,
+            GoalRunPhase::Verification,
+            GoalRunEventKind::Blocked,
+            &error,
+            Some(json!({ "fingerprint": fingerprint })),
+        );
     }
 
     info!(goal_run_id = %goal_run_id, "Goal run executor finished");
