@@ -9,6 +9,17 @@
 - When new work is identified during implementation (bugs, follow-ups, gaps), add it to the appropriate section in `docs/next-steps.md` immediately.
 - Never leave roadmap progress only in conversation context — if it happened, it must be reflected in the file.
 
+## Live Documentation Philosophy
+
+Documentation and machine-readable state files must always reflect reality. They are not write-once artifacts — they are live records that must be updated whenever anything changes that would affect their accuracy.
+
+- If you write a file that describes how to run the project (e.g. `runtime.json`), you must update it whenever you change anything that affects how the project is run: dependencies, entry point, port, environment variables, build steps.
+- If you add a feature that changes the architecture, update any design docs or spec files that describe that area.
+- Never leave a documentation or state file out of sync with the code. A stale spec is worse than no spec — it actively misleads.
+- The same rule applies to the roadmap (`docs/next-steps.md`), runtime specs, design docs, and any other persistent state the system relies on.
+
+The underlying principle: **agents are the authors of their own memory. If you built it, you own keeping the record accurate.**
+
 ## Commit Policy
 
 - Every code or documentation change made by the coding agent must be committed before the task is considered complete.
