@@ -55,6 +55,7 @@ export function DeliveryPanel() {
   const blockingTask = deliverySnapshot?.blockingTask ?? null;
   const codeEvidence = deliverySnapshot?.codeEvidence ?? null;
   const runtimeLogs = runtimeSnapshot?.session?.recentLogs ?? [];
+  const liveActivity = useGoalRunStore((s) => s.liveActivity);
 
   useEffect(() => {
     if (project?.id) {
@@ -164,6 +165,25 @@ export function DeliveryPanel() {
           <div className="rounded border border-red-900/50 bg-red-950/20 px-3 py-2 text-[11px] text-red-200">
             {lastError}
           </div>
+        )}
+
+        {liveActivity && currentRun?.phase === "implementation" && (
+          <section className="rounded-xl border border-emerald-900/40 bg-emerald-950/20 p-3">
+            <div className="flex items-center gap-1.5 text-[11px] text-emerald-300">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+              <span className="font-medium">{liveActivity.engine ?? "built-in"}</span>
+              <span className="text-emerald-700">→</span>
+              <span className="font-medium">{liveActivity.pieceName}</span>
+              {liveActivity.total > 0 && (
+                <span className="ml-auto text-emerald-600 tabular-nums">
+                  task {liveActivity.currentIndex} / {liveActivity.total}
+                </span>
+              )}
+            </div>
+            {liveActivity.taskTitle && (
+              <p className="mt-1 text-[10px] text-gray-400 truncate">{liveActivity.taskTitle}</p>
+            )}
+          </section>
         )}
 
         {currentRun ? (

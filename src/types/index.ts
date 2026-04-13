@@ -305,6 +305,16 @@ export interface GoalRunCodeEvidence {
   generatedFilesArtifact: Artifact | null;
 }
 
+export interface LiveActivity {
+  pieceId: string;
+  pieceName: string;
+  taskId: string | null;
+  taskTitle: string | null;
+  engine: string | null;
+  currentIndex: number;
+  total: number;
+}
+
 export interface GoalRunDeliverySnapshot {
   goalRun: GoalRun;
   currentPlan: WorkPlan | null;
@@ -314,6 +324,7 @@ export interface GoalRunDeliverySnapshot {
   codeEvidence: GoalRunCodeEvidence | null;
   runtimeStatus: ProjectRuntimeStatus | null;
   recentEvents: GoalRunEvent[];
+  liveActivity: LiveActivity | null;
 }
 
 export type GoalRunTimelineEntryKind =

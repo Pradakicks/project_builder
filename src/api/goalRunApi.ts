@@ -4,7 +4,25 @@ import type {
   GoalRunEvent,
   GoalRunUpdate,
 } from "../types";
-import { loggedInvoke } from "./runtime";
+import { loggedInvoke, listenToEvent } from "./runtime";
+
+export interface ImplementationProgressEvent {
+  goalRunId: string;
+  current: number;
+  total: number;
+  pieceId: string;
+  pieceName: string;
+  taskId: string;
+  taskTitle: string;
+  engine: string;
+  status: "started" | "completed" | "failed";
+}
+
+export function onImplementationProgress(
+  callback: (payload: ImplementationProgressEvent) => void,
+): Promise<import("@tauri-apps/api/event").UnlistenFn> {
+  return listenToEvent<ImplementationProgressEvent>("implementation-progress", callback);
+}
 
 export async function createGoalRun(
   projectId: string,

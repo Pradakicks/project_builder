@@ -125,6 +125,7 @@ export function ChatPanel({
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const goalRunError = useGoalRunStore((s) => s.lastError);
+  const liveActivity = useGoalRunStore((s) => s.liveActivity);
   const thread = useChatStore((s) =>
     projectId ? s.threads[projectId] : undefined,
   );
@@ -843,6 +844,26 @@ export function ChatPanel({
                   ) : null}
                 </div>
               </div>
+              {liveActivity && activeGoalRun.phase === "implementation" && (
+                <div className="mt-2 rounded border border-emerald-900/40 bg-emerald-950/30 px-2 py-1.5 text-[11px]">
+                  <div className="flex items-center gap-1.5 text-emerald-300">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                    <span className="font-medium">{liveActivity.engine ?? "built-in"}</span>
+                    <span className="text-emerald-600">→</span>
+                    <span className="font-medium">{liveActivity.pieceName}</span>
+                    {liveActivity.total > 0 && (
+                      <span className="text-emerald-600">
+                        {liveActivity.currentIndex}/{liveActivity.total}
+                      </span>
+                    )}
+                  </div>
+                  {liveActivity.taskTitle && (
+                    <p className="mt-0.5 truncate text-[10px] text-gray-400">
+                      {liveActivity.taskTitle}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="mt-2 grid gap-2 text-[11px] text-gray-300 md:grid-cols-2">
                 <p>
                   Plan:{" "}

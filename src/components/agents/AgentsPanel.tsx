@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useAgentStore } from "../../store/useAgentStore";
 import { useProjectStore } from "../../store/useProjectStore";
+import { useGoalRunStore } from "../../store/useGoalRunStore";
 
 function StatusPill({ running, success }: { running: boolean; success?: boolean }) {
   if (running) {
@@ -110,6 +111,7 @@ export function AgentsPanel() {
   const pieces = useProjectStore((s) => s.pieces);
   const selectPiece = useProjectStore((s) => s.selectPiece);
   const runs = useAgentStore((s) => s.runs);
+  const liveActivity = useGoalRunStore((s) => s.liveActivity);
 
   // Restore run state for all pieces on mount so the panel is populated
   // without requiring the user to open each piece editor individually.
@@ -162,7 +164,18 @@ export function AgentsPanel() {
     (p) => runs[p.id]?.running === false && runs[p.id]?.success === true,
   );
 
-  const hasAnyRuns = running.length + failed.length + completed.length > 0;
+  // Merge liveActivity from goal-run executor — autopilot pieces may not be in useAgentStore yet
+  const liveActivityPiece =
+    liveActivity &&
+    !running.some((p) => p.id === liveActivity.pieceId)
+      ? pieces.find((p) => p.id === liveActivity.pieceId) ??
+        { id: liveActivity.pieceId, name: liveActivity.pieceName }
+      : null;
+  const effectiveRunning = liveActivityPiece
+    ? [liveActivityPiece as typeof pieces[0], ...running]
+    : running;
+
+  const hasAnyRuns = effectiveRunning.length + failed.length + completed.length > 0;
 
   const handleSelect = (id: string) => {
     selectPiece(id);
@@ -182,7 +195,7 @@ export function AgentsPanel() {
         </div>
       ) : (
         <div className="flex flex-col">
-          <Section title="Running now" pieces={running} onSelect={handleSelect} />
+          <Section title="Running now" pieces={effectiveRunning} onSelect={handleSelect} />
           <Section title="Recently failed" pieces={failed} onSelect={handleSelect} />
           <Section title="Recently completed" pieces={completed} onSelect={handleSelect} />
         </div>

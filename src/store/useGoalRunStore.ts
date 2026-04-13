@@ -3,6 +3,7 @@ import type {
   GoalRun,
   GoalRunDeliverySnapshot,
   GoalRunEvent,
+  LiveActivity,
   ProjectRuntimeStatus,
 } from "../types";
 import { devLog } from "../utils/devLog";
@@ -21,6 +22,8 @@ interface GoalRunStore {
   loading: boolean;
   orchestrating: boolean;
   lastError: string | null;
+  /** Live activity during Implementation phase — updated from events at sub-2s cadence. */
+  liveActivity: LiveActivity | null;
   loadGoalRuns: (projectId: string) => Promise<void>;
   loadGoalRunEvents: (goalRunId: string) => Promise<void>;
   refreshDeliverySnapshot: (goalRunId: string) => Promise<void>;
@@ -37,6 +40,7 @@ interface GoalRunStore {
 
 let pollTimer: ReturnType<typeof window.setInterval> | null = null;
 let polledGoalRunId: string | null = null;
+let unlistenProgress: (() => void) | null = null;
 
 function toast(message: string, kind: "info" | "warning" = "warning") {
   useToastStore.getState().addToast(message, kind);
@@ -69,6 +73,11 @@ async function refreshGoalRunState(goalRunId: string) {
     runtimeLogs: snapshot.runtimeStatus?.session?.recentLogs ?? [],
     orchestrating:
       goalRun.status === "running" || goalRun.status === "retrying",
+    // Reconcile liveActivity from snapshot if the event-driven state is stale
+    liveActivity:
+      state.currentGoalRun?.id === goalRun.id
+        ? (snapshot.liveActivity ?? state.liveActivity)
+        : state.liveActivity,
     lastError:
       goalRun.status === "failed" ||
       goalRun.status === "blocked" ||
@@ -87,7 +96,12 @@ function stopPolling() {
     window.clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (unlistenProgress) {
+    unlistenProgress();
+    unlistenProgress = null;
+  }
   polledGoalRunId = null;
+  useGoalRunStore.setState({ liveActivity: null });
 }
 
 function ensurePolling(goalRunId: string) {
@@ -96,6 +110,32 @@ function ensurePolling(goalRunId: string) {
   }
   stopPolling();
   polledGoalRunId = goalRunId;
+
+  // Register event listener for sub-2s live activity updates
+  void goalRunApi.onImplementationProgress((event) => {
+    if (event.goalRunId !== goalRunId) return;
+    if (event.status === "started") {
+      useGoalRunStore.setState({
+        liveActivity: {
+          pieceId: event.pieceId,
+          pieceName: event.pieceName,
+          taskId: event.taskId,
+          taskTitle: event.taskTitle,
+          engine: event.engine,
+          currentIndex: event.current,
+          total: event.total,
+        },
+      });
+    } else {
+      // completed or failed — clear live activity (next poll will reconcile)
+      useGoalRunStore.setState({ liveActivity: null });
+    }
+  }).then((unlisten) => {
+    unlistenProgress = unlisten;
+  }).catch((error) => {
+    devLog("warn", "Store:GoalRun", "Failed to register implementation-progress listener", error);
+  });
+
   pollTimer = window.setInterval(() => {
     void refreshGoalRunState(goalRunId).catch((error) => {
       devLog("warn", "Store:GoalRun", "Failed to refresh running goal run", error);
@@ -117,6 +157,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   loading: false,
   orchestrating: false,
   lastError: null,
+  liveActivity: null,
 
   loadGoalRuns: async (projectId) => {
     set({ projectId, loading: true, lastError: null });
@@ -294,6 +335,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       loading: false,
       orchestrating: false,
       lastError: null,
+      liveActivity: null,
     });
   },
 }));

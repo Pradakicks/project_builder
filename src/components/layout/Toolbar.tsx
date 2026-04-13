@@ -15,6 +15,7 @@ export function Toolbar() {
   const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
   const deliverySnapshot = useGoalRunStore((s) => s.deliverySnapshot);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
+  const liveActivity = useGoalRunStore((s) => s.liveActivity);
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
   const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
@@ -128,9 +129,15 @@ export function Toolbar() {
                   ? "bg-blue-900/60 text-blue-300"
                   : "bg-red-900/60 text-red-300"
             }`}
-            title={`Goal run phase: ${currentGoalRun.phase}`}
+            title={
+              liveActivity && currentGoalRun.phase === "implementation"
+                ? `${liveActivity.pieceName}${liveActivity.taskTitle ? ` · ${liveActivity.taskTitle}` : ""}`
+                : `Goal run phase: ${currentGoalRun.phase}`
+            }
           >
-            {currentGoalRun.status} · {currentGoalRun.phase}
+            {liveActivity && currentGoalRun.phase === "implementation"
+              ? `${liveActivity.engine ?? "built-in"} → ${liveActivity.pieceName}`
+              : `${currentGoalRun.status} · ${currentGoalRun.phase}`}
           </span>
           {attentionRequired ? (
             <span
