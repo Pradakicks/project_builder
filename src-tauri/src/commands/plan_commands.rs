@@ -93,6 +93,7 @@ pub async fn run_all_plan_tasks(
     info!(plan_id = %plan_id, "IPC: run_all_plan_tasks");
     agent::runner::run_all_plan_tasks(
         &plan_id,
+        None,
         &state.db,
         &state.running_pieces,
         &app_handle,

@@ -732,7 +732,7 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
                     reason: Some("Task execution changes workspace state and is not rollback-safe".to_string()),
                     kind: None,
                 });
-                runner::run_all_plan_tasks(plan_id, state, &app_state.running_pieces, app_handle).await?;
+                runner::run_all_plan_tasks(plan_id, None, state, &app_state.running_pieces, app_handle).await?;
                 switch_to_tab = Some("plan".to_string());
                 Ok(())
             }
