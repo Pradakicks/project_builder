@@ -291,6 +291,47 @@ fn resolve_runtime_url(spec: &ProjectRuntimeSpec) -> Option<String> {
         .or_else(|| spec.port_hint.map(|port| format!("http://127.0.0.1:{port}")))
 }
 
+/// Poll `url` with GET until `expected_status` is returned or `timeout` elapses.
+///
+/// Returns `Ok(elapsed)` on success, `Err(last_error_message)` on timeout.
+/// The caller is responsible for any process-lifecycle concerns (kill on timeout, etc.).
+async fn poll_http_until_ready(
+    client: &reqwest::Client,
+    url: &str,
+    expected_status: u16,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<Duration, String> {
+    let started = tokio::time::Instant::now();
+    let deadline = started + timeout;
+    let mut last_error = None;
+
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(last_error.unwrap_or_else(|| {
+                format!("Timed out waiting for HTTP response at {url}")
+            }));
+        }
+
+        match client.get(url).send().await {
+            Ok(response) if response.status().as_u16() == expected_status => {
+                return Ok(tokio::time::Instant::now().duration_since(started));
+            }
+            Ok(response) => {
+                last_error = Some(format!(
+                    "Unexpected status {} from {url}",
+                    response.status()
+                ));
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
+        }
+
+        sleep(interval).await;
+    }
+}
+
 fn shell_command(shell_cmd: &str, working_dir: &Path) -> Command {
     let mut cmd = if cfg!(windows) {
         let mut command = Command::new("cmd");
@@ -649,15 +690,22 @@ pub(crate) async fn start_runtime_session(
                 path.trim_start_matches('/')
             );
             let client = reqwest::Client::new();
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(*timeout_seconds);
+            let deadline_dur = Duration::from_secs(*timeout_seconds);
             let interval = Duration::from_millis(*poll_interval_ms);
-            let mut last_error = None;
+            let deadline = tokio::time::Instant::now() + deadline_dur;
 
             loop {
+                // Check process liveness before every poll attempt.
+                let snapshot = refresh_runtime_session(&handle).await?;
+                if matches!(snapshot.status, RuntimeSessionStatus::Failed | RuntimeSessionStatus::Stopped)
+                {
+                    return Err(snapshot
+                        .last_error
+                        .unwrap_or_else(|| "Runtime process exited before readiness".to_string()));
+                }
+
                 if tokio::time::Instant::now() > deadline {
-                    let error = last_error.unwrap_or_else(|| {
-                        format!("Timed out waiting for runtime readiness at {target}")
-                    });
+                    let error = format!("Timed out waiting for runtime readiness at {target}");
                     let _ = mark_runtime_failed(&handle, error.clone()).await;
                     let mut child_guard = handle.child.lock().await;
                     if let Some(child) = child_guard.as_mut() {
@@ -669,23 +717,7 @@ pub(crate) async fn start_runtime_session(
 
                 match client.get(&target).send().await {
                     Ok(response) if response.status().as_u16() == *expected_status => break,
-                    Ok(response) => {
-                        last_error = Some(format!(
-                            "Unexpected readiness status: {}",
-                            response.status()
-                        ));
-                    }
-                    Err(error) => {
-                        last_error = Some(error.to_string());
-                    }
-                }
-
-                let snapshot = refresh_runtime_session(&handle).await?;
-                if matches!(snapshot.status, RuntimeSessionStatus::Failed | RuntimeSessionStatus::Stopped)
-                {
-                    return Err(snapshot
-                        .last_error
-                        .unwrap_or_else(|| "Runtime process exited before readiness".to_string()));
+                    Ok(_) | Err(_) => {}
                 }
 
                 sleep(interval).await;
