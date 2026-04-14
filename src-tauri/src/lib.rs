@@ -108,6 +108,7 @@ pub fn run() {
             commands::runtime_commands::get_runtime_status,
             commands::runtime_commands::detect_runtime,
             commands::runtime_commands::detect_runtime_with_agent,
+            commands::runtime_commands::get_runtime_detection_hint,
             commands::runtime_commands::start_runtime,
             commands::runtime_commands::stop_runtime,
             commands::runtime_commands::tail_runtime_logs,
