@@ -79,6 +79,9 @@ pub fn update_goal_run(
     update_goal_run_impl(&state.db, goal_run_id, updates)
 }
 
+/// Re-enters the executor at the goal run's current stored phase.
+/// Only failure metadata is cleared; `retry_count` and `phase` are preserved.
+/// Pairs with `advance_goal_run`'s phase-ordinal skip guards.
 #[tracing::instrument(skip(state, app_handle))]
 #[tauri::command]
 pub fn resume_goal_run(
@@ -93,6 +96,9 @@ pub fn resume_goal_run(
             stop_requested: Some(false),
             status: Some(GoalRunStatus::Running),
             blocker_reason: Some(None),
+            last_failure_summary: Some(None),
+            last_failure_fingerprint: Some(None),
+            attention_required: Some(false),
             ..Default::default()
         },
     )?;

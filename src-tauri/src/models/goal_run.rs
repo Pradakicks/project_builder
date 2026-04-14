@@ -61,6 +61,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn goal_run_phase_ordinal_is_strictly_increasing() {
+        let phases = [
+            GoalRunPhase::PromptReceived,
+            GoalRunPhase::Planning,
+            GoalRunPhase::Implementation,
+            GoalRunPhase::Merging,
+            GoalRunPhase::RuntimeConfiguration,
+            GoalRunPhase::RuntimeExecution,
+            GoalRunPhase::Verification,
+        ];
+        for window in phases.windows(2) {
+            assert!(
+                window[0].ordinal() < window[1].ordinal(),
+                "{:?} ordinal should be less than {:?} ordinal",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    #[test]
     fn parse_verification_result_handles_structured_json() {
         let result = VerificationResult {
             passed: true,
@@ -123,6 +144,20 @@ pub enum GoalRunPhase {
     RuntimeConfiguration,
     RuntimeExecution,
     Verification,
+}
+
+impl GoalRunPhase {
+    pub fn ordinal(&self) -> u8 {
+        match self {
+            GoalRunPhase::PromptReceived => 0,
+            GoalRunPhase::Planning => 1,
+            GoalRunPhase::Implementation => 2,
+            GoalRunPhase::Merging => 3,
+            GoalRunPhase::RuntimeConfiguration => 4,
+            GoalRunPhase::RuntimeExecution => 5,
+            GoalRunPhase::Verification => 6,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
