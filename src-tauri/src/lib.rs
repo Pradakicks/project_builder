@@ -55,6 +55,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             db: Mutex::new(database),
             running_pieces: Mutex::new(HashSet::new()),
