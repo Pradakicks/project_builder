@@ -583,6 +583,20 @@ fn validate_runtime_spec(spec: &ProjectRuntimeSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn enforce_min_readiness_timeout(spec: &mut ProjectRuntimeSpec) {
+    const MIN_SECS: u64 = 90;
+    match &mut spec.readiness_check {
+        RuntimeReadinessCheck::Http { timeout_seconds, .. }
+        | RuntimeReadinessCheck::TcpPort { timeout_seconds, .. }
+            if *timeout_seconds < MIN_SECS =>
+        {
+            debug!("Bumping LLM-detected readiness timeout from {}s to {}s", timeout_seconds, MIN_SECS);
+            *timeout_seconds = MIN_SECS;
+        }
+        _ => {}
+    }
+}
+
 fn resolve_runtime_url(spec: &ProjectRuntimeSpec) -> Option<String> {
     spec.app_url
         .as_ref()
@@ -1622,7 +1636,10 @@ pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
         }
     });
 
-    let _ = provider.chat_stream(&messages, &config, tx).await;
+    if let Err(e) = provider.chat_stream(&messages, &config, tx).await {
+        warn!(project_id = %project_id, error = %e, "LLM runtime detection stream error — falling back");
+        return Ok(None);
+    }
 
     let _ = chunk_forwarder.await;
     let _ = app_handle.emit(
@@ -1655,8 +1672,18 @@ pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
         return Ok(None);
     }
 
-    let spec = serde_json::from_str::<ProjectRuntimeSpec>(json_str).map_err(|e| e.to_string())?;
-    validate_runtime_spec(&spec)?;
+    let mut spec = match serde_json::from_str::<ProjectRuntimeSpec>(json_str) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(project_id = %project_id, error = %e, raw = json_str, "LLM runtime detection produced unparseable JSON");
+            return Ok(None);
+        }
+    };
+    if let Err(e) = validate_runtime_spec(&spec) {
+        warn!(project_id = %project_id, error = %e, "LLM runtime detection produced invalid spec");
+        return Ok(None);
+    }
+    enforce_min_readiness_timeout(&mut spec);
     Ok(Some(spec))
 }
 
