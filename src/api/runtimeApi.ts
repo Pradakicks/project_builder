@@ -54,3 +54,8 @@ export async function tailRuntimeLogs(
 export async function verifyRuntime(projectId: string): Promise<VerificationResult> {
   return loggedInvoke("verify_runtime", { projectId });
 }
+
+export async function openRuntimeInBrowser(url: string): Promise<void> {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
+}

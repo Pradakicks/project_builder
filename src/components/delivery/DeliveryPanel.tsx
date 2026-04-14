@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
+import { openRuntimeInBrowser } from "../../api/runtimeApi";
 import type { GoalRunEvent, GoalRunTimelineEntry, VerificationResult } from "../../types";
 
 function formatTime(value: string | null) {
@@ -295,9 +296,13 @@ export function DeliveryPanel() {
                 </span>
               ) : null}
               {runtimeUrl ? (
-                <span className="rounded border border-gray-800 bg-gray-950/60 px-2 py-0.5 font-mono text-gray-300">
+                <button
+                  onClick={() => void openRuntimeInBrowser(runtimeUrl)}
+                  className="rounded border border-gray-800 bg-gray-950/60 px-2 py-0.5 font-mono text-gray-300 hover:text-blue-300 cursor-pointer"
+                  title="Open in browser"
+                >
                   {runtimeUrl}
-                </span>
+                </button>
               ) : null}
             </div>
 

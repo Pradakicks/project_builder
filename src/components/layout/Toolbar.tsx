@@ -4,6 +4,7 @@ import { useLeaderStore } from "../../store/useLeaderStore";
 import { useAppStore } from "../../store/useAppStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
+import { openRuntimeInBrowser } from "../../api/runtimeApi";
 
 export function Toolbar() {
   const { project, addPiece, updateProject, saveToFile, loadFromFile, reset } =
@@ -148,12 +149,22 @@ export function Toolbar() {
             </span>
           ) : null}
           {runtimeStatus?.session?.status === "running" ? (
-            <button
-              onClick={() => void stopRuntime(project?.id ?? undefined)}
-              className="rounded border border-red-700 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950/40"
-            >
-              Stop App
-            </button>
+            <>
+              <button
+                onClick={() => void stopRuntime(project?.id ?? undefined)}
+                className="rounded border border-red-700 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950/40"
+              >
+                Stop App
+              </button>
+              {runtimeStatus?.session?.url ? (
+                <button
+                  onClick={() => void openRuntimeInBrowser(runtimeStatus.session!.url!)}
+                  className="rounded border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100 transition-colors"
+                >
+                  Open in Browser
+                </button>
+              ) : null}
+            </>
           ) : (
             <button
               onClick={() => void startRuntime(project?.id ?? undefined)}
