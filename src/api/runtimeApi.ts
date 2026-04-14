@@ -59,3 +59,7 @@ export async function openRuntimeInBrowser(url: string): Promise<void> {
   const { openUrl } = await import("@tauri-apps/plugin-opener");
   await openUrl(url);
 }
+
+export async function getRuntimeDetectionHint(projectId: string): Promise<ProjectRuntimeSpec | null> {
+  return loggedInvoke("get_runtime_detection_hint", { projectId });
+}
