@@ -23,6 +23,7 @@ async-trait = "0.1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+regex = "1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

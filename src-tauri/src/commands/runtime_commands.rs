@@ -55,7 +55,7 @@ fn trim_command(command: &str) -> String {
 }
 
 fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<ProjectRuntimeSpec>, String> {
-    // Check for agent-authored runtime spec first — most accurate, zero cost
+    // 1. runtime.json — keep existing logic exactly as-is
     let runtime_json = working_dir.join("runtime.json");
     if runtime_json.exists() {
         let raw = std::fs::read_to_string(&runtime_json).map_err(|e| e.to_string())?;
@@ -85,6 +85,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
         debug!("runtime.json exists but is invalid, falling back to pattern detection");
     }
 
+    // 2. Node.js — package.json exists
     let package_json = working_dir.join("package.json");
     if package_json.exists() {
         let raw = std::fs::read_to_string(&package_json).map_err(|e| e.to_string())?;
@@ -95,31 +96,86 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             .cloned()
             .unwrap_or_default();
 
-        let run_command = if scripts.contains_key("dev") {
-            "npm run dev"
+        // Detect package manager from lockfiles (priority order)
+        let (pm_run, pm_install) = if working_dir.join("bun.lockb").exists() {
+            ("bun run", "bun install")
+        } else if working_dir.join("pnpm-lock.yaml").exists() {
+            ("pnpm", "pnpm install")
+        } else if working_dir.join("yarn.lock").exists() {
+            ("yarn", "yarn install")
+        } else {
+            ("npm run", "npm install")
+        };
+
+        // Script detection: prefer "dev" over "start"
+        let script_key = if scripts.contains_key("dev") {
+            "dev"
         } else if scripts.contains_key("start") {
-            "npm run start"
+            "start"
         } else {
             return Ok(None);
         };
 
+        let run_command = if pm_run == "npm run" {
+            if script_key == "dev" {
+                "npm run dev".to_string()
+            } else {
+                "npm run start".to_string()
+            }
+        } else if pm_run == "bun run" {
+            format!("bun run {script_key}")
+        } else {
+            // pnpm and yarn: "pnpm dev" / "yarn dev" etc.
+            format!("{} {script_key}", pm_run)
+        };
+
+        // verify_command uses the detected package manager
         let verify_command = if scripts.contains_key("test") {
-            Some("npm test".to_string())
+            Some(if pm_run == "npm run" {
+                "npm test".to_string()
+            } else if pm_run == "bun run" {
+                "bun run test".to_string()
+            } else {
+                format!("{} test", pm_run)
+            })
         } else if scripts.contains_key("build") {
-            Some("npm run build".to_string())
+            Some(if pm_run == "npm run" {
+                "npm run build".to_string()
+            } else if pm_run == "bun run" {
+                "bun run build".to_string()
+            } else {
+                format!("{} build", pm_run)
+            })
         } else {
             None
         };
 
-        let (app_url, port_hint, readiness_check) = if scripts
+        let dependencies = json
+            .get("dependencies")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let dev_script_str = scripts
             .get("dev")
-            .and_then(|value| value.as_str())
-            .map(|script| script.contains("vite"))
-            .unwrap_or(false)
-        {
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Port detection: Next.js first, then Vite, then default
+        let (app_url, port_hint, readiness_check) = if dependencies.contains_key("next") {
+            (
+                Some("http://127.0.0.1:3000".to_string()),
+                Some(3000u16),
+                RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 90,
+                    poll_interval_ms: 500,
+                },
+            )
+        } else if dev_script_str.contains("vite") {
             (
                 Some("http://127.0.0.1:5173".to_string()),
-                Some(5173),
+                Some(5173u16),
                 RuntimeReadinessCheck::Http {
                     path: "/".to_string(),
                     expected_status: 200,
@@ -130,7 +186,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
         } else {
             (
                 Some("http://127.0.0.1:3000".to_string()),
-                Some(3000),
+                Some(3000u16),
                 RuntimeReadinessCheck::Http {
                     path: "/".to_string(),
                     expected_status: 200,
@@ -141,8 +197,8 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
         };
 
         return Ok(Some(ProjectRuntimeSpec {
-            install_command: Some("npm install".to_string()),
-            run_command: run_command.to_string(),
+            install_command: Some(pm_install.to_string()),
+            run_command,
             readiness_check,
             verify_command,
             stop_behavior: RuntimeStopBehavior::Kill,
@@ -151,7 +207,307 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
         }));
     }
 
-    // Static HTML site (no package.json)
+    // 3. Maven/Java — pom.xml exists
+    let pom_xml = working_dir.join("pom.xml");
+    if pom_xml.exists() {
+        let pom_content = read_file_head(&pom_xml, 300).unwrap_or_default();
+        if pom_content.contains("spring-boot") {
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("mvn install -DskipTests".to_string()),
+                run_command: "mvn spring-boot:run".to_string(),
+                readiness_check: RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 120,
+                    poll_interval_ms: 500,
+                },
+                verify_command: Some("mvn test -q".to_string()),
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: Some("http://127.0.0.1:8080".to_string()),
+                port_hint: Some(8080),
+            }));
+        } else {
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("mvn install -DskipTests".to_string()),
+                run_command: "mvn exec:java".to_string(),
+                readiness_check: RuntimeReadinessCheck::None,
+                verify_command: Some("mvn test -q".to_string()),
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: None,
+                port_hint: None,
+            }));
+        }
+    }
+
+    // 4. Gradle/Java — build.gradle or build.gradle.kts exists
+    let build_gradle = working_dir.join("build.gradle");
+    let build_gradle_kts = working_dir.join("build.gradle.kts");
+    let gradle_path = if build_gradle.exists() {
+        Some(build_gradle)
+    } else if build_gradle_kts.exists() {
+        Some(build_gradle_kts)
+    } else {
+        None
+    };
+    if let Some(gradle_path) = gradle_path {
+        let gradle_content = read_file_head(&gradle_path, 100).unwrap_or_default();
+        if gradle_content.contains("org.springframework.boot") {
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("./gradlew build -x test".to_string()),
+                run_command: "./gradlew bootRun".to_string(),
+                readiness_check: RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 120,
+                    poll_interval_ms: 500,
+                },
+                verify_command: Some("./gradlew test".to_string()),
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: Some("http://127.0.0.1:8080".to_string()),
+                port_hint: Some(8080),
+            }));
+        } else {
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("./gradlew build -x test".to_string()),
+                run_command: "./gradlew run".to_string(),
+                readiness_check: RuntimeReadinessCheck::None,
+                verify_command: Some("./gradlew test".to_string()),
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: None,
+                port_hint: None,
+            }));
+        }
+    }
+
+    // 5. Docker Compose — check all four filenames
+    let compose_files = ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"];
+    if compose_files.iter().any(|f| working_dir.join(f).exists()) {
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command: Some("docker compose pull".to_string()),
+            run_command: "docker compose up".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: None,
+            stop_behavior: RuntimeStopBehavior::Graceful { timeout_seconds: 15 },
+            app_url: None,
+            port_hint: None,
+        }));
+    }
+
+    // 6. Rust project — Cargo.toml exists
+    let cargo_toml = working_dir.join("Cargo.toml");
+    if cargo_toml.exists() {
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command: Some("cargo build".to_string()),
+            run_command: "cargo run".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: Some("cargo check".to_string()),
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: None,
+            port_hint: None,
+        }));
+    }
+
+    // 7. Go module — go.mod exists
+    let go_mod = working_dir.join("go.mod");
+    if go_mod.exists() {
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command: None,
+            run_command: "go run .".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: Some("go build ./...".to_string()),
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: None,
+            port_hint: None,
+        }));
+    }
+
+    // 8. Ruby — Gemfile exists
+    let gemfile = working_dir.join("Gemfile");
+    if gemfile.exists() {
+        let gemfile_content = std::fs::read_to_string(&gemfile).unwrap_or_default();
+        if gemfile_content.contains("rails") {
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("bundle install".to_string()),
+                run_command: "bundle exec rails server".to_string(),
+                readiness_check: RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 60,
+                    poll_interval_ms: 500,
+                },
+                verify_command: None,
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: Some("http://127.0.0.1:3000".to_string()),
+                port_hint: Some(3000),
+            }));
+        } else if gemfile_content.contains("sinatra") {
+            let ruby_entrypoints = ["app.rb", "server.rb", "main.rb"];
+            let entry = ruby_entrypoints
+                .iter()
+                .find(|f| working_dir.join(f).exists())
+                .copied()
+                .unwrap_or("app.rb");
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("bundle install".to_string()),
+                run_command: format!("bundle exec ruby {entry}"),
+                readiness_check: RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 30,
+                    poll_interval_ms: 500,
+                },
+                verify_command: None,
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: Some("http://127.0.0.1:4567".to_string()),
+                port_hint: Some(4567),
+            }));
+        } else {
+            let ruby_entrypoints = ["app.rb", "server.rb", "main.rb"];
+            let entry = ruby_entrypoints
+                .iter()
+                .find(|f| working_dir.join(f).exists())
+                .copied()
+                .unwrap_or("app.rb");
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command: Some("bundle install".to_string()),
+                run_command: format!("bundle exec ruby {entry}"),
+                readiness_check: RuntimeReadinessCheck::None,
+                verify_command: None,
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url: None,
+                port_hint: None,
+            }));
+        }
+    }
+
+    // 9. Python Django — manage.py exists (check BEFORE requirements.txt/pyproject.toml)
+    let manage_py = working_dir.join("manage.py");
+    if manage_py.exists() {
+        let has_requirements = working_dir.join("requirements.txt").exists();
+        let install_command = if has_requirements {
+            Some("pip install -r requirements.txt".to_string())
+        } else {
+            None
+        };
+        return Ok(Some(ProjectRuntimeSpec {
+            install_command,
+            run_command: "python3 manage.py runserver 0.0.0.0:8000".to_string(),
+            readiness_check: RuntimeReadinessCheck::Http {
+                path: "/".to_string(),
+                expected_status: 200,
+                timeout_seconds: 30,
+                poll_interval_ms: 500,
+            },
+            verify_command: None,
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: Some("http://127.0.0.1:8000".to_string()),
+            port_hint: Some(8000),
+        }));
+    }
+
+    // 10. Python — requirements.txt OR pyproject.toml exists
+    let has_requirements = working_dir.join("requirements.txt").exists();
+    let has_pyproject = working_dir.join("pyproject.toml").exists();
+    if has_requirements || has_pyproject {
+        // Look for a common entrypoint
+        let entrypoints = ["app.py", "main.py", "server.py", "run.py"];
+        if let Some(entry) = entrypoints.iter().find(|f| working_dir.join(f).exists()) {
+            let content = std::fs::read_to_string(working_dir.join(entry)).unwrap_or_default();
+
+            // Check for Django keyword
+            if content.contains("django") || content.contains("Django") {
+                let install_command = if has_requirements {
+                    Some("pip install -r requirements.txt".to_string())
+                } else {
+                    None
+                };
+                return Ok(Some(ProjectRuntimeSpec {
+                    install_command,
+                    run_command: "python3 manage.py runserver 0.0.0.0:8000".to_string(),
+                    readiness_check: RuntimeReadinessCheck::Http {
+                        path: "/".to_string(),
+                        expected_status: 200,
+                        timeout_seconds: 30,
+                        poll_interval_ms: 500,
+                    },
+                    verify_command: None,
+                    stop_behavior: RuntimeStopBehavior::Kill,
+                    app_url: Some("http://127.0.0.1:8000".to_string()),
+                    port_hint: Some(8000),
+                }));
+            }
+
+            let is_web = content.contains("flask")
+                || content.contains("fastapi")
+                || content.contains("uvicorn")
+                || content.contains("http.server")
+                || content.contains("Flask")
+                || content.contains("FastAPI");
+
+            // Port extraction: regex on entrypoint content
+            let port = {
+                let re = regex::Regex::new(r"port\s*[=:]\s*(\d{4,5})").unwrap();
+                if let Some(caps) = re.captures(&content) {
+                    caps.get(1)
+                        .and_then(|m| m.as_str().parse::<u16>().ok())
+                        .unwrap_or_else(|| {
+                            if content.contains("fastapi") || content.contains("uvicorn") || content.contains("FastAPI") {
+                                8000u16
+                            } else {
+                                5000u16
+                            }
+                        })
+                } else if content.contains("fastapi") || content.contains("uvicorn") || content.contains("FastAPI") {
+                    8000u16
+                } else {
+                    5000u16
+                }
+            };
+
+            let readiness_check = if is_web {
+                RuntimeReadinessCheck::Http {
+                    path: "/".to_string(),
+                    expected_status: 200,
+                    timeout_seconds: 30,
+                    poll_interval_ms: 500,
+                }
+            } else {
+                RuntimeReadinessCheck::None
+            };
+            let app_url = if is_web {
+                Some(format!("http://127.0.0.1:{port}"))
+            } else {
+                None
+            };
+            let port_hint = if is_web { Some(port) } else { None };
+
+            // Install: prefer requirements.txt, else check pyproject.toml for [build-system]
+            let install_command = if has_requirements {
+                Some("pip install -r requirements.txt".to_string())
+            } else if has_pyproject {
+                let pyproject_content = std::fs::read_to_string(working_dir.join("pyproject.toml")).unwrap_or_default();
+                if pyproject_content.contains("[build-system]") {
+                    Some("pip install -e .".to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            return Ok(Some(ProjectRuntimeSpec {
+                install_command,
+                run_command: format!("python3 {entry}"),
+                readiness_check,
+                verify_command: None,
+                stop_behavior: RuntimeStopBehavior::Kill,
+                app_url,
+                port_hint,
+            }));
+        }
+    }
+
+    // 11. Static HTML site — index.html exists, no package.json
     let index_html = working_dir.join("index.html");
     if index_html.exists() {
         return Ok(Some(ProjectRuntimeSpec {
@@ -170,83 +526,25 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
         }));
     }
 
-    // Rust project
-    let cargo_toml = working_dir.join("Cargo.toml");
-    if cargo_toml.exists() {
-        return Ok(Some(ProjectRuntimeSpec {
-            install_command: Some("cargo build".to_string()),
-            run_command: "cargo run".to_string(),
-            readiness_check: RuntimeReadinessCheck::None,
-            verify_command: Some("cargo check".to_string()),
-            stop_behavior: RuntimeStopBehavior::Kill,
-            app_url: None,
-            port_hint: None,
-        }));
-    }
-
-    // Go module
-    let go_mod = working_dir.join("go.mod");
-    if go_mod.exists() {
-        return Ok(Some(ProjectRuntimeSpec {
-            install_command: None,
-            run_command: "go run .".to_string(),
-            readiness_check: RuntimeReadinessCheck::None,
-            verify_command: Some("go build ./...".to_string()),
-            stop_behavior: RuntimeStopBehavior::Kill,
-            app_url: None,
-            port_hint: None,
-        }));
-    }
-
-    // Python app
-    let has_requirements = working_dir.join("requirements.txt").exists();
-    let has_pyproject = working_dir.join("pyproject.toml").exists();
-    if has_requirements || has_pyproject {
-        // Look for a common entrypoint
-        let entrypoints = ["app.py", "main.py", "server.py", "run.py"];
-        if let Some(entry) = entrypoints.iter().find(|f| working_dir.join(f).exists()) {
-            // Sniff the entrypoint for web framework clues
-            let content = std::fs::read_to_string(working_dir.join(entry)).unwrap_or_default();
-            let is_web = content.contains("flask")
-                || content.contains("fastapi")
-                || content.contains("uvicorn")
-                || content.contains("http.server")
-                || content.contains("Flask")
-                || content.contains("FastAPI");
-            let port = if content.contains("8000") || content.contains("fastapi") || content.contains("uvicorn") {
-                8000u16
-            } else {
-                5000u16
-            };
-            let readiness_check = if is_web {
-                RuntimeReadinessCheck::Http {
-                    path: "/".to_string(),
-                    expected_status: 200,
-                    timeout_seconds: 30,
-                    poll_interval_ms: 500,
-                }
-            } else {
-                RuntimeReadinessCheck::None
-            };
-            let app_url = if is_web {
-                Some(format!("http://127.0.0.1:{port}"))
-            } else {
-                None
-            };
-            let port_hint = if is_web { Some(port) } else { None };
-            let install_command = if has_requirements {
-                Some("pip install -r requirements.txt".to_string())
-            } else {
-                None
-            };
+    // 12. Makefile fallback — only if nothing else matched
+    let makefile = working_dir.join("Makefile");
+    if makefile.exists() {
+        let makefile_content = read_file_head(&makefile, 100).unwrap_or_default();
+        // Check for targets in priority order: dev, run, start, serve
+        let target = ["dev", "run", "start", "serve"].iter().find(|&&t| {
+            makefile_content
+                .lines()
+                .any(|line| line.starts_with(&format!("{t}:")))
+        });
+        if let Some(target) = target {
             return Ok(Some(ProjectRuntimeSpec {
-                install_command,
-                run_command: format!("python3 {entry}"),
-                readiness_check,
+                install_command: None,
+                run_command: format!("make {target}"),
+                readiness_check: RuntimeReadinessCheck::None,
                 verify_command: None,
                 stop_behavior: RuntimeStopBehavior::Kill,
-                app_url,
-                port_hint,
+                app_url: None,
+                port_hint: None,
             }));
         }
     }
@@ -283,6 +581,20 @@ fn validate_runtime_spec(spec: &ProjectRuntimeSpec) -> Result<(), String> {
         return Err("Runtime app URL cannot be blank".to_string());
     }
     Ok(())
+}
+
+fn enforce_min_readiness_timeout(spec: &mut ProjectRuntimeSpec) {
+    const MIN_SECS: u64 = 90;
+    match &mut spec.readiness_check {
+        RuntimeReadinessCheck::Http { timeout_seconds, .. }
+        | RuntimeReadinessCheck::TcpPort { timeout_seconds, .. }
+            if *timeout_seconds < MIN_SECS =>
+        {
+            debug!("Bumping LLM-detected readiness timeout from {}s to {}s", timeout_seconds, MIN_SECS);
+            *timeout_seconds = MIN_SECS;
+        }
+        _ => {}
+    }
 }
 
 fn resolve_runtime_url(spec: &ProjectRuntimeSpec) -> Option<String> {
@@ -1324,7 +1636,10 @@ pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
         }
     });
 
-    let _ = provider.chat_stream(&messages, &config, tx).await;
+    if let Err(e) = provider.chat_stream(&messages, &config, tx).await {
+        warn!(project_id = %project_id, error = %e, "LLM runtime detection stream error — falling back");
+        return Ok(None);
+    }
 
     let _ = chunk_forwarder.await;
     let _ = app_handle.emit(
@@ -1357,8 +1672,18 @@ pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
         return Ok(None);
     }
 
-    let spec = serde_json::from_str::<ProjectRuntimeSpec>(json_str).map_err(|e| e.to_string())?;
-    validate_runtime_spec(&spec)?;
+    let mut spec = match serde_json::from_str::<ProjectRuntimeSpec>(json_str) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(project_id = %project_id, error = %e, raw = json_str, "LLM runtime detection produced unparseable JSON");
+            return Ok(None);
+        }
+    };
+    if let Err(e) = validate_runtime_spec(&spec) {
+        warn!(project_id = %project_id, error = %e, "LLM runtime detection produced invalid spec");
+        return Ok(None);
+    }
+    enforce_min_readiness_timeout(&mut spec);
     Ok(Some(spec))
 }
 
@@ -1717,5 +2042,144 @@ mod tests {
         }
 
         cleanup(&db_path);
+    }
+
+    fn write_file(dir: &Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).expect("write test file");
+    }
+
+    #[test]
+    fn detect_node_uses_pnpm_when_pnpm_lockfile_present() {
+        let dir = temp_dir("node-pnpm");
+        write_file(&dir, "package.json", r#"{"scripts":{"dev":"vite"}}"#);
+        write_file(&dir, "pnpm-lock.yaml", "");
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert!(spec.run_command.starts_with("pnpm"), "run_command should start with pnpm, got: {}", spec.run_command);
+        assert_eq!(spec.install_command, Some("pnpm install".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_node_recognises_nextjs_and_uses_port_3000() {
+        let dir = temp_dir("node-next");
+        write_file(
+            &dir,
+            "package.json",
+            r#"{"scripts":{"dev":"next dev"},"dependencies":{"next":"14.0.0"}}"#,
+        );
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.port_hint, Some(3000));
+        assert!(spec.run_command.contains("dev"), "run_command should contain 'dev', got: {}", spec.run_command);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_java_spring_boot_via_pom_xml() {
+        let dir = temp_dir("java-spring-pom");
+        write_file(
+            &dir,
+            "pom.xml",
+            "<project>\n  <dependencies>\n    <dependency>\n      <artifactId>spring-boot-starter-web</artifactId>\n    </dependency>\n  </dependencies>\n</project>",
+        );
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.run_command, "mvn spring-boot:run");
+        assert_eq!(spec.port_hint, Some(8080));
+        match &spec.readiness_check {
+            RuntimeReadinessCheck::Http { timeout_seconds, .. } => {
+                assert!(*timeout_seconds >= 90, "readiness timeout should be >= 90s, got {}", timeout_seconds);
+            }
+            other => panic!("expected Http readiness check, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_java_spring_boot_via_build_gradle() {
+        let dir = temp_dir("java-spring-gradle");
+        write_file(
+            &dir,
+            "build.gradle",
+            "plugins {\n    id 'org.springframework.boot' version '3.0.0'\n}\n",
+        );
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.run_command, "./gradlew bootRun");
+        assert_eq!(spec.port_hint, Some(8080));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_docker_compose_produces_valid_spec() {
+        let dir = temp_dir("docker-compose");
+        write_file(&dir, "docker-compose.yml", "version: '3'\n");
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.run_command, "docker compose up");
+        match &spec.stop_behavior {
+            RuntimeStopBehavior::Graceful { .. } => {}
+            other => panic!("expected Graceful stop behavior, got {:?}", other),
+        }
+        assert!(
+            matches!(spec.readiness_check, RuntimeReadinessCheck::None),
+            "expected None readiness check"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_ruby_rails_from_gemfile() {
+        let dir = temp_dir("ruby-rails");
+        write_file(&dir, "Gemfile", "source 'https://rubygems.org'\ngem 'rails', '~> 7.0'\n");
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.run_command, "bundle exec rails server");
+        assert_eq!(spec.port_hint, Some(3000));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_ruby_sinatra_from_gemfile() {
+        let dir = temp_dir("ruby-sinatra");
+        write_file(&dir, "Gemfile", "source 'https://rubygems.org'\ngem 'sinatra'\n");
+        write_file(&dir, "app.rb", "require 'sinatra'\nget '/' do\n  'Hello'\nend\n");
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert!(spec.run_command.contains("bundle exec ruby"), "run_command should contain 'bundle exec ruby', got: {}", spec.run_command);
+        assert_eq!(spec.port_hint, Some(4567));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_python_django_from_manage_py() {
+        let dir = temp_dir("python-django");
+        write_file(&dir, "manage.py", "#!/usr/bin/env python\n# Django manage.py\n");
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.run_command, "python3 manage.py runserver 0.0.0.0:8000");
+        assert_eq!(spec.port_hint, Some(8000));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_makefile_fallback_uses_dev_target() {
+        let dir = temp_dir("makefile-fallback");
+        write_file(&dir, "Makefile", "dev:\n\techo hello\n");
+        // NOTE: no other indicator files present — only Makefile
+        let spec = detect_runtime_spec_from_working_dir(&dir)
+            .expect("no error")
+            .expect("some spec");
+        assert_eq!(spec.run_command, "make dev");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

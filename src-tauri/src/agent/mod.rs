@@ -478,27 +478,47 @@ pub fn build_runtime_detection_prompt(
     file_listing: &[String],
     file_contents: &[(String, String)],
 ) -> Vec<Message> {
-    let schema = r#"{
+    let schema = r#"JSON schema (use exactly these shapes — no variation):
+
+readinessCheck must be ONE of:
+  {"kind":"none"}
+  {"kind":"http","path":"/","expectedStatus":200,"timeoutSeconds":90,"pollIntervalMs":500}
+  {"kind":"tcpPort","timeoutSeconds":90,"pollIntervalMs":500}
+
+stopBehavior must be ONE of:
+  {"kind":"kill"}
+  {"kind":"graceful","timeoutSeconds":5}
+
+Full object shape:
+{
   "installCommand": "string or null",
-  "runCommand": "string (required — how to start the project)",
+  "runCommand": "string (REQUIRED)",
   "verifyCommand": "string or null",
-  "readinessCheck": { "kind": "none" } | { "kind": "http", "path": "/", "expectedStatus": 200, "timeoutSeconds": 30, "pollIntervalMs": 500 } | { "kind": "tcpPort", "timeoutSeconds": 30, "pollIntervalMs": 500 },
-  "stopBehavior": { "kind": "kill" } | { "kind": "graceful", "timeoutSeconds": 5 },
+  "readinessCheck": <one of the above readinessCheck options>,
+  "stopBehavior": <one of the above stopBehavior options>,
   "appUrl": "http://127.0.0.1:PORT or null",
-  "portHint": number_or_null
+  "portHint": <integer or null>
 }"#;
 
     let system = format!(
-        "You are a runtime detection agent for the project builder tool. \
-Given a listing of project files and their contents, determine how to run the project locally. \
-Output ONLY a single valid JSON object matching the schema below — no markdown fences, no explanation, no text before or after. \
-\n\nSchema:\n{schema}\n\n\
+        "You are a runtime detection agent. Given project files, determine how to run the project locally.\n\
+Output ONLY a single JSON object matching the schema below — no markdown, no explanation, no extra text.\n\
+If you cannot determine how to run this project, output exactly: null\n\
+\n\
+Schema:\n{schema}\n\
+\n\
 Rules:\n\
-- runCommand is required and must be a shell command that starts the project (e.g. \"npm start\", \"python3 app.py\", \"./server\")\n\
-- installCommand is optional — only include if there is a clear install step (e.g. npm install, pip install -r requirements.txt)\n\
-- readinessCheck should be \"http\" for web apps, \"tcpPort\" for non-HTTP servers, \"none\" for CLI tools\n\
-- appUrl and portHint should be provided for web apps\n\
-- stopBehavior should almost always be \"kill\" unless the project has graceful shutdown support"
+- runCommand MUST be present and non-empty\n\
+- Use \"http\" readiness for web servers, \"tcpPort\" for non-HTTP TCP servers, \"none\" for CLI tools\n\
+- timeoutSeconds should be 90+ for projects that compile (Java, Rust, TypeScript) — they take time to start\n\
+- stopBehavior is \"kill\" unless the framework has graceful shutdown (Spring Boot, Rails use \"kill\" too)\n\
+- installCommand only if there is a clear dependency install step\n\
+\n\
+Examples of correct output:\n\
+Node/Vite: {{\"installCommand\":\"npm install\",\"runCommand\":\"npm run dev\",\"verifyCommand\":\"npm run build\",\"readinessCheck\":{{\"kind\":\"http\",\"path\":\"/\",\"expectedStatus\":200,\"timeoutSeconds\":90,\"pollIntervalMs\":500}},\"stopBehavior\":{{\"kind\":\"kill\"}},\"appUrl\":\"http://127.0.0.1:5173\",\"portHint\":5173}}\n\
+Python/FastAPI: {{\"installCommand\":\"pip install -r requirements.txt\",\"runCommand\":\"python3 main.py\",\"verifyCommand\":null,\"readinessCheck\":{{\"kind\":\"http\",\"path\":\"/\",\"expectedStatus\":200,\"timeoutSeconds\":30,\"pollIntervalMs\":500}},\"stopBehavior\":{{\"kind\":\"kill\"}},\"appUrl\":\"http://127.0.0.1:8000\",\"portHint\":8000}}\n\
+Spring Boot: {{\"installCommand\":\"mvn install -DskipTests\",\"runCommand\":\"mvn spring-boot:run\",\"verifyCommand\":\"mvn test -q\",\"readinessCheck\":{{\"kind\":\"http\",\"path\":\"/\",\"expectedStatus\":200,\"timeoutSeconds\":120,\"pollIntervalMs\":500}},\"stopBehavior\":{{\"kind\":\"kill\"}},\"appUrl\":\"http://127.0.0.1:8080\",\"portHint\":8080}}\n\
+CLI tool: {{\"installCommand\":\"cargo build\",\"runCommand\":\"cargo run\",\"verifyCommand\":\"cargo check\",\"readinessCheck\":{{\"kind\":\"none\"}},\"stopBehavior\":{{\"kind\":\"kill\"}},\"appUrl\":null,\"portHint\":null}}"
     );
 
     let listing_text = if file_listing.is_empty() {
