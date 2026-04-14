@@ -1821,6 +1821,41 @@ pub async fn detect_runtime_with_agent(
     detect_runtime_with_agent_impl(&state.db, &app_handle, project_id).await
 }
 
+/// Returns the heuristic-only detection hint for a project without saving it.
+/// Used by the Quick Runtime Setup UI when a goal run is blocked at
+/// RuntimeConfiguration — gives the operator a pre-populated starting point
+/// without running an expensive LLM call.
+/// Returns None if no spec is already configured, heuristic finds nothing, or
+/// the working directory is not set.
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub async fn get_runtime_detection_hint(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<Option<ProjectRuntimeSpec>, String> {
+    info!(project_id = %project_id, "IPC: get_runtime_detection_hint");
+    let (working_directory, spec_already_configured) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let project = db.get_project(&project_id)?;
+        let wd = project.settings.working_directory.clone();
+        let has_spec = project.settings.runtime_spec.is_some();
+        (wd, has_spec)
+    };
+    // If already configured, no hint needed
+    if spec_already_configured {
+        return Ok(None);
+    }
+    let working_directory = match working_directory {
+        Some(wd) => std::path::PathBuf::from(wd),
+        None => return Ok(None),
+    };
+    if !working_directory.exists() {
+        return Ok(None);
+    }
+    // Run heuristic detection only (fast, offline, no tokens)
+    detect_runtime_spec_from_working_dir(&working_directory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
