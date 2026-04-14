@@ -54,3 +54,7 @@ export async function tailRuntimeLogs(
 export async function verifyRuntime(projectId: string): Promise<VerificationResult> {
   return loggedInvoke("verify_runtime", { projectId });
 }
+
+export async function getRuntimeDetectionHint(projectId: string): Promise<ProjectRuntimeSpec | null> {
+  return loggedInvoke("get_runtime_detection_hint", { projectId });
+}

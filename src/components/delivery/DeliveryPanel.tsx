@@ -3,6 +3,7 @@ import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 import type { GoalRunEvent, GoalRunTimelineEntry, VerificationResult } from "../../types";
+import { QuickRuntimeSetup } from "./QuickRuntimeSetup";
 
 function formatTime(value: string | null) {
   if (!value) return "unknown";
@@ -281,6 +282,19 @@ export function DeliveryPanel() {
                 </div>
               ) : null}
             </div>
+
+            {currentRun.phase === "runtime-configuration" &&
+              currentRun.status === "blocked" &&
+              !deliverySnapshot?.runtimeStatus?.spec && (
+              <QuickRuntimeSetup
+                projectId={project.id}
+                goalRunId={currentRun.id}
+                onApplied={() => {
+                  // Refresh the goal run view after applying
+                  void selectGoalRun(currentRun.id);
+                }}
+              />
+            )}
 
             <div className="flex flex-wrap items-center gap-2 text-[11px]">
               <span className="rounded border border-gray-800 bg-gray-950/60 px-2 py-0.5 text-gray-300">
