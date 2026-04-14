@@ -4,7 +4,7 @@ use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, Message};
 use crate::models::{
     GoalRun, GoalRunEventKind, GoalRunPhase, GoalRunStatus, GoalRunUpdate, OutputMode, Phase,
-    VerificationResult,
+    VerificationResult, WorkPlan,
 };
 use crate::AppState;
 use serde_json::{json, Value};
@@ -252,6 +252,17 @@ async fn advance_goal_run<R: tauri::Runtime>(
         db.get_goal_run(goal_run_id)?
     };
 
+    let start_ordinal = initial.phase.ordinal();
+
+    // If resuming past Planning, load the existing plan from DB now so later phases have it.
+    let rehydrated_plan: Option<WorkPlan> = if start_ordinal > GoalRunPhase::Planning.ordinal() {
+        initial.current_plan_id.as_deref().and_then(|plan_id| {
+            state.db.lock().ok()?.get_work_plan(plan_id).ok()
+        })
+    } else {
+        None
+    };
+
     let mut goal_run = update_goal_run_state(
         &state.db,
         goal_run_id,
@@ -276,319 +287,376 @@ async fn advance_goal_run<R: tauri::Runtime>(
         return Ok(());
     }
 
-    maybe_scaffold_implementation_piece(&state.db, &goal_run)?;
+    let mut plan_holder: Option<WorkPlan> = None;
 
-    log_event(
-        &state.db,
-        goal_run_id,
-        GoalRunPhase::Planning,
-        GoalRunEventKind::PhaseStarted,
-        "Planning started",
-        None,
-    );
-    goal_run = update_goal_run_state(
-        &state.db,
-        goal_run_id,
-        GoalRunUpdate {
-            phase: Some(GoalRunPhase::Planning),
-            status: Some(GoalRunStatus::Running),
-            ..Default::default()
-        },
-    )?;
+    if start_ordinal <= GoalRunPhase::Planning.ordinal() {
+        maybe_scaffold_implementation_piece(&state.db, &goal_run)?;
 
-    let plan = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let plans = db.list_work_plans(&goal_run.project_id)?;
-        plans
-            .into_iter()
-            .find(|item| item.status == crate::models::PlanStatus::Approved)
-            .or_else(|| {
-                db.list_work_plans(&goal_run.project_id)
-                    .ok()
-                    .and_then(|plans| plans.into_iter().next())
-            })
-    };
-
-    let mut plan = match plan {
-        Some(plan)
-            if !matches!(
-                plan.status,
-                crate::models::PlanStatus::Rejected | crate::models::PlanStatus::Superseded
-            ) =>
-        {
-            plan
-        }
-        _ => runner::run_leader_agent(&goal_run.project_id, &goal_run.prompt, &state.db, app_handle)
-            .await?,
-    };
-
-    if plan.status == crate::models::PlanStatus::Draft {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        plan = db.update_work_plan(
-            &plan.id,
-            &crate::models::WorkPlanUpdate {
-                status: Some(crate::models::PlanStatus::Approved),
-                ..Default::default()
-            },
-        )?;
-    }
-
-    goal_run = update_goal_run_state(
-        &state.db,
-        goal_run_id,
-        GoalRunUpdate {
-            phase: Some(GoalRunPhase::Implementation),
-            status: Some(GoalRunStatus::Running),
-            current_plan_id: Some(Some(plan.id.clone())),
-            ..Default::default()
-        },
-    )?;
-    log_event(
-        &state.db,
-        goal_run_id,
-        GoalRunPhase::Implementation,
-        GoalRunEventKind::PhaseStarted,
-        "Implementation started",
-        Some(json!({ "planId": plan.id })),
-    );
-
-    if stop_requested(&state.db, goal_run_id)? {
-        update_goal_run_state(
+        log_event(
+            &state.db,
+            goal_run_id,
+            GoalRunPhase::Planning,
+            GoalRunEventKind::PhaseStarted,
+            "Planning started",
+            None,
+        );
+        goal_run = update_goal_run_state(
             &state.db,
             goal_run_id,
             GoalRunUpdate {
-                status: Some(GoalRunStatus::Blocked),
-                blocker_reason: Some(Some("Stopped by operator".to_string())),
+                phase: Some(GoalRunPhase::Planning),
+                status: Some(GoalRunStatus::Running),
+                ..Default::default()
+            },
+        )?;
+
+        let plan = {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            let plans = db.list_work_plans(&goal_run.project_id)?;
+            plans
+                .into_iter()
+                .find(|item| item.status == crate::models::PlanStatus::Approved)
+                .or_else(|| {
+                    db.list_work_plans(&goal_run.project_id)
+                        .ok()
+                        .and_then(|plans| plans.into_iter().next())
+                })
+        };
+
+        let mut plan = match plan {
+            Some(plan)
+                if !matches!(
+                    plan.status,
+                    crate::models::PlanStatus::Rejected | crate::models::PlanStatus::Superseded
+                ) =>
+            {
+                plan
+            }
+            _ => runner::run_leader_agent(&goal_run.project_id, &goal_run.prompt, &state.db, app_handle)
+                .await?,
+        };
+
+        if plan.status == crate::models::PlanStatus::Draft {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            plan = db.update_work_plan(
+                &plan.id,
+                &crate::models::WorkPlanUpdate {
+                    status: Some(crate::models::PlanStatus::Approved),
+                    ..Default::default()
+                },
+            )?;
+        }
+
+        plan_holder = Some(plan);
+    }
+
+    // Use the plan produced by Planning, or the rehydrated one if we skipped Planning.
+    let plan = plan_holder
+        .or(rehydrated_plan)
+        .ok_or_else(|| "Cannot resume past Planning: no plan found in DB".to_string())?;
+
+    if start_ordinal <= GoalRunPhase::Implementation.ordinal() {
+        goal_run = update_goal_run_state(
+            &state.db,
+            goal_run_id,
+            GoalRunUpdate {
+                phase: Some(GoalRunPhase::Implementation),
+                status: Some(GoalRunStatus::Running),
+                current_plan_id: Some(Some(plan.id.clone())),
                 ..Default::default()
             },
         )?;
         log_event(
             &state.db,
             goal_run_id,
-            goal_run.phase.clone(),
-            GoalRunEventKind::Stopped,
-            "Goal run stopped by operator",
-            None,
+            GoalRunPhase::Implementation,
+            GoalRunEventKind::PhaseStarted,
+            "Implementation started",
+            Some(json!({ "planId": plan.id })),
         );
-        return Ok(());
-    }
 
-    'implementation: loop {
-        match runner::run_all_plan_tasks(
-            &plan.id,
-            Some(goal_run_id),
-            &state.db,
-            &state.running_pieces,
-            app_handle,
-        )
-        .await
-        {
-            Ok(()) => break 'implementation,
-            Err(error) => {
-                let fingerprint = failure_fingerprint(GoalRunPhase::Implementation, &error);
-                let current_retry = {
-                    let db = state.db.lock().map_err(|e| e.to_string())?;
-                    db.get_goal_run(goal_run_id)?.retry_count
-                };
-                let same_failure = goal_run
-                    .last_failure_fingerprint
-                    .as_deref()
-                    .map(|prev| prev == fingerprint)
-                    .unwrap_or(false);
-
-                if current_retry < MAX_REPAIR_RETRIES && !same_failure {
-                    goal_run = update_goal_run_state(
-                        &state.db,
-                        goal_run_id,
-                        GoalRunUpdate {
-                            phase: Some(GoalRunPhase::Implementation),
-                            status: Some(GoalRunStatus::Retrying),
-                            retry_count: Some(current_retry + 1),
-                            last_failure_summary: Some(Some(error.clone())),
-                            last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                            blocker_reason: Some(None),
-                            attention_required: Some(false),
-                            ..Default::default()
-                        },
-                    )?;
-                    log_event(
-                        &state.db,
-                        goal_run_id,
-                        GoalRunPhase::Implementation,
-                        GoalRunEventKind::Note,
-                        &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
-                        Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
-                    );
-                    match attempt_cto_repair(
-                        app_handle,
-                        &state.db,
-                        &goal_run,
-                        GoalRunPhase::Implementation,
-                        &error,
-                    )
-                    .await
-                    {
-                        Ok(_) => continue 'implementation,
-                        Err(repair_err) => {
-                            warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
-                        }
-                    }
-                }
-
-                update_goal_run_state(
-                    &state.db,
-                    goal_run_id,
-                    GoalRunUpdate {
-                        phase: Some(GoalRunPhase::Implementation),
-                        status: Some(GoalRunStatus::Failed),
-                        last_failure_summary: Some(Some(error.clone())),
-                        last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                        attention_required: Some(true),
-                        ..Default::default()
-                    },
-                )?;
-                log_event(
-                    &state.db,
-                    goal_run_id,
-                    GoalRunPhase::Implementation,
-                    GoalRunEventKind::Failed,
-                    &error,
-                    Some(json!({ "fingerprint": fingerprint })),
-                );
-                return Err(error);
-            }
-        }
-    }
-
-    log_event(
-        &state.db,
-        goal_run_id,
-        GoalRunPhase::RuntimeConfiguration,
-        GoalRunEventKind::PhaseStarted,
-        "Runtime configuration started",
-        None,
-    );
-    goal_run = update_goal_run_state(
-        &state.db,
-        goal_run_id,
-        GoalRunUpdate {
-            phase: Some(GoalRunPhase::RuntimeConfiguration),
-            status: Some(GoalRunStatus::Running),
-            ..Default::default()
-        },
-    )?;
-
-    let mut runtime_status =
-        runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
-    if runtime_status.spec.is_none() {
-        let mut detected =
-            runtime_commands::detect_runtime_impl(&state.db, goal_run.project_id.clone()).await?;
-        if detected.is_none() {
-            detected = runtime_commands::detect_runtime_with_agent_impl(
-                &state.db,
-                app_handle,
-                goal_run.project_id.clone(),
-            )
-            .await?;
-        }
-
-        let Some(detected) = detected else {
-            let message =
-                "Automatic runtime detection failed. Review or configure the run command."
-                    .to_string();
+        if stop_requested(&state.db, goal_run_id)? {
             update_goal_run_state(
                 &state.db,
                 goal_run_id,
                 GoalRunUpdate {
-                    phase: Some(GoalRunPhase::RuntimeConfiguration),
                     status: Some(GoalRunStatus::Blocked),
-                    blocker_reason: Some(Some(message.clone())),
-                    last_failure_summary: Some(Some(message.clone())),
-                    attention_required: Some(true),
-                    runtime_status_summary: Some(Some("runtime not configured".to_string())),
+                    blocker_reason: Some(Some("Stopped by operator".to_string())),
                     ..Default::default()
                 },
             )?;
             log_event(
                 &state.db,
                 goal_run_id,
-                GoalRunPhase::RuntimeConfiguration,
-                GoalRunEventKind::Blocked,
-                &message,
+                goal_run.phase.clone(),
+                GoalRunEventKind::Stopped,
+                "Goal run stopped by operator",
                 None,
             );
             return Ok(());
-        };
+        }
 
-        runtime_commands::configure_runtime_impl(
+        'implementation: loop {
+            match runner::run_all_plan_tasks(
+                &plan.id,
+                Some(goal_run_id),
+                &state.db,
+                &state.running_pieces,
+                app_handle,
+            )
+            .await
+            {
+                Ok(()) => break 'implementation,
+                Err(error) => {
+                    let fingerprint = failure_fingerprint(GoalRunPhase::Implementation, &error);
+                    let current_retry = {
+                        let db = state.db.lock().map_err(|e| e.to_string())?;
+                        db.get_goal_run(goal_run_id)?.retry_count
+                    };
+                    let same_failure = goal_run
+                        .last_failure_fingerprint
+                        .as_deref()
+                        .map(|prev| prev == fingerprint)
+                        .unwrap_or(false);
+
+                    if current_retry < MAX_REPAIR_RETRIES && !same_failure {
+                        goal_run = update_goal_run_state(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunUpdate {
+                                phase: Some(GoalRunPhase::Implementation),
+                                status: Some(GoalRunStatus::Retrying),
+                                retry_count: Some(current_retry + 1),
+                                last_failure_summary: Some(Some(error.clone())),
+                                last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                                blocker_reason: Some(None),
+                                attention_required: Some(false),
+                                ..Default::default()
+                            },
+                        )?;
+                        log_event(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunPhase::Implementation,
+                            GoalRunEventKind::Note,
+                            &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
+                            Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                        );
+                        match attempt_cto_repair(
+                            app_handle,
+                            &state.db,
+                            &goal_run,
+                            GoalRunPhase::Implementation,
+                            &error,
+                        )
+                        .await
+                        {
+                            Ok(_) => continue 'implementation,
+                            Err(repair_err) => {
+                                warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
+                            }
+                        }
+                    }
+
+                    update_goal_run_state(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunUpdate {
+                            phase: Some(GoalRunPhase::Implementation),
+                            status: Some(GoalRunStatus::Failed),
+                            last_failure_summary: Some(Some(error.clone())),
+                            last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                            attention_required: Some(true),
+                            ..Default::default()
+                        },
+                    )?;
+                    log_event(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunPhase::Implementation,
+                        GoalRunEventKind::Failed,
+                        &error,
+                        Some(json!({ "fingerprint": fingerprint })),
+                    );
+                    return Err(error);
+                }
+            }
+        }
+    } // end if start_ordinal <= Implementation
+
+    if start_ordinal <= GoalRunPhase::RuntimeConfiguration.ordinal() {
+        log_event(
             &state.db,
-            &state.runtime_sessions,
-            goal_run.project_id.clone(),
-            detected,
-        )
-        .await?;
-        runtime_status =
+            goal_run_id,
+            GoalRunPhase::RuntimeConfiguration,
+            GoalRunEventKind::PhaseStarted,
+            "Runtime configuration started",
+            None,
+        );
+        goal_run = update_goal_run_state(
+            &state.db,
+            goal_run_id,
+            GoalRunUpdate {
+                phase: Some(GoalRunPhase::RuntimeConfiguration),
+                status: Some(GoalRunStatus::Running),
+                ..Default::default()
+            },
+        )?;
+
+        let runtime_status =
             runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
-    }
+        if runtime_status.spec.is_none() {
+            let mut detected =
+                runtime_commands::detect_runtime_impl(&state.db, goal_run.project_id.clone()).await?;
+            if detected.is_none() {
+                detected = runtime_commands::detect_runtime_with_agent_impl(
+                    &state.db,
+                    app_handle,
+                    goal_run.project_id.clone(),
+                )
+                .await?;
+            }
 
-    log_event(
-        &state.db,
-        goal_run_id,
-        GoalRunPhase::RuntimeExecution,
-        GoalRunEventKind::PhaseStarted,
-        "Runtime execution started",
-        None,
-    );
-    goal_run = update_goal_run_state(
-        &state.db,
-        goal_run_id,
-        GoalRunUpdate {
-            phase: Some(GoalRunPhase::RuntimeExecution),
-            status: Some(GoalRunStatus::Running),
-            runtime_status_summary: Some(Some(
-                runtime_status
-                    .spec
-                    .as_ref()
-                    .map(|spec| spec.run_command.clone())
-                    .unwrap_or_else(|| "runtime configured".to_string()),
-            )),
-            ..Default::default()
-        },
-    )?;
+            let Some(detected) = detected else {
+                let message =
+                    "Automatic runtime detection failed. Review or configure the run command."
+                        .to_string();
+                update_goal_run_state(
+                    &state.db,
+                    goal_run_id,
+                    GoalRunUpdate {
+                        phase: Some(GoalRunPhase::RuntimeConfiguration),
+                        status: Some(GoalRunStatus::Blocked),
+                        blocker_reason: Some(Some(message.clone())),
+                        last_failure_summary: Some(Some(message.clone())),
+                        attention_required: Some(true),
+                        runtime_status_summary: Some(Some("runtime not configured".to_string())),
+                        ..Default::default()
+                    },
+                )?;
+                log_event(
+                    &state.db,
+                    goal_run_id,
+                    GoalRunPhase::RuntimeConfiguration,
+                    GoalRunEventKind::Blocked,
+                    &message,
+                    None,
+                );
+                return Ok(());
+            };
 
-    'runtime_execution: loop {
-        match runtime_commands::start_runtime_impl(
+            runtime_commands::configure_runtime_impl(
+                &state.db,
+                &state.runtime_sessions,
+                goal_run.project_id.clone(),
+                detected,
+            )
+            .await?;
+            let _ = runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
+        }
+    } // end if start_ordinal <= RuntimeConfiguration
+
+    if start_ordinal <= GoalRunPhase::RuntimeExecution.ordinal() {
+        // Re-fetch runtime_status here so it's always available regardless of whether
+        // RuntimeConfiguration was skipped.
+        let runtime_status =
+            runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
+
+        log_event(
             &state.db,
-            &state.runtime_sessions,
-            goal_run.project_id.clone(),
-        )
-        .await
-        {
-            Ok(_) => break 'runtime_execution,
-            Err(error) => {
-                let fingerprint = failure_fingerprint(GoalRunPhase::RuntimeExecution, &error);
-                let current_retry = {
-                    let db = state.db.lock().map_err(|e| e.to_string())?;
-                    db.get_goal_run(goal_run_id)?.retry_count
-                };
-                let same_failure = goal_run
-                    .last_failure_fingerprint
-                    .as_deref()
-                    .map(|prev| prev == fingerprint)
-                    .unwrap_or(false);
+            goal_run_id,
+            GoalRunPhase::RuntimeExecution,
+            GoalRunEventKind::PhaseStarted,
+            "Runtime execution started",
+            None,
+        );
+        goal_run = update_goal_run_state(
+            &state.db,
+            goal_run_id,
+            GoalRunUpdate {
+                phase: Some(GoalRunPhase::RuntimeExecution),
+                status: Some(GoalRunStatus::Running),
+                runtime_status_summary: Some(Some(
+                    runtime_status
+                        .spec
+                        .as_ref()
+                        .map(|spec| spec.run_command.clone())
+                        .unwrap_or_else(|| "runtime configured".to_string()),
+                )),
+                ..Default::default()
+            },
+        )?;
 
-                if current_retry < MAX_REPAIR_RETRIES && !same_failure {
-                    goal_run = update_goal_run_state(
+        'runtime_execution: loop {
+            match runtime_commands::start_runtime_impl(
+                &state.db,
+                &state.runtime_sessions,
+                goal_run.project_id.clone(),
+            )
+            .await
+            {
+                Ok(_) => break 'runtime_execution,
+                Err(error) => {
+                    let fingerprint = failure_fingerprint(GoalRunPhase::RuntimeExecution, &error);
+                    let current_retry = {
+                        let db = state.db.lock().map_err(|e| e.to_string())?;
+                        db.get_goal_run(goal_run_id)?.retry_count
+                    };
+                    let same_failure = goal_run
+                        .last_failure_fingerprint
+                        .as_deref()
+                        .map(|prev| prev == fingerprint)
+                        .unwrap_or(false);
+
+                    if current_retry < MAX_REPAIR_RETRIES && !same_failure {
+                        goal_run = update_goal_run_state(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunUpdate {
+                                phase: Some(GoalRunPhase::RuntimeExecution),
+                                status: Some(GoalRunStatus::Retrying),
+                                retry_count: Some(current_retry + 1),
+                                last_failure_summary: Some(Some(error.clone())),
+                                last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                                blocker_reason: Some(None),
+                                attention_required: Some(false),
+                                ..Default::default()
+                            },
+                        )?;
+                        log_event(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunPhase::RuntimeExecution,
+                            GoalRunEventKind::Note,
+                            &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
+                            Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                        );
+                        match attempt_cto_repair(
+                            app_handle,
+                            &state.db,
+                            &goal_run,
+                            GoalRunPhase::RuntimeExecution,
+                            &error,
+                        )
+                        .await
+                        {
+                            Ok(_) => continue 'runtime_execution,
+                            Err(repair_err) => {
+                                warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
+                            }
+                        }
+                    }
+
+                    update_goal_run_state(
                         &state.db,
                         goal_run_id,
                         GoalRunUpdate {
                             phase: Some(GoalRunPhase::RuntimeExecution),
-                            status: Some(GoalRunStatus::Retrying),
-                            retry_count: Some(current_retry + 1),
+                            status: Some(GoalRunStatus::Blocked),
+                            blocker_reason: Some(Some(error.clone())),
                             last_failure_summary: Some(Some(error.clone())),
                             last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                            blocker_reason: Some(None),
-                            attention_required: Some(false),
+                            attention_required: Some(true),
                             ..Default::default()
                         },
                     )?;
@@ -596,61 +664,26 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         &state.db,
                         goal_run_id,
                         GoalRunPhase::RuntimeExecution,
-                        GoalRunEventKind::Note,
-                        &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
-                        Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
-                    );
-                    match attempt_cto_repair(
-                        app_handle,
-                        &state.db,
-                        &goal_run,
-                        GoalRunPhase::RuntimeExecution,
+                        GoalRunEventKind::Blocked,
                         &error,
-                    )
-                    .await
-                    {
-                        Ok(_) => continue 'runtime_execution,
-                        Err(repair_err) => {
-                            warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
-                        }
-                    }
+                        Some(json!({ "fingerprint": fingerprint })),
+                    );
+                    return Ok(());
                 }
-
-                update_goal_run_state(
-                    &state.db,
-                    goal_run_id,
-                    GoalRunUpdate {
-                        phase: Some(GoalRunPhase::RuntimeExecution),
-                        status: Some(GoalRunStatus::Blocked),
-                        blocker_reason: Some(Some(error.clone())),
-                        last_failure_summary: Some(Some(error.clone())),
-                        last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                        attention_required: Some(true),
-                        ..Default::default()
-                    },
-                )?;
-                log_event(
-                    &state.db,
-                    goal_run_id,
-                    GoalRunPhase::RuntimeExecution,
-                    GoalRunEventKind::Blocked,
-                    &error,
-                    Some(json!({ "fingerprint": fingerprint })),
-                );
-                return Ok(());
             }
         }
-    }
+    } // end if start_ordinal <= RuntimeExecution
 
-    goal_run = update_goal_run_state(
-        &state.db,
-        goal_run_id,
-        GoalRunUpdate {
-            phase: Some(GoalRunPhase::Verification),
-            status: Some(GoalRunStatus::Running),
-            ..Default::default()
-        },
-    )?;
+    if start_ordinal <= GoalRunPhase::Verification.ordinal() {
+        goal_run = update_goal_run_state(
+            &state.db,
+            goal_run_id,
+            GoalRunUpdate {
+                phase: Some(GoalRunPhase::Verification),
+                status: Some(GoalRunStatus::Running),
+                ..Default::default()
+            },
+        )?;
 
     'verification: loop {
         let verification_result =
@@ -791,6 +824,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
         );
         return Ok(());
     }
+    } // end if start_ordinal <= Verification
 
     info!(goal_run_id = %goal_run_id, "Goal run executor finished");
     Ok(())
