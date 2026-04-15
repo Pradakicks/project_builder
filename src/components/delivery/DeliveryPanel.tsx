@@ -3,7 +3,7 @@ import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 import { openRuntimeInBrowser } from "../../api/runtimeApi";
-import type { GoalRunEvent, GoalRunTimelineEntry, VerificationResult } from "../../types";
+import type { GoalRun, GoalRunEvent, VerificationResult } from "../../types";
 import { QuickRuntimeSetup } from "./QuickRuntimeSetup";
 
 function formatTime(value: string | null) {
@@ -45,26 +45,122 @@ function VerificationResultBlock({ result }: { result: VerificationResult }) {
   );
 }
 
-function buildCurrentTimeline(events: GoalRunEvent[]): GoalRunTimelineEntry[] {
-  return events.map((event) => ({
-    id: event.id,
-    kind:
-      event.phase === "runtime-configuration" || event.phase === "runtime-execution"
-        ? "runtime"
-        : event.phase === "verification"
-          ? "verification"
-          : "phase",
-    title: `${event.phase} / ${event.kind}`,
-    detail: event.summary,
-    timestamp: event.createdAt,
-    active: event.kind === "phase-started",
-    status:
-      event.kind === "failed" || event.kind === "blocked"
-        ? "warning"
-        : event.kind === "phase-completed"
-          ? "success"
-          : "info",
-  }));
+interface PhaseArc {
+  phase: string;
+  label: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationLabel: string | null;
+  outcome: "completed" | "failed" | "blocked" | "running" | "pending";
+  repairCount: number;
+  repairSummaries: string[];
+  contextDetail: string | null;
+}
+
+const PHASE_ORDER = [
+  "prompt-received",
+  "planning",
+  "implementation",
+  "merging",
+  "runtime-configuration",
+  "runtime-execution",
+  "verification",
+] as const;
+
+const PHASE_LABELS: Record<string, string> = {
+  "prompt-received": "Started",
+  "planning": "Planning",
+  "implementation": "Implementation",
+  "merging": "Merging",
+  "runtime-configuration": "Runtime Configuration",
+  "runtime-execution": "Runtime Execution",
+  "verification": "Verification",
+};
+
+function formatDuration(startedAt: string, endedAt: string): string {
+  const ms = Date.parse(endedAt) - Date.parse(startedAt);
+  if (ms < 0) return "";
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
+function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): PhaseArc[] {
+  const byPhase: Record<string, GoalRunEvent[]> = {};
+  for (const e of events) {
+    if (!byPhase[e.phase]) byPhase[e.phase] = [];
+    byPhase[e.phase].push(e);
+  }
+
+  const arcs: PhaseArc[] = [];
+  for (const phase of PHASE_ORDER) {
+    const phaseEvents = byPhase[phase];
+    if (!phaseEvents || phaseEvents.length === 0) continue;
+
+    let startedAt: string | null = null;
+    let endedAt: string | null = null;
+    let outcome: PhaseArc["outcome"] = "pending";
+    const repairSummaries: string[] = [];
+    let contextDetail: string | null = null;
+
+    for (const e of phaseEvents) {
+      if (e.kind === "phase-started") {
+        startedAt = e.createdAt;
+        outcome = "running";
+        // Context: for implementation, show plan ID from payload
+        if (phase === "planning" || phase === "implementation") {
+          try {
+            const p = JSON.parse(e.payloadJson ?? "{}") as Record<string, string>;
+            if (p.planId) contextDetail = `Plan: ${String(p.planId).slice(0, 8)}`;
+          } catch { /* ignore */ }
+        }
+      } else if (e.kind === "phase-completed") {
+        endedAt = e.createdAt;
+        outcome = "completed";
+        // Context: for runtime-configuration, show run command from payload
+        if (phase === "runtime-configuration") {
+          try {
+            const p = JSON.parse(e.payloadJson ?? "{}") as Record<string, string>;
+            if (p.runCommand) contextDetail = p.runCommand;
+          } catch { /* ignore */ }
+        }
+      } else if (e.kind === "failed") {
+        endedAt = e.createdAt;
+        outcome = "failed";
+      } else if (e.kind === "blocked") {
+        endedAt = e.createdAt;
+        outcome = "blocked";
+      } else if (e.kind === "retry-scheduled") {
+        repairSummaries.push(e.summary);
+      }
+    }
+
+    // If phase-started exists but no terminal event and it's not the current phase, mark running
+    // (shouldn't happen, but guard against stale data)
+    if (outcome === "running" && currentRun) {
+      if (currentRun.phase !== phase && currentRun.status !== "running" && currentRun.status !== "retrying") {
+        outcome = "running"; // keep as-is — executor may not have written PhaseCompleted yet for old runs
+      }
+    }
+
+    const durationLabel = startedAt && endedAt ? formatDuration(startedAt, endedAt) : null;
+
+    arcs.push({
+      phase,
+      label: PHASE_LABELS[phase] ?? phase,
+      startedAt,
+      endedAt,
+      durationLabel,
+      outcome,
+      repairCount: repairSummaries.length,
+      repairSummaries,
+      contextDetail,
+    });
+  }
+
+  return arcs;
 }
 
 export function DeliveryPanel() {
@@ -100,9 +196,9 @@ export function DeliveryPanel() {
     }
   }, [project?.id, refreshRuntimeStatus]);
 
-  const currentTimeline = useMemo(
-    () => buildCurrentTimeline(deliverySnapshot?.recentEvents ?? goalRunEvents),
-    [deliverySnapshot, goalRunEvents],
+  const phaseArcs = useMemo(
+    () => buildPhaseArcs(deliverySnapshot?.recentEvents ?? goalRunEvents, currentRun ?? null),
+    [deliverySnapshot, goalRunEvents, currentRun],
   );
 
   const recentRuns = useMemo(
@@ -496,42 +592,81 @@ export function DeliveryPanel() {
                 Timeline
               </p>
               <p className="text-[11px] text-gray-500">
-                Persisted backend executor events for the selected run.
+                Phase-by-phase arc of the selected run.
               </p>
             </div>
           </div>
 
-          {currentTimeline.length > 0 ? (
+          {phaseArcs.length > 0 ? (
             <div className="space-y-2">
-              {currentTimeline.map((entry) => (
-                <div
-                  key={entry.id}
-                  className={`rounded border px-3 py-2 text-[11px] ${
-                    entry.active && (currentRun?.status === "running" || currentRun?.status === "retrying")
-                      ? "border-cyan-700 bg-cyan-950/25"
-                      : "border-gray-800 bg-gray-950/60"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-medium text-gray-200">{entry.title}</p>
-                    <span
-                      className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-                        entry.status === "success"
-                          ? "bg-emerald-900/60 text-emerald-300"
-                          : entry.status === "warning"
-                            ? "bg-amber-900/60 text-amber-300"
-                            : "bg-blue-900/60 text-blue-300"
-                      }`}
-                    >
-                      {entry.active && (currentRun?.status === "running" || currentRun?.status === "retrying") ? "active" : entry.status}
-                    </span>
+              {phaseArcs.map((arc) => {
+                const isActive =
+                  arc.outcome === "running" &&
+                  (currentRun?.status === "running" || currentRun?.status === "retrying");
+                return (
+                  <div
+                    key={arc.phase}
+                    className={`rounded border px-3 py-2 text-[11px] ${
+                      isActive
+                        ? "border-cyan-700 bg-cyan-950/25"
+                        : arc.outcome === "completed"
+                          ? "border-green-900/40 bg-green-950/10"
+                          : arc.outcome === "failed"
+                            ? "border-red-900/40 bg-red-950/10"
+                            : arc.outcome === "blocked"
+                              ? "border-amber-900/40 bg-amber-950/10"
+                              : "border-gray-800 bg-gray-950/60"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className={
+                          arc.outcome === "completed" ? "text-green-400"
+                          : arc.outcome === "failed" ? "text-red-400"
+                          : arc.outcome === "blocked" ? "text-amber-400"
+                          : isActive ? "text-cyan-400 animate-pulse"
+                          : "text-gray-600"
+                        }>
+                          {arc.outcome === "completed" ? "✓"
+                           : arc.outcome === "failed" ? "✗"
+                           : arc.outcome === "blocked" ? "⊘"
+                           : isActive ? "●"
+                           : "○"}
+                        </span>
+                        <p className="font-medium text-gray-200">{arc.label}</p>
+                        {arc.repairCount > 0 && (
+                          <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] text-amber-300">
+                            {arc.repairCount} repair{arc.repairCount > 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {arc.durationLabel && (
+                          <span className="text-[10px] text-gray-500">{arc.durationLabel}</span>
+                        )}
+                        {isActive && (
+                          <span className="rounded bg-cyan-900/50 px-1.5 py-0.5 text-[10px] text-cyan-300">
+                            running
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {arc.contextDetail && (
+                      <p className="mt-1 text-[10px] text-gray-500">{arc.contextDetail}</p>
+                    )}
+                    {arc.repairSummaries.length > 0 && (
+                      <ul className="mt-1.5 space-y-0.5">
+                        {arc.repairSummaries.map((s, i) => (
+                          <li key={i} className="flex items-start gap-1.5 text-[10px] text-amber-300/80">
+                            <span className="shrink-0">↺</span>
+                            <span className="whitespace-pre-wrap">{s}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
-                  <p className="mt-1 text-[10px] text-gray-500">{formatTime(entry.timestamp)}</p>
-                  {entry.detail ? (
-                    <p className="mt-1 whitespace-pre-wrap text-gray-400">{entry.detail}</p>
-                  ) : null}
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <p className="text-[11px] text-gray-500">Timeline will appear once a goal run exists.</p>
