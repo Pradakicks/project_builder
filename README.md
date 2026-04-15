@@ -16,8 +16,6 @@ I also wanted more continuity than a normal AI workflow. I wanted teams of agent
 
 Project Builder lets me run a software project more like a startup or tech company than a chat thread. I can talk to a CTO-style agent that helps shape the project, split it into smaller teams that own different parts of the system, and route work to the right agents. Each team can use the models and coding agents that make sense for its part of the job, share context through the project itself, and keep the whole thing moving through planning, implementation, review, merge, runtime, and verification while I oversee what’s happening across the project.
 
-Right now, the main flow looks like this:
-
 - Create a repo-backed project from the app.
 - Break it into pieces and connections on a visual canvas.
 - Use the CTO chat to propose changes through reviewable action blocks.
