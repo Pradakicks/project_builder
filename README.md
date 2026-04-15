@@ -1,173 +1,103 @@
-# Project Builder Dashboard
+# Project Builder
 
-Desktop app for composing projects, pieces, agents, plans, and CTO-driven workflows.
+*Map a software project as a system, hand work to AI agents, and push it all the way toward a running app.*
 
-The current delivery baseline is no longer just diagram editing: each project can now track a top-level goal run, operate in `manual`, `guided`, or `autopilot` mode, and use a normalized runtime spec to start and verify a generated app from inside the desktop UI. The Delivery view now also shows backend-backed blocking truth, retry state, generated-file evidence, git evidence, and runtime evidence for the active run.
+## Why I Built This
 
-## Setup
+I built this because I got frustrated with one-shot AI coding chats. They can be great at writing a file or fixing a bug, but they usually fall apart when the work starts looking like an actual project with moving parts, handoffs, runtime setup, review steps, and long-lived context.
 
-1. Install Node.js and Rust.
-1. Install frontend dependencies:
+I wanted something that felt more like steering a small software team than prompting a chatbot. I wanted to see the architecture, break work into pieces, let different agents handle different scopes, keep the important decisions reviewable, and still have a clear path from "build this" to "okay, now run it and prove it works."
 
-```bash
-npm install
-```
+## What It Does
 
-1. Make sure the Rust toolchain is available in `src-tauri`.
+Project Builder is a desktop app for orchestrating AI-driven software work.
 
-## Run
+You model a project as connected pieces on a canvas, chat with a CTO-style agent about changes, generate a work plan from the diagram, and run piece-level agents to do the implementation. Those runs can use the built-in LLM path or external tools like Claude Code and Codex. The app streams output live, keeps history in SQLite, creates per-piece git branches, auto-commits successful runs, and shows the delivery path in one place.
 
-Start the frontend-only dev server:
+Right now, the main flow looks like this:
 
-```bash
-npm run dev
-```
+- Create a repo-backed project from the app.
+- Break it into pieces and connections on a visual canvas.
+- Use the CTO chat to propose changes through reviewable action blocks.
+- Turn the diagram into a structured work plan with the Leader agent.
+- Run tasks one by one or sequentially.
+- Detect, start, and verify the generated app from inside the desktop UI.
 
-Start the Tauri desktop app:
+It’s mainly for people who want to direct software projects at the system level instead of living inside an IDE full-time.
 
-```bash
-npm run tauri dev
-```
+## Tech Stack
 
-Start a captured desktop debug session:
+- Tauri v2 for the desktop shell
+- React 19 + TypeScript + Vite 7 for the frontend
+- Tailwind CSS v4 for styling
+- `@xyflow/react` for the diagram canvas
+- Zustand for frontend state
+- Rust + Tokio on the backend
+- SQLite via `rusqlite` for persistence
+- `reqwest` for LLM/runtime networking
+- `keyring` for OS-backed API key storage
+- `react-markdown` + `remark-gfm` for agent output rendering
+- Optional external execution through Claude Code and Codex CLIs
 
-```bash
-make dev-session
-```
+## Getting Started
 
-That workflow writes session logs and the latest captured CTO failure artifact into `.debug-sessions/` and enables the in-app **Dev Diagnostics** panel. The panel can copy a structured debug report and replay the latest captured CTO scenario once the relevant project is open.
+### Prerequisites
 
-Build the frontend bundle:
+- Node.js
+- Rust
+- Git
 
-```bash
-npm run build
-```
+If you want to use external execution engines, you’ll also want `claude` and/or `codex` on your `PATH`.
 
-The app now lazy-loads the main views and the editor/chat/plan surfaces, so a cold start only fetches the shell plus the active view chunk. The first time you open the editor, CTO chat, or work plan on a fresh session, the app may briefly show a loading state while that chunk is fetched.
-
-Run Rust checks and tests:
-
-```bash
-cd src-tauri
-cargo check
-cargo test
-```
-
-Run the focused regression matrix:
+### Install
 
 ```bash
-# Frontend build / typecheck coverage
-npm run build
-
-# Rust orchestration, merge, migration, and recovery coverage
-cd src-tauri
-cargo test --lib -- --test-threads=1
+make setup
 ```
 
-## Data Location
+That installs the frontend deps and fetches the Rust crates.
 
-The app stores its SQLite database at:
+### Run the app
 
-- macOS: `~/Library/Application Support/project-builder-dashboard/data.db`
-- Linux: `~/.local/share/project-builder-dashboard/data.db`
-- Windows: `%APPDATA%\project-builder-dashboard\data.db`
+```bash
+make dev
+```
 
-The database bootstrap is versioned with `PRAGMA user_version`, and startup migrations are idempotent. Existing databases are upgraded in place.
+Useful alternatives:
 
-## Troubleshooting
+```bash
+npm run dev          # frontend only
+make check           # TypeScript + Rust checks
+make dev-session     # desktop dev run with captured logs
+```
 
-- If the desktop app fails to start, check the terminal output for the first Rust error and then rerun `cd src-tauri && cargo check`.
-- For fast CTO/IPC debugging, prefer `make dev-session` over raw `npm run tauri dev`, then inspect the in-app **Dev Diagnostics** panel and `.debug-sessions/current/`.
-- If the UI dev server port is busy, stop the other process using port `5174`.
-- If a view opens with a short loading spinner, that is expected. Projects, settings, the editor shell, and the heavier CTO/plan panels are split into separate runtime chunks.
-- If you need a clean local database, delete the `data.db` file at the path above and relaunch the app.
-- If Tauri cannot find a working directory or keyring backend, verify the project permissions and platform keychain access.
+### API keys
 
-## CTO Actions
+The app stores provider keys in the OS keychain from the Settings screen. It also supports environment variable fallback:
 
-CTO chat is review-gated.
+- `ANTHROPIC_API_KEY`
+- `OPENAI_API_KEY`
+- `LLM_API_KEY`
 
-- The model should emit fenced ` ```action ` blocks, one JSON object per block.
-- The frontend validates and reviews those blocks before execution.
-- Invalid or malformed blocks are rejected, preserved in the audit log, and shown in the Decisions tab.
-- A simple inline `action { ... }` block can still be recovered as a fallback, but it is not the supported contract.
+Inside the container workflow, env vars are the safer bet than keychain integration.
 
-Each CTO decision now stores structured audit data:
+### Container workflow
 
-- assistant text and normalized actions
-- validation errors
-- execution steps and errors
-- rollback metadata for the reversible action subset
+If you want the hybrid container setup that ships with the repo:
 
-Rollback is exposed only for the safest reversible CTO actions. Destructive or ambiguous actions remain non-rollbackable.
+```bash
+make container-up
+make container-frontend
+make host-tauri-dev
+```
 
-The CTO prompt also includes the current goal-run and runtime context, and it can now use runtime-oriented actions such as `configureRuntime`, `runProject`, `stopProject`, and `retryGoalStep` when the project has enough structure to continue autonomously.
+### First run
 
-It can also create a more concrete implementation piece in one step by attaching `agentPrompt`, `outputMode`, and `executionEngine` to `createPiece`, then dispatch that work immediately with `runPiece`. That is the current shortest path from a reviewed CTO response to real files appearing in the working directory.
+Create a project from the Projects screen, choose a parent folder, and the app will create a repo-backed working directory with an initial `main` commit for you.
 
-## Goal Runs And Runtime
+## What's Next
 
-The app now persists a per-project goal-run record for top-level prompts such as “create a simple todo web app.” A goal run tracks:
-
-- prompt, phase, and status
-- linked plan id
-- retry count and last failure summary
-- stop/retry executor state and backend event history
-- runtime status summary
-- verification summary
-
-In `autopilot` mode, a successful reviewed CTO action now hands off to a Rust-side goal-run executor that can continue after the UI reloads. That executor can chain into:
-
-1. plan generation or reuse
-1. plan approval
-1. task execution
-1. merge and integration review
-1. runtime detection/configuration
-1. runtime start and verification
-
-This does not guarantee a fully working app for every prompt yet, but it does give the product a real end-to-end control loop instead of a chat-only handoff.
-
-The editor also now includes a dedicated **Delivery** tab that reads persisted goal-run events and runtime history so you can inspect the full prompt → plan → runtime path in one place.
-
-Runtime configuration is stored on project settings and currently supports:
-
-- install command
-- run command
-- readiness check
-- verify command
-- stop behavior
-- app URL / port hint
-
-If no runtime spec is configured, the desktop app will first try to auto-detect one from the working directory before blocking the goal run.
-
-## Operator Runbook
-
-For task failures, malformed CTO responses, merge conflicts, rollback guidance, and local reset/recovery steps, see [docs/operator-runbook.md](./docs/operator-runbook.md).
-
-## Development Workflow
-
-For the captured desktop debugging loop, scenario replay behavior, and the current `log_cto_decision` regression workflow, see [DEVELOPMENT.md](./docs/DEVELOPMENT.md).
-
-## Expanded Test Matrix
-
-The current regression suite covers:
-
-- deterministic project bootstrap and rollback
-- external agent runs writing real files into the repo working directory
-- schema upgrade/idempotency for local SQLite databases
-- happy-path plan generation, execution, merge, and integration review
-- failed external execution and retry/recovery
-- manual merge conflict handling
-- CTO action parsing for valid `generatePlan` blocks and malformed fenced action output
-
-When adding new behavior, prefer a focused Rust test or Vitest regression over relying on manual verification.
-
-## External Run Evidence
-
-Successful external piece runs now persist a `generated_files` artifact alongside the existing git metadata. In the Piece editor's Agent tab, you can inspect:
-
-- branch and commit SHA
-- diff summary
-- generated file listing captured from the piece branch
-
-This is the first baseline proof that the system wrote real files into the project working directory.
+- [ ] Persistent multi-agent teams with pause/resume and crash recovery
+- [ ] Agent-to-agent coordination across pieces
+- [ ] Richer live agent status and monitoring, not just running/failed
+- [ ] 24/7 continuous operation for long-lived projects
