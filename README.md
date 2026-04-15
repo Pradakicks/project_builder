@@ -6,6 +6,8 @@
 
 I wanted something that felt more like steering a small software team than prompting a chatbot. I wanted to see the architecture, break work into pieces, let different agents handle different scopes, keep the important decisions reviewable, and still have a clear path from "build this" to "okay, now run it and prove it works."
 
+I also wanted a way to turn messy product intent into something structured, reviewable, and actually runnable.
+
 ## What It Does
 
 Project Builder is a local-first orchestration system for AI-assisted software delivery.
@@ -20,6 +22,26 @@ Right now, the main flow looks like this:
 - Turn the diagram into a structured work plan with the Leader agent.
 - Run tasks one by one or sequentially.
 - Detect, start, and verify the generated app from inside the desktop UI.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  CTO[CTO agent] --> Leader[Leader agent]
+  Leader --> Pieces[Piece agents]
+  Pieces --> Git[Git branches + commits]
+  Git --> Merge[Merge + integration review]
+  Merge --> Runtime[Runtime + verification]
+```
+
+The CTO shapes the project, the Leader turns that into executable work, and each piece can run with its own model or coding agent before everything gets merged, reviewed, and verified.
+
+## What Makes It Adaptive
+
+- Different pieces can use different models and different coding agents in the same project.
+- Review and autonomy policies can be tuned based on how much control you want.
+- Runtime setup and validation are project-specific instead of hardcoded.
+- The system keeps state, streams progress, and supports recovery instead of treating every run like a one-shot chat.
 
 ## Tech Stack
 
