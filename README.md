@@ -81,7 +81,9 @@ The control layer shapes the project, the execution layer can mix models and cod
 - [ ] Specialized implementation, testing, and review agents per piece
 - [ ] Agent-to-agent coordination across teams
 - [ ] Persistent agent processes with pause, resume, and crash recovery
-- [ ] Project-wide monitoring and continuous operation
+- [ ] Stronger goal-run orchestration and retry state
+- [ ] Better acceptance verification for generated apps
+- [ ] Richer live agent status and project-wide monitoring
 
 ## Tech Stack
 
