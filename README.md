@@ -26,15 +26,40 @@ Right now, the main flow looks like this:
 ## Architecture
 
 ```mermaid
-flowchart LR
-  CTO[CTO agent] --> Leader[Leader agent]
-  Leader --> Pieces[Piece agents]
-  Pieces --> Git[Git branches + commits]
-  Git --> Merge[Merge + integration review]
-  Merge --> Runtime[Runtime + verification]
+flowchart TB
+  subgraph Control["Control Layer"]
+    Canvas[Project graph / canvas]
+    CTO[CTO agent]
+    Leader[Leader agent]
+    Canvas --> CTO
+    CTO --> Leader
+  end
+
+  subgraph Execution["Execution Layer"]
+    PieceA[Piece agent A]
+    PieceB[Piece agent B]
+    Models[Built-in models]
+    Coders[Claude Code / Codex]
+    Leader --> PieceA
+    Leader --> PieceB
+    PieceA --> Models
+    PieceB --> Coders
+  end
+
+  subgraph Delivery["Delivery Layer"]
+    Git[Branch-per-piece Git workflow]
+    Review[Merge + integration review]
+    Runtime[Runtime startup]
+    Verify[Verification + recovery]
+    Git --> Review --> Runtime --> Verify
+  end
+
+  PieceA --> Git
+  PieceB --> Git
+  Verify -. feedback loop .-> CTO
 ```
 
-The CTO shapes the project, the Leader turns that into executable work, and each piece can run with its own model or coding agent before everything gets merged, reviewed, and verified.
+The control layer shapes the project, the execution layer can mix models and coding agents across pieces, and the delivery layer turns that work into something merged, runnable, and verifiable.
 
 ## What Makes It Adaptive
 
