@@ -4,15 +4,13 @@
 
 ## Why I Built This
 
-I wanted something that felt more like steering a small software team than prompting a chatbot. I wanted to see the architecture, break work into pieces, let different agents handle different scopes, keep the important decisions reviewable, and still have a clear path from "build this" to "okay, now run it and prove it works."
+Most AI coding tools still feel like isolated prompts. I wanted to see the architecture, see how everything connects, break work into pieces, and keep the important decisions reviewable. I wanted live documentation more like a real startup or tech company uses, so agent teams could share context and work together instead of constantly starting from scratch.
 
-I also wanted a way to turn messy product intent into something structured, reviewable, and actually runnable.
+I also wanted more continuity than a normal AI workflow: teams that own their area, stay attached to parts of a project, review each other's work, and keep long-running work structured, recoverable, and visible.
 
 ## What It Does
 
-Project Builder is a local-first orchestration system for AI-assisted software delivery.
-
-You model a project as connected pieces on a canvas, chat with a CTO-style agent about changes, generate a work plan from the diagram, and run piece-level agents to do the implementation. Those runs can use the built-in LLM path or external tools like Claude Code and Codex, and different pieces can use different models and coding agents in the same project. The app streams output live, keeps history in SQLite, creates per-piece git branches, auto-commits successful runs, and shows the delivery path in one place.
+Project Builder lets me run a software project more like a startup or tech company than a chat thread. I can talk to a CTO-style agent that helps shape the project, split it into smaller teams that own different parts of the system, and route work to the right agents. Each team can use the models and coding agents that make sense for its part of the job, while I still oversee the whole project and keep the flow moving through planning, implementation, review, merge, runtime, and verification.
 
 Right now, the main flow looks like this:
 
