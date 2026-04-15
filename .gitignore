@@ -11,6 +11,9 @@ target/
 *.swo
 .claude/
 .debug-sessions/
+AGENTS.md
+CLAUDE.md
+docs/AGENTS.md
 docs/APP_FLOW.md
 docs/BACKEND_STRUCTURE.md
 docs/DESIGN_SYSTEM.md

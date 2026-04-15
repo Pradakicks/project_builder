@@ -166,7 +166,6 @@ Create a project from the Projects screen, choose a parent folder, and the app w
 
 ## Docs
 
-- [`docs/AGENTS.md`](docs/AGENTS.md) — repo maintenance rules for coding agents
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — local development and debugging workflow
 - [`docs/TECH_STACK.md`](docs/TECH_STACK.md) — current toolchain and dependency snapshot
 
