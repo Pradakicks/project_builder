@@ -4,9 +4,9 @@
 
 ## Why I Built This
 
-Most AI coding tools still feel like isolated prompts. I wanted to see the architecture, see how everything connects, break work into pieces, and keep the important decisions reviewable. I wanted live documentation more like a real startup or tech company uses, so agent teams could share context and work together instead of constantly starting from scratch.
+Most AI coding tools still feel like isolated prompts. I wanted to see the architecture, see how everything connects, break the project into pieces, let different agents handle different scopes, and keep the important decisions reviewable without the whole thing turning into prompt spaghetti. I wanted live documentation more like a real startup or tech company uses, so agent teams could share context and work together instead of constantly starting from scratch.
 
-I also wanted more continuity than a normal AI workflow: teams that own their area, stay attached to parts of a project, review each other's work, and keep long-running work structured, recoverable, and visible.
+I also wanted more continuity than a normal AI workflow. I wanted teams of agents to stay attached to parts of a project, own their area, review each other's work, consult other teams when they needed context outside their lane, and keep long-running work structured, recoverable, and under control while I could still see what they were working with.
 
 ## What It Does
 
