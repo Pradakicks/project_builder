@@ -68,10 +68,10 @@ The control layer shapes the project, the execution layer can mix models and cod
 
 ## What's Next
 
-- [ ] Persistent agent teams
+- [ ] Long-running agent teams attached to parts of the project
 - [ ] Agent-to-agent coordination
-- [ ] Lifecycle management
-- [ ] Continuous operation
+- [ ] Start, pause, resume, and recover agent work over time
+- [ ] Continuous background operation across the project
 
 ## Tech Stack
 
