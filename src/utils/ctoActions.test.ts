@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   generateWorkPlan: vi.fn(),
   leaderGeneratePlan: vi.fn(),
   createPiece: vi.fn(),
+  updatePiece: vi.fn(),
   runPieceAgent: vi.fn(),
   onAgentOutputChunk: vi.fn(),
   appState: {
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   },
   projectState: {
     project: { id: "project-1" } as { id: string } | null,
+    loadProject: vi.fn(),
   },
 }));
 
@@ -24,6 +26,7 @@ vi.mock("../api/tauriApi", async () => {
   return {
     ...actual,
     createPiece: mocks.createPiece,
+    updatePiece: mocks.updatePiece,
   };
 });
 
@@ -57,6 +60,7 @@ import { describeAction, executeActions, reviewActions } from "./ctoActions";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.projectState.project = { id: "project-1" };
 });
 
 describe("CTO action parsing", () => {
@@ -179,6 +183,9 @@ describe("CTO action execution", () => {
       },
     );
     expect(mocks.runPieceAgent).toHaveBeenCalledWith("piece-1", undefined);
+    expect(mocks.updatePiece).toHaveBeenCalledWith("piece-1", {
+      phase: "implementing",
+    });
     expect(result.executed).toBe(2);
     expect(result.errors).toEqual([]);
   });

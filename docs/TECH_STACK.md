@@ -15,8 +15,10 @@
 - **@xyflow/react** 12.10.1 — canvas / diagram editor
 - **Zustand** 5.0.11 — state management
 - **react-markdown** 10.1.0 + **remark-gfm** 4.0.1 — LLM output rendering
+- **Vitest** 4.1.4
 - **@tauri-apps/api** 2.10.1
 - **@tauri-apps/plugin-dialog** 2.6.0
+- **@tauri-apps/plugin-opener** 2.0.0
 
 ## Backend (Rust)
 - **rusqlite** 0.31 (bundled SQLite)
@@ -29,6 +31,7 @@
 - **tracing** 0.1 + **tracing-subscriber** 0.3
 - **async-trait** 0.1
 - **futures** 0.3
+- **regex** 1.x
 
 ## Storage
 - **SQLite** via rusqlite, bundled

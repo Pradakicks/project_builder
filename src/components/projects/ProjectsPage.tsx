@@ -303,7 +303,7 @@ export function ProjectsPage() {
                   <input
                     value={parentDirectory}
                     onChange={(e) => setParentDirectory(e.target.value)}
-                    placeholder="/Users/adrianth/Projects"
+                    placeholder="/path/to/projects"
                     className="flex-1 rounded border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
                   />
                   <button

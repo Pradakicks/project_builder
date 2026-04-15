@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Project Builder preview</title>
+  <desc id="desc">A lightweight preview card for the Project Builder repository.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#111827" />
+    </linearGradient>
+    <linearGradient id="panel" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#1f2937" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)" rx="32" />
+  <rect x="56" y="56" width="1088" height="518" fill="url(#panel)" rx="28" stroke="#334155" />
+
+  <text x="96" y="150" fill="#93c5fd" font-family="Helvetica, Arial, sans-serif" font-size="28">
+    Active personal project
+  </text>
+  <text x="96" y="230" fill="#f8fafc" font-family="Helvetica, Arial, sans-serif" font-size="64" font-weight="700">
+    Project Builder
+  </text>
+  <text x="96" y="292" fill="#cbd5e1" font-family="Helvetica, Arial, sans-serif" font-size="28">
+    Map a project, route work to AI agents, and drive it toward a running app.
+  </text>
+
+  <rect x="96" y="346" width="308" height="154" rx="22" fill="#0f172a" stroke="#1d4ed8" />
+  <rect x="446" y="346" width="308" height="154" rx="22" fill="#0f172a" stroke="#0f766e" />
+  <rect x="796" y="346" width="308" height="154" rx="22" fill="#0f172a" stroke="#9333ea" />
+
+  <text x="122" y="395" fill="#bfdbfe" font-family="Helvetica, Arial, sans-serif" font-size="22" font-weight="700">
+    Control
+  </text>
+  <text x="122" y="432" fill="#e5e7eb" font-family="Helvetica, Arial, sans-serif" font-size="20">
+    Canvas graph
+  </text>
+  <text x="122" y="463" fill="#e5e7eb" font-family="Helvetica, Arial, sans-serif" font-size="20">
+    CTO chat
+  </text>
+
+  <text x="472" y="395" fill="#99f6e4" font-family="Helvetica, Arial, sans-serif" font-size="22" font-weight="700">
+    Execution
+  </text>
+  <text x="472" y="432" fill="#e5e7eb" font-family="Helvetica, Arial, sans-serif" font-size="20">
+    Piece agents
+  </text>
+  <text x="472" y="463" fill="#e5e7eb" font-family="Helvetica, Arial, sans-serif" font-size="20">
+    Codex / Claude Code
+  </text>
+
+  <text x="822" y="395" fill="#e9d5ff" font-family="Helvetica, Arial, sans-serif" font-size="22" font-weight="700">
+    Delivery
+  </text>
+  <text x="822" y="432" fill="#e5e7eb" font-family="Helvetica, Arial, sans-serif" font-size="20">
+    Branch + merge flow
+  </text>
+  <text x="822" y="463" fill="#e5e7eb" font-family="Helvetica, Arial, sans-serif" font-size="20">
+    Runtime + verification
+  </text>
+
+  <text x="96" y="540" fill="#94a3b8" font-family="Helvetica, Arial, sans-serif" font-size="22">
+    Public repo: MIT licensed, issue-first feedback, still evolving quickly.
+  </text>

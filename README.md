@@ -2,6 +2,10 @@
 
 *Map a software project as a system, hand work to AI agents, and push it all the way toward a running app.*
 
+![Project Builder preview](docs/public-preview.svg)
+
+Project Builder is an active personal project for exploring a more structured way to build software with AI agents. If you try it, fork it, or have ideas, use GitHub Issues to share feedback.
+
 ## Why I Built This
 
 Most AI coding tools still feel like isolated prompts. I wanted to see the architecture, see how everything connects, break the project into pieces, let different agents handle different scopes, and keep the important decisions reviewable without the whole thing turning into prompt spaghetti. I wanted live documentation more like a real startup or tech company uses, so agent teams could share context and work together instead of constantly starting from scratch.
@@ -30,6 +34,12 @@ Right now, the main flow looks like this:
 - Branch-per-piece Git workflow with auto-commit, merge, and integration review
 - Prompt-to-delivery loop with runtime detection, startup, verification, retry, and recovery
 - Project-wide visibility through delivery state, live agent activity, and execution status
+
+## Current Status
+
+- The core project graph, CTO chat, work-plan flow, piece execution, merge flow, runtime startup, and verification loop are implemented.
+- The repo is still evolving quickly, especially around acceptance verification, persistent agents, and deeper multi-agent coordination.
+- External execution via Claude Code and Codex is optional; the app can also run with built-in LLM providers.
 
 ## Architecture
 
@@ -84,6 +94,10 @@ The control layer shapes the project, the execution layer can mix models and cod
 - [ ] Stronger goal-run orchestration and retry state
 - [ ] Better acceptance verification for generated apps
 - [ ] Richer live agent status and project-wide monitoring
+
+## Feedback
+
+If you want to try the project, report a bug, or share an idea, open a GitHub issue. This repo is public so people can inspect the work, fork it, and follow the project as it develops.
 
 ## Tech Stack
 
@@ -149,3 +163,13 @@ make host-tauri-dev
 ### First run
 
 Create a project from the Projects screen, choose a parent folder, and the app will create a repo-backed working directory with an initial `main` commit for you.
+
+## Docs
+
+- [`docs/AGENTS.md`](docs/AGENTS.md) — repo maintenance rules for coding agents
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — local development and debugging workflow
+- [`docs/TECH_STACK.md`](docs/TECH_STACK.md) — current toolchain and dependency snapshot
+
+## License
+
+Released under the [MIT License](LICENSE).
