@@ -8,9 +8,9 @@ I wanted something that felt more like steering a small software team than promp
 
 ## What It Does
 
-Project Builder is a desktop app for orchestrating AI-driven software work.
+Project Builder is a local-first orchestration system for AI-assisted software delivery.
 
-You model a project as connected pieces on a canvas, chat with a CTO-style agent about changes, generate a work plan from the diagram, and run piece-level agents to do the implementation. Those runs can use the built-in LLM path or external tools like Claude Code and Codex. The app streams output live, keeps history in SQLite, creates per-piece git branches, auto-commits successful runs, and shows the delivery path in one place.
+You model a project as connected pieces on a canvas, chat with a CTO-style agent about changes, generate a work plan from the diagram, and run piece-level agents to do the implementation. Those runs can use the built-in LLM path or external tools like Claude Code and Codex, and different pieces can use different models and coding agents in the same project. The app streams output live, keeps history in SQLite, creates per-piece git branches, auto-commits successful runs, and shows the delivery path in one place.
 
 Right now, the main flow looks like this:
 
@@ -21,8 +21,6 @@ Right now, the main flow looks like this:
 - Run tasks one by one or sequentially.
 - Detect, start, and verify the generated app from inside the desktop UI.
 
-It’s mainly for people who want to direct software projects at the system level instead of living inside an IDE full-time.
-
 ## Tech Stack
 
 - Tauri + Rust
@@ -30,7 +28,7 @@ It’s mainly for people who want to direct software projects at the system leve
 - Vite + Tailwind CSS
 - React Flow + Zustand
 - SQLite
-- Claude / OpenAI-compatible models, plus optional Claude Code and Codex execution
+- Claude / OpenAI-compatible models, plus optional Claude Code and Codex execution that can be mixed across pieces
 
 ## Getting Started
 
