@@ -4,8 +4,6 @@
 
 ## Why I Built This
 
-I built this because I got frustrated with one-shot AI coding chats. They can be great at writing a file or fixing a bug, but they usually fall apart when the work starts looking like an actual project with moving parts, handoffs, runtime setup, review steps, and long-lived context.
-
 I wanted something that felt more like steering a small software team than prompting a chatbot. I wanted to see the architecture, break work into pieces, let different agents handle different scopes, keep the important decisions reviewable, and still have a clear path from "build this" to "okay, now run it and prove it works."
 
 ## What It Does
@@ -27,17 +25,12 @@ It’s mainly for people who want to direct software projects at the system leve
 
 ## Tech Stack
 
-- Tauri v2 for the desktop shell
-- React 19 + TypeScript + Vite 7 for the frontend
-- Tailwind CSS v4 for styling
-- `@xyflow/react` for the diagram canvas
-- Zustand for frontend state
-- Rust + Tokio on the backend
-- SQLite via `rusqlite` for persistence
-- `reqwest` for LLM/runtime networking
-- `keyring` for OS-backed API key storage
-- `react-markdown` + `remark-gfm` for agent output rendering
-- Optional external execution through Claude Code and Codex CLIs
+- Tauri + Rust
+- React + TypeScript
+- Vite + Tailwind CSS
+- React Flow + Zustand
+- SQLite
+- Claude / OpenAI-compatible models, plus optional Claude Code and Codex execution
 
 ## Getting Started
 
