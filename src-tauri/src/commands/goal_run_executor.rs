@@ -347,6 +347,14 @@ async fn advance_goal_run<R: tauri::Runtime>(
             )?;
         }
 
+        log_event(
+            &state.db,
+            goal_run_id,
+            GoalRunPhase::Planning,
+            GoalRunEventKind::PhaseCompleted,
+            "Planning completed",
+            Some(json!({ "planId": plan.id })),
+        );
         plan_holder = Some(plan);
     }
 
@@ -406,7 +414,17 @@ async fn advance_goal_run<R: tauri::Runtime>(
             )
             .await
             {
-                Ok(()) => break 'implementation,
+                Ok(()) => {
+                    log_event(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunPhase::Implementation,
+                        GoalRunEventKind::PhaseCompleted,
+                        "Implementation completed",
+                        None,
+                    );
+                    break 'implementation;
+                }
                 Err(error) => {
                     let fingerprint = failure_fingerprint(GoalRunPhase::Implementation, &error);
                     let current_retry = {
@@ -438,7 +456,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             &state.db,
                             goal_run_id,
                             GoalRunPhase::Implementation,
-                            GoalRunEventKind::Note,
+                            GoalRunEventKind::RetryScheduled,
                             &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
                             Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
                         );
@@ -554,6 +572,14 @@ async fn advance_goal_run<R: tauri::Runtime>(
             .await?;
             let _ = runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
         }
+        log_event(
+            &state.db,
+            goal_run_id,
+            GoalRunPhase::RuntimeConfiguration,
+            GoalRunEventKind::PhaseCompleted,
+            "Runtime configured",
+            None,
+        );
     } // end if start_ordinal <= RuntimeConfiguration
 
     if start_ordinal <= GoalRunPhase::RuntimeExecution.ordinal() {
@@ -595,7 +621,17 @@ async fn advance_goal_run<R: tauri::Runtime>(
             )
             .await
             {
-                Ok(_) => break 'runtime_execution,
+                Ok(_) => {
+                    log_event(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunPhase::RuntimeExecution,
+                        GoalRunEventKind::PhaseCompleted,
+                        "Runtime started",
+                        None,
+                    );
+                    break 'runtime_execution;
+                }
                 Err(error) => {
                     let fingerprint = failure_fingerprint(GoalRunPhase::RuntimeExecution, &error);
                     let current_retry = {
@@ -627,7 +663,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             &state.db,
                             goal_run_id,
                             GoalRunPhase::RuntimeExecution,
-                            GoalRunEventKind::Note,
+                            GoalRunEventKind::RetryScheduled,
                             &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
                             Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
                         );
@@ -780,7 +816,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 &state.db,
                 goal_run_id,
                 GoalRunPhase::Verification,
-                GoalRunEventKind::Note,
+                GoalRunEventKind::RetryScheduled,
                 &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
                 Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
             );
