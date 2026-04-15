@@ -66,6 +66,13 @@ The control layer shapes the project, the execution layer can mix models and cod
 - Runtime setup and validation are project-specific instead of hardcoded.
 - The system keeps state, streams progress, and supports recovery instead of treating every run like a one-shot chat.
 
+## What's Next
+
+- [ ] Persistent agent teams
+- [ ] Agent-to-agent coordination
+- [ ] Lifecycle management
+- [ ] Continuous operation
+
 ## Tech Stack
 
 - Tauri + Rust
@@ -130,10 +137,3 @@ make host-tauri-dev
 ### First run
 
 Create a project from the Projects screen, choose a parent folder, and the app will create a repo-backed working directory with an initial `main` commit for you.
-
-## What's Next
-
-- [ ] Persistent multi-agent teams with pause/resume and crash recovery
-- [ ] Agent-to-agent coordination across pieces
-- [ ] Richer live agent status and monitoring, not just running/failed
-- [ ] 24/7 continuous operation for long-lived projects
