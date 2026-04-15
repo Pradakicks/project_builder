@@ -21,6 +21,16 @@ Right now, the main flow looks like this:
 - Run tasks one by one or sequentially.
 - Detect, start, and verify the generated app from inside the desktop UI.
 
+## Key Features
+
+- Visual project graph with pieces, connections, responsibilities, interfaces, and constraints
+- CTO-style chat with review-gated actions and decision history
+- Leader-generated work plans with per-task runs and sequential execution
+- Piece-level execution with built-in models or external coding agents like Claude Code and Codex
+- Branch-per-piece Git workflow with auto-commit, merge, and integration review
+- Prompt-to-delivery loop with runtime detection, startup, verification, retry, and recovery
+- Project-wide visibility through delivery state, live agent activity, and execution status
+
 ## Architecture
 
 ```mermaid
