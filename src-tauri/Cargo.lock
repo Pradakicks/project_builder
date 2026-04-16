@@ -3007,6 +3007,7 @@ dependencies = [
  "chrono",
  "futures",
  "keyring",
+ "libc",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -3017,6 +3018,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -4489,6 +4491,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

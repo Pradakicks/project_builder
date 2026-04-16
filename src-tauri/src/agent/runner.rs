@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Load a piece and its context from the database.
@@ -191,6 +192,7 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
     feedback: Option<&str>,
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
+    cancel: Option<CancellationToken>,
 ) -> Result<TokenUsage, String> {
     let (piece, context, settings) = load_piece_context(piece_id, db)?;
 
@@ -208,7 +210,7 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
             run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle).await
         }
         name => {
-            run_external_agent(&piece, &context, &settings, name, piece_id, feedback, db, app_handle).await
+            run_external_agent(&piece, &context, &settings, name, piece_id, feedback, db, app_handle, cancel.clone()).await
         }
     };
 
@@ -409,6 +411,7 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
     db: &Mutex<Database>,
     running_pieces: &Mutex<HashSet<String>>,
     app_handle: &AppHandle<R>,
+    cancel: Option<CancellationToken>,
 ) -> Result<(), String> {
     let plan = {
         let db = db.lock().map_err(|e| e.to_string())?;
@@ -435,6 +438,13 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
     let mut current_index = 0usize;
 
     for task in tasks {
+        // Stop between tasks if the executor is being paused/cancelled.
+        if let Some(token) = cancel.as_ref() {
+            if token.is_cancelled() {
+                return Err("cancelled".to_string());
+            }
+        }
+
         // Validate the piece exists before attempting to run — skip tasks that
         // reference non-existent or hallucinated piece IDs.
         let piece_exists = {
@@ -523,7 +533,7 @@ pub async fn run_all_plan_tasks<R: tauri::Runtime>(
             }
         }
 
-        let result = run_piece_agent(&task.piece_id, None, db, app_handle).await;
+        let result = run_piece_agent(&task.piece_id, None, db, app_handle, cancel.clone()).await;
 
         {
             let mut running = running_pieces.lock().map_err(|e| e.to_string())?;
@@ -738,6 +748,7 @@ async fn run_external_agent<R: tauri::Runtime>(
     feedback: Option<&str>,
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
+    cancel: Option<CancellationToken>,
 ) -> Result<AgentResult, String> {
     use super::git_ops;
 
@@ -846,7 +857,7 @@ async fn run_external_agent<R: tauri::Runtime>(
         }
     });
 
-    let result = super::external::run_external(engine_name, &run_config, tx).await;
+    let result = super::external::run_external(engine_name, &run_config, tx, cancel).await;
     let _ = stream_handle.await;
 
     // ── Git: post-execution ─────────────────────────────────
@@ -1484,7 +1495,7 @@ mod tests {
         };
 
         let running_pieces = Mutex::new(HashSet::new());
-        let err = run_all_plan_tasks(&plan.id, None, &state, &running_pieces, &app_handle)
+        let err = run_all_plan_tasks(&plan.id, None, &state, &running_pieces, &app_handle, None)
             .await
             .expect_err("draft plan should be rejected");
         assert!(err.contains("approved"));
@@ -1537,7 +1548,7 @@ mod tests {
 
         let fail_marker = std::path::Path::new(&working_dir).join(".fake-codex-fail");
         fs::write(&fail_marker, "1").expect("mark codex failure");
-        run_piece_agent(&piece.id, None, &state, &app_handle)
+        run_piece_agent(&piece.id, None, &state, &app_handle, None)
             .await
             .expect("first run should complete with failure metadata");
 
@@ -1549,7 +1560,7 @@ mod tests {
         }
 
         fs::remove_file(&fail_marker).expect("clear codex failure");
-        run_piece_agent(&piece.id, None, &state, &app_handle)
+        run_piece_agent(&piece.id, None, &state, &app_handle, None)
             .await
             .expect("retry should succeed");
 
@@ -1672,7 +1683,7 @@ mod tests {
             }
 
             let running_pieces = Mutex::new(HashSet::new());
-            run_all_plan_tasks(&plan.id, None, &state, &running_pieces, &app_handle)
+            run_all_plan_tasks(&plan.id, None, &state, &running_pieces, &app_handle, None)
                 .await
                 .expect("run all tasks");
 
