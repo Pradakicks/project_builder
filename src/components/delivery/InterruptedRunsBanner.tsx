@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import * as goalRunApi from "../../api/goalRunApi";
-import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 import type { GoalRun } from "../../types";
 
@@ -11,7 +10,6 @@ export function InterruptedRunsBanner() {
   const [runs, setRuns] = useState<GoalRun[]>([]);
   const [dismissed, setDismissed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
   const addToast = useToastStore((s) => s.addToast);
 
   useEffect(() => {
@@ -34,7 +32,7 @@ export function InterruptedRunsBanner() {
   const resumeOne = async (id: string) => {
     setBusy(true);
     try {
-      await retryGoalRun(id);
+      await goalRunApi.resumeGoalRun(id);
       setRuns((prev) => prev.filter((r) => r.id !== id));
     } catch (err) {
       addToast(`Failed to resume run: ${err}`, "warning");
@@ -47,7 +45,7 @@ export function InterruptedRunsBanner() {
     setBusy(true);
     try {
       for (const run of runs) {
-        await retryGoalRun(run.id);
+        await goalRunApi.resumeGoalRun(run.id);
       }
       setRuns([]);
     } catch (err) {
