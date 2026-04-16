@@ -132,6 +132,9 @@ function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): Pha
       } else if (e.kind === "blocked") {
         endedAt = e.createdAt;
         outcome = "blocked";
+      } else if (e.kind === "cancelled-mid-phase") {
+        endedAt = e.createdAt;
+        outcome = "failed";
       } else if (e.kind === "retry-scheduled") {
         repairSummaries.push(e.summary);
       }
