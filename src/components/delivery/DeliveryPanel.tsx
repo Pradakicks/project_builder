@@ -176,7 +176,7 @@ export function DeliveryPanel() {
   const refreshRuntimeStatus = useGoalRunStore((s) => s.refreshRuntimeStatus);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
-  const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
+  const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
@@ -252,8 +252,7 @@ export function DeliveryPanel() {
   const handleResumeGoal = async () => {
     if (!currentRun) return;
     try {
-      await retryGoalRun(currentRun.id);
-      addToast("Resumed the goal run", "info");
+      await continueAutopilot(currentRun.id);
     } catch (error) {
       addToast(`Failed to resume goal run: ${error}`, "warning");
     }
