@@ -207,7 +207,7 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
 
     let result = match engine {
         "built-in" | "" => {
-            run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle).await
+            run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle, cancel.clone()).await
         }
         name => {
             run_external_agent(&piece, &context, &settings, name, piece_id, feedback, db, app_handle, cancel.clone()).await
@@ -613,6 +613,7 @@ async fn run_builtin_agent<R: tauri::Runtime>(
     feedback: Option<&str>,
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
+    cancel: Option<CancellationToken>,
 ) -> Result<AgentResult, String> {
     let max_tokens = piece.agent_config.token_budget.unwrap_or(4096) as u32;
 
@@ -696,8 +697,17 @@ async fn run_builtin_agent<R: tauri::Runtime>(
         }
     });
 
-    let usage = provider.chat_stream(&messages, &config, tx).await?;
+    let usage_result = if let Some(ref token) = cancel {
+        tokio::select! {
+            result = provider.chat_stream(&messages, &config, tx) => result,
+            _ = token.cancelled() => Err("cancelled".to_string()),
+        }
+    } else {
+        provider.chat_stream(&messages, &config, tx).await
+    };
+    // Dropping tx (via select! or completion) closes rx; stream_handle exits naturally.
     let _ = stream_handle.await;
+    let usage = usage_result?;
 
     debug!(piece_id, input_tokens = usage.input, output_tokens = usage.output, "Built-in agent stream complete");
 
