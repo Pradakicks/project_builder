@@ -467,6 +467,10 @@ async fn advance_goal_run<R: tauri::Runtime>(
                     break 'implementation;
                 }
                 Err(error) => {
+                    // If the token fired, a pause/cancel command already set the final status.
+                    if cancel.is_cancelled() {
+                        return Ok(());
+                    }
                     let fingerprint = failure_fingerprint(GoalRunPhase::Implementation, &error);
                     let current_retry = {
                         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -674,6 +678,9 @@ async fn advance_goal_run<R: tauri::Runtime>(
                     break 'runtime_execution;
                 }
                 Err(error) => {
+                    if cancel.is_cancelled() {
+                        return Ok(());
+                    }
                     let fingerprint = failure_fingerprint(GoalRunPhase::RuntimeExecution, &error);
                     let current_retry = {
                         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -769,6 +776,9 @@ async fn advance_goal_run<R: tauri::Runtime>(
         let verification_result: VerificationResult = match verification_result {
             Ok(result) => result,
             Err(infra_error) => {
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
                 // Infrastructure error (runtime not running, spec missing) — blocked, no repair.
                 let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &infra_error);
                 update_goal_run_state(
@@ -825,6 +835,9 @@ async fn advance_goal_run<R: tauri::Runtime>(
         }
 
         // Verification check failure — attempt CTO repair (same pattern as RuntimeExecution).
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
         let error = verification_result.message.clone();
         let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &error);
         let current_retry = {
