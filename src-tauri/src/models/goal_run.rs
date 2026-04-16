@@ -170,6 +170,8 @@ pub enum GoalRunStatus {
     Failed,
     /// Was running when the app closed; can be resumed
     Interrupted,
+    /// Explicitly paused by the operator; resume-able, not a failure
+    Paused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +185,10 @@ pub enum GoalRunEventKind {
     Failed,
     Stopped,
     Note,
+    Paused,
+    Resumed,
+    CancelledMidPhase,
+    HeartbeatStale,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +213,8 @@ pub struct GoalRun {
     pub last_failure_fingerprint: Option<String>,
     #[serde(default)]
     pub attention_required: bool,
+    #[serde(default)]
+    pub last_heartbeat_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -291,4 +299,5 @@ pub struct GoalRunUpdate {
     pub retry_backoff_until: Option<Option<String>>,
     pub last_failure_fingerprint: Option<Option<String>>,
     pub attention_required: Option<bool>,
+    pub last_heartbeat_at: Option<Option<String>>,
 }

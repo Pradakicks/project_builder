@@ -4,8 +4,8 @@ use crate::db::Database;
 use crate::db::AgentHistoryMetadata;
 use crate::models::{
     parse_verification_result, GoalRun, GoalRunCodeEvidence, GoalRunDeliverySnapshot, GoalRunEvent,
-    GoalRunPhase, GoalRunRetryState, GoalRunStatus, GoalRunUpdate, LiveActivity, PlanTask,
-    TaskStatus, VerificationResult, WorkPlan,
+    GoalRunEventKind, GoalRunPhase, GoalRunRetryState, GoalRunStatus, GoalRunUpdate, LiveActivity,
+    PlanTask, TaskStatus, VerificationResult, WorkPlan,
 };
 use crate::AppState;
 use tauri::{AppHandle, State};
@@ -80,6 +80,7 @@ pub fn update_goal_run(
 }
 
 /// Re-enters the executor at the goal run's current stored phase.
+/// Accepts Paused, Blocked, Interrupted, Failed, and Retrying rows.
 /// Only failure metadata is cleared; `retry_count` and `phase` are preserved.
 /// Pairs with `advance_goal_run`'s phase-ordinal skip guards.
 #[tracing::instrument(skip(state, app_handle))]
@@ -102,6 +103,7 @@ pub fn resume_goal_run(
             ..Default::default()
         },
     )?;
+    append_event(&state.db, &goal_run_id, &updated.phase, GoalRunEventKind::Resumed, "Resumed by operator");
     spawn_goal_run_executor(app_handle, goal_run_id);
     Ok(updated)
 }
@@ -112,16 +114,86 @@ pub fn stop_goal_run(
     state: State<'_, AppState>,
     goal_run_id: String,
 ) -> Result<GoalRun, String> {
-    update_goal_run_impl(
+    fire_cancel_token(&state, &goal_run_id);
+    let run = update_goal_run_impl(
         &state.db,
-        goal_run_id,
+        goal_run_id.clone(),
         GoalRunUpdate {
             stop_requested: Some(true),
             status: Some(GoalRunStatus::Blocked),
             blocker_reason: Some(Some("Stopped by operator".to_string())),
             ..Default::default()
         },
-    )
+    )?;
+    append_event(&state.db, &goal_run_id, &run.phase, GoalRunEventKind::Stopped, "Stopped by operator");
+    Ok(run)
+}
+
+/// Soft-pause: mark Paused, fire the cancellation token to unwind external CLI
+/// children + the heartbeat, but preserve current piece/task so Resume picks up
+/// the same phase. Does not clear retry counters or failure metadata.
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn pause_goal_run(
+    state: State<'_, AppState>,
+    goal_run_id: String,
+) -> Result<GoalRun, String> {
+    fire_cancel_token(&state, &goal_run_id);
+    let run = update_goal_run_impl(
+        &state.db,
+        goal_run_id.clone(),
+        GoalRunUpdate {
+            stop_requested: Some(true),
+            status: Some(GoalRunStatus::Paused),
+            blocker_reason: Some(Some("Paused by operator".to_string())),
+            ..Default::default()
+        },
+    )?;
+    append_event(&state.db, &goal_run_id, &run.phase, GoalRunEventKind::Paused, "Paused by operator");
+    Ok(run)
+}
+
+/// Hard cancel: fires the token and marks the run Failed. Unlike pause, this is
+/// a terminal state and is not meant to be resumed.
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn cancel_goal_run(
+    state: State<'_, AppState>,
+    goal_run_id: String,
+) -> Result<GoalRun, String> {
+    fire_cancel_token(&state, &goal_run_id);
+    let run = update_goal_run_impl(
+        &state.db,
+        goal_run_id.clone(),
+        GoalRunUpdate {
+            stop_requested: Some(true),
+            status: Some(GoalRunStatus::Failed),
+            blocker_reason: Some(Some("Cancelled by operator".to_string())),
+            ..Default::default()
+        },
+    )?;
+    append_event(&state.db, &goal_run_id, &run.phase, GoalRunEventKind::CancelledMidPhase, "Cancelled by operator");
+    Ok(run)
+}
+
+fn fire_cancel_token(state: &State<'_, AppState>, goal_run_id: &str) {
+    if let Ok(map) = state.goal_run_cancels.lock() {
+        if let Some(token) = map.get(goal_run_id) {
+            token.cancel();
+        }
+    }
+}
+
+fn append_event(
+    db: &std::sync::Mutex<Database>,
+    goal_run_id: &str,
+    phase: &GoalRunPhase,
+    kind: GoalRunEventKind,
+    summary: &str,
+) {
+    if let Ok(db) = db.lock() {
+        let _ = db.append_goal_run_event(goal_run_id, phase.clone(), kind, summary, None);
+    }
 }
 
 #[tracing::instrument(skip(state))]
@@ -132,6 +204,15 @@ pub fn get_goal_run_events(
 ) -> Result<Vec<GoalRunEvent>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_goal_run_events(&goal_run_id)
+}
+
+/// List runs marked Interrupted — used by the startup banner to offer a
+/// one-click resume of runs that were caught mid-execution by a crash/force-quit.
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn list_interrupted_runs(state: State<'_, AppState>) -> Result<Vec<GoalRun>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_interrupted_runs()
 }
 
 fn latest_git_evidence(history: &[crate::db::AgentHistoryEntry]) -> (Option<String>, Option<String>, Option<String>) {

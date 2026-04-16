@@ -178,6 +178,7 @@ export function DeliveryPanel() {
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
   const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
+  const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
   const addToast = useToastStore((s) => s.addToast);
   const runtimeSnapshot = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
@@ -229,16 +230,6 @@ export function DeliveryPanel() {
     }
   };
 
-  const handleRetryGoal = async () => {
-    if (!currentRun) return;
-    try {
-      await retryGoalRun(currentRun.id);
-      addToast("Retried the active goal run", "info");
-    } catch (error) {
-      addToast(`Failed to retry goal run: ${error}`, "warning");
-    }
-  };
-
   const handleStopGoal = async () => {
     if (!currentRun) return;
     try {
@@ -246,6 +237,25 @@ export function DeliveryPanel() {
       addToast("Stopped the active goal run", "info");
     } catch (error) {
       addToast(`Failed to stop goal run: ${error}`, "warning");
+    }
+  };
+
+  const handlePauseGoal = async () => {
+    if (!currentRun) return;
+    try {
+      await pauseGoalRun(currentRun.id);
+    } catch (error) {
+      addToast(`Failed to pause goal run: ${error}`, "warning");
+    }
+  };
+
+  const handleResumeGoal = async () => {
+    if (!currentRun) return;
+    try {
+      await retryGoalRun(currentRun.id);
+      addToast("Resumed the goal run", "info");
+    } catch (error) {
+      addToast(`Failed to resume goal run: ${error}`, "warning");
     }
   };
 
@@ -279,9 +289,13 @@ export function DeliveryPanel() {
                   ? "bg-emerald-900/60 text-emerald-300"
                   : currentRun.status === "running" || currentRun.status === "retrying"
                     ? "bg-blue-900/60 text-blue-300"
-                    : currentRun.status === "blocked"
-                      ? "bg-amber-900/60 text-amber-300"
-                      : "bg-red-900/60 text-red-300"
+                    : currentRun.status === "paused"
+                      ? "bg-yellow-900/60 text-yellow-300"
+                      : currentRun.status === "blocked"
+                        ? "bg-amber-900/60 text-amber-300"
+                        : currentRun.status === "interrupted"
+                          ? "bg-orange-900/60 text-orange-300"
+                          : "bg-red-900/60 text-red-300"
               }`}
             >
               {currentRun.status}
@@ -461,22 +475,33 @@ export function DeliveryPanel() {
               >
                 Stop app
               </button>
-              {currentRun.status !== "completed" ? (
+              {currentRun.status === "paused" ||
+              currentRun.status === "interrupted" ||
+              currentRun.status === "blocked" ||
+              currentRun.status === "failed" ? (
                 <button
-                  onClick={() => void handleRetryGoal()}
+                  onClick={() => void handleResumeGoal()}
                   disabled={orchestrating}
-                  className="rounded border border-amber-700 px-3 py-1 text-[11px] text-amber-300 hover:bg-amber-950/40 disabled:opacity-50"
+                  className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
                 >
-                  {orchestrating ? "Running…" : "Retry goal"}
+                  {orchestrating ? "Running…" : "Resume goal"}
                 </button>
               ) : null}
               {currentRun.status === "running" || currentRun.status === "retrying" ? (
-                <button
-                  onClick={() => void handleStopGoal()}
-                  className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
-                >
-                  Stop goal
-                </button>
+                <>
+                  <button
+                    onClick={() => void handlePauseGoal()}
+                    className="rounded border border-yellow-700 px-3 py-1 text-[11px] text-yellow-300 hover:bg-yellow-950/40"
+                  >
+                    Pause goal
+                  </button>
+                  <button
+                    onClick={() => void handleStopGoal()}
+                    className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
+                  >
+                    Stop goal
+                  </button>
+                </>
               ) : null}
             </div>
           </section>

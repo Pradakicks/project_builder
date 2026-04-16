@@ -226,7 +226,14 @@ export type GoalRunPhase =
   | "runtime-execution"
   | "verification";
 
-export type GoalRunStatus = "running" | "retrying" | "blocked" | "completed" | "failed" | "interrupted";
+export type GoalRunStatus =
+  | "running"
+  | "retrying"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "paused";
 export type GoalRunEventKind =
   | "phase-started"
   | "phase-completed"
@@ -235,7 +242,11 @@ export type GoalRunEventKind =
   | "blocked"
   | "failed"
   | "stopped"
-  | "note";
+  | "note"
+  | "paused"
+  | "resumed"
+  | "cancelled-mid-phase"
+  | "heartbeat-stale";
 
 export interface GoalRun {
   id: string;
@@ -255,6 +266,7 @@ export interface GoalRun {
   retryBackoffUntil: string | null;
   lastFailureFingerprint: string | null;
   attentionRequired: boolean;
+  lastHeartbeatAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

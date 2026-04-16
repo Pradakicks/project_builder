@@ -9,7 +9,9 @@ use crate::models::{
 use crate::AppState;
 use serde_json::{json, Value};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 fn failure_fingerprint(phase: GoalRunPhase, message: &str) -> String {
@@ -219,6 +221,8 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
 
 pub fn spawn_goal_run_executor<R: tauri::Runtime>(app_handle: AppHandle<R>, goal_run_id: String) {
     let state = app_handle.state::<AppState>();
+
+    // Atomically guard against double-spawn via the running-set.
     {
         let mut running = match state.running_goal_runs.lock() {
             Ok(guard) => guard,
@@ -229,14 +233,49 @@ pub fn spawn_goal_run_executor<R: tauri::Runtime>(app_handle: AppHandle<R>, goal
         }
     }
 
+    // Install a cancellation token keyed by goal_run_id so pause/cancel commands
+    // can unwind the executor (and its heartbeat + external CLI) promptly.
+    let cancel = CancellationToken::new();
+    if let Ok(mut map) = state.goal_run_cancels.lock() {
+        map.insert(goal_run_id.clone(), cancel.clone());
+    }
+
+    // Heartbeat: bump last_heartbeat_at every 5s while the executor is alive.
+    // The task co-dies with the executor via the shared token.
+    let heartbeat_cancel = cancel.clone();
+    let heartbeat_id = goal_run_id.clone();
+    let heartbeat_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        let run_result = advance_goal_run(&app_handle, &goal_run_id).await;
+        let state = match heartbeat_handle.try_state::<AppState>() {
+            Some(s) => s,
+            None => return,
+        };
+        loop {
+            tokio::select! {
+                _ = heartbeat_cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = db.update_heartbeat(&heartbeat_id);
+                    }
+                }
+            }
+        }
+    });
+
+    let exec_cancel = cancel.clone();
+    tauri::async_runtime::spawn(async move {
+        let run_result = advance_goal_run(&app_handle, &goal_run_id, exec_cancel.clone()).await;
         if let Err(error) = run_result {
             error!(goal_run_id = %goal_run_id, error = %error, "Goal run executor failed");
         }
+        // Cancel the token to ensure the heartbeat task exits promptly.
+        exec_cancel.cancel();
         if let Some(state) = app_handle.try_state::<AppState>() {
             if let Ok(mut guard) = state.running_goal_runs.lock() {
                 guard.remove(&goal_run_id);
+            }
+            if let Ok(mut map) = state.goal_run_cancels.lock() {
+                map.remove(&goal_run_id);
             }
         }
     });
@@ -245,6 +284,7 @@ pub fn spawn_goal_run_executor<R: tauri::Runtime>(app_handle: AppHandle<R>, goal
 async fn advance_goal_run<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     goal_run_id: &str,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
     let initial = {
@@ -411,6 +451,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 &state.db,
                 &state.running_pieces,
                 app_handle,
+                Some(cancel.clone()),
             )
             .await
             {

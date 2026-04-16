@@ -360,6 +360,9 @@ fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
 }
 
 fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
+    // Fresh-install schema. `last_heartbeat_at` and `retry_backoff_until` columns
+    // are added below via additive ALTERs to handle legacy DBs that pre-date them;
+    // indexes on those columns are created after the ALTERs land.
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS goal_runs (
@@ -380,6 +383,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             retry_backoff_until TEXT,
             last_failure_fingerprint TEXT,
             attention_required INTEGER NOT NULL DEFAULT 0,
+            last_heartbeat_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -403,6 +407,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
     let mut has_retry_backoff_until = false;
     let mut has_last_failure_fingerprint = false;
     let mut has_attention_required = false;
+    let mut has_last_heartbeat_at = false;
 
     for column in columns {
         match column.map_err(|e| e.to_string())?.as_str() {
@@ -412,6 +417,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             "retry_backoff_until" => has_retry_backoff_until = true,
             "last_failure_fingerprint" => has_last_failure_fingerprint = true,
             "attention_required" => has_attention_required = true,
+            "last_heartbeat_at" => has_last_heartbeat_at = true,
             _ => {}
         }
     }
@@ -449,6 +455,19 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if !has_last_heartbeat_at {
+        conn.execute("ALTER TABLE goal_runs ADD COLUMN last_heartbeat_at TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Indexes on ALTER-added columns must run after the columns exist.
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_heartbeat ON goal_runs(last_heartbeat_at);
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_backoff ON goal_runs(retry_backoff_until);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }

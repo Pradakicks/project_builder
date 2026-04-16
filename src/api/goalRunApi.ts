@@ -46,6 +46,18 @@ export async function stopGoalRun(goalRunId: string): Promise<GoalRun> {
   return loggedInvoke("stop_goal_run", { goalRunId });
 }
 
+export async function pauseGoalRun(goalRunId: string): Promise<GoalRun> {
+  return loggedInvoke("pause_goal_run", { goalRunId });
+}
+
+export async function cancelGoalRun(goalRunId: string): Promise<GoalRun> {
+  return loggedInvoke("cancel_goal_run", { goalRunId });
+}
+
+export async function listInterruptedRuns(): Promise<GoalRun[]> {
+  return loggedInvoke("list_interrupted_runs", {});
+}
+
 export async function getGoalRun(goalRunId: string): Promise<GoalRun> {
   return loggedInvoke("get_goal_run", { goalRunId });
 }

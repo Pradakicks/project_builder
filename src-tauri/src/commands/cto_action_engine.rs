@@ -373,7 +373,7 @@ async fn execute_piece_run<R: tauri::Runtime>(
         }
     }
 
-    let result = runner::run_piece_agent(piece_id, feedback, &state.db, app_handle).await;
+    let result = runner::run_piece_agent(piece_id, feedback, &state.db, app_handle, None).await;
 
     {
         let mut running = state.running_pieces.lock().map_err(|e| e.to_string())?;
@@ -732,7 +732,7 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
                     reason: Some("Task execution changes workspace state and is not rollback-safe".to_string()),
                     kind: None,
                 });
-                runner::run_all_plan_tasks(plan_id, None, state, &app_state.running_pieces, app_handle).await?;
+                runner::run_all_plan_tasks(plan_id, None, state, &app_state.running_pieces, app_handle, None).await?;
                 switch_to_tab = Some("plan".to_string());
                 Ok(())
             }

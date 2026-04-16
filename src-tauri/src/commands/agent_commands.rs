@@ -32,7 +32,7 @@ pub async fn run_piece_agent(
         }
     }
 
-    let result = agent::runner::run_piece_agent(&piece_id, feedback.as_deref(), &state.db, &app_handle).await;
+    let result = agent::runner::run_piece_agent(&piece_id, feedback.as_deref(), &state.db, &app_handle, None).await;
 
     // Always release the lock
     {
