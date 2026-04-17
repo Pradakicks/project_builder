@@ -1,10 +1,11 @@
 use crate::agent::{self, runner};
+use crate::commands::repair_prompt::build_repair_prompt;
 use crate::commands::{cto_action_engine, runtime_commands};
 use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, Message};
 use crate::models::{
     GoalRun, GoalRunEventKind, GoalRunPhase, GoalRunStatus, GoalRunUpdate, OutputMode, Phase,
-    VerificationResult, WorkPlan,
+    PhaseFailureContext, VerificationResult, WorkPlan,
 };
 use crate::AppState;
 use serde_json::{json, Value};
@@ -104,7 +105,7 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
     db: &Mutex<Database>,
     goal_run: &GoalRun,
     phase: GoalRunPhase,
-    failure_summary: &str,
+    failure: &PhaseFailureContext,
 ) -> Result<bool, String> {
     let state = app_handle.state::<AppState>();
 
@@ -118,21 +119,10 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
         // Build CTO system prompt (full project context)
         let mut messages: Vec<Message> = agent::build_cto_prompt(&db, &goal_run.project_id);
 
-        // Append the repair user turn
-        let phase_str = serde_json::to_string(&phase)
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_string();
-        let repair_prompt = format!(
-            "The goal run has failed during the **{phase_str}** phase.\n\n\
-             Error:\n{failure_summary}\n\n\
-             Diagnose the failure and propose concrete fixes using action blocks. \
-             Focus on updatePiece, createPiece, configureRuntime, generatePlan, or approvePlan — \
-             do NOT use runPiece, runAllTasks, or retryGoalStep, as the system retries the phase automatically after your fixes."
-        );
+        // Append the repair user turn built from structured failure context.
         messages.push(Message {
             role: "user".to_string(),
-            content: repair_prompt,
+            content: build_repair_prompt(phase.clone(), failure),
         });
 
         (messages, provider_name, api_key, model, base_url)
@@ -158,6 +148,8 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
     info!(
         goal_run_id = %goal_run.id,
         phase = ?phase,
+        failed_check_count = failure.failed_checks.len(),
+        passed_check_count = failure.passed_checks.len(),
         "Calling CTO repair agent"
     );
 
@@ -533,7 +525,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             &state.db,
                             &goal_run,
                             GoalRunPhase::Implementation,
-                            &error,
+                            &PhaseFailureContext::from_summary(&error),
                         )
                         .await
                         {
@@ -743,7 +735,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             &state.db,
                             &goal_run,
                             GoalRunPhase::RuntimeExecution,
-                            &error,
+                            &PhaseFailureContext::from_summary(&error),
                         )
                         .await
                         {
@@ -902,7 +894,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 &state.db,
                 &goal_run,
                 GoalRunPhase::Verification,
-                &error,
+                &PhaseFailureContext::from_verification(&verification_result),
             )
             .await
             {

@@ -49,6 +49,49 @@ pub struct VerificationResult {
     pub message: String,
 }
 
+/// Input to the CTO repair prompt assembler. Carries what the repair agent
+/// needs to diagnose a failure: the one-line summary plus, when available,
+/// the structured per-check breakdown from Verification.
+///
+/// Non-Verification phases (Implementation, RuntimeExecution) don't yet emit
+/// structured failure data, so they construct this via `from_summary` and
+/// the downstream prompt renderer degrades gracefully to the minimal shape.
+#[derive(Debug, Clone)]
+pub struct PhaseFailureContext {
+    pub summary: String,
+    pub failed_checks: Vec<VerificationCheck>,
+    pub passed_checks: Vec<VerificationCheck>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+impl PhaseFailureContext {
+    pub fn from_summary(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            failed_checks: vec![],
+            passed_checks: vec![],
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    pub fn from_verification(result: &VerificationResult) -> Self {
+        let (failed, passed): (Vec<_>, Vec<_>) = result
+            .checks
+            .iter()
+            .cloned()
+            .partition(|check| !check.passed);
+        Self {
+            summary: result.message.clone(),
+            failed_checks: failed,
+            passed_checks: passed,
+            started_at: Some(result.started_at.clone()),
+            finished_at: Some(result.finished_at.clone()),
+        }
+    }
+}
+
 /// Tolerant deserializer: accepts a JSON `VerificationResult` or falls back to
 /// treating the raw string as a legacy plain-text summary (passed=true, no checks).
 pub fn parse_verification_result(raw: &str) -> VerificationResult {
@@ -145,6 +188,55 @@ mod tests {
         assert!(parsed.passed, "legacy strings default to passed=true");
         assert!(parsed.checks.is_empty(), "legacy strings produce no checks");
         assert_eq!(parsed.message, raw);
+    }
+
+    #[test]
+    fn phase_failure_context_from_summary_is_empty_except_for_summary() {
+        let ctx = PhaseFailureContext::from_summary("boom");
+        assert_eq!(ctx.summary, "boom");
+        assert!(ctx.failed_checks.is_empty());
+        assert!(ctx.passed_checks.is_empty());
+        assert!(ctx.started_at.is_none());
+        assert!(ctx.finished_at.is_none());
+    }
+
+    #[test]
+    fn phase_failure_context_from_verification_partitions_checks() {
+        let result = VerificationResult {
+            passed: false,
+            checks: vec![
+                VerificationCheck {
+                    name: "verify command".to_string(),
+                    kind: CheckKind::Shell,
+                    passed: true,
+                    detail: "exited 0".to_string(),
+                    duration_ms: 10,
+                    expected: None,
+                    actual: None,
+                },
+                VerificationCheck {
+                    name: "http readiness".to_string(),
+                    kind: CheckKind::Http,
+                    passed: false,
+                    detail: "connection refused".to_string(),
+                    duration_ms: 60_000,
+                    expected: Some("HTTP 200".to_string()),
+                    actual: Some("connection refused".to_string()),
+                },
+            ],
+            started_at: "2024-01-01T00:00:00Z".to_string(),
+            finished_at: "2024-01-01T00:01:00Z".to_string(),
+            message: "HTTP readiness check failed".to_string(),
+        };
+
+        let ctx = PhaseFailureContext::from_verification(&result);
+        assert_eq!(ctx.summary, "HTTP readiness check failed");
+        assert_eq!(ctx.failed_checks.len(), 1);
+        assert_eq!(ctx.failed_checks[0].name, "http readiness");
+        assert_eq!(ctx.passed_checks.len(), 1);
+        assert_eq!(ctx.passed_checks[0].name, "verify command");
+        assert_eq!(ctx.started_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(ctx.finished_at.as_deref(), Some("2024-01-01T00:01:00Z"));
     }
 
     #[test]
