@@ -219,6 +219,32 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
     Ok(result.executed > 0)
 }
 
+/// RAII guard that owns the executor's slot in `running_goal_runs` and
+/// `goal_run_cancels`. Its `Drop` fires the cancel token (so the heartbeat
+/// task exits) and removes the map entries — unconditionally, whether the
+/// executor future returns `Ok`, `Err`, or unwinds due to a panic. Without
+/// this, a panic inside `advance_goal_run` would leave stale entries that
+/// permanently block respawn of the same goal run.
+struct GoalRunSlot<R: tauri::Runtime> {
+    app_handle: AppHandle<R>,
+    goal_run_id: String,
+    cancel: CancellationToken,
+}
+
+impl<R: tauri::Runtime> Drop for GoalRunSlot<R> {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(state) = self.app_handle.try_state::<AppState>() {
+            if let Ok(mut guard) = state.running_goal_runs.lock() {
+                guard.remove(&self.goal_run_id);
+            }
+            if let Ok(mut map) = state.goal_run_cancels.lock() {
+                map.remove(&self.goal_run_id);
+            }
+        }
+    }
+}
+
 pub fn spawn_goal_run_executor<R: tauri::Runtime>(app_handle: AppHandle<R>, goal_run_id: String) {
     let state = app_handle.state::<AppState>();
 
@@ -264,19 +290,16 @@ pub fn spawn_goal_run_executor<R: tauri::Runtime>(app_handle: AppHandle<R>, goal
 
     let exec_cancel = cancel.clone();
     tauri::async_runtime::spawn(async move {
-        let run_result = advance_goal_run(&app_handle, &goal_run_id, exec_cancel.clone()).await;
+        // The slot's Drop cleans up running_goal_runs + goal_run_cancels even
+        // if `advance_goal_run` panics. Keep it on the stack for the whole task.
+        let _slot = GoalRunSlot {
+            app_handle: app_handle.clone(),
+            goal_run_id: goal_run_id.clone(),
+            cancel: exec_cancel.clone(),
+        };
+        let run_result = advance_goal_run(&app_handle, &goal_run_id, exec_cancel).await;
         if let Err(error) = run_result {
             error!(goal_run_id = %goal_run_id, error = %error, "Goal run executor failed");
-        }
-        // Cancel the token to ensure the heartbeat task exits promptly.
-        exec_cancel.cancel();
-        if let Some(state) = app_handle.try_state::<AppState>() {
-            if let Ok(mut guard) = state.running_goal_runs.lock() {
-                guard.remove(&goal_run_id);
-            }
-            if let Ok(mut map) = state.goal_run_cancels.lock() {
-                map.remove(&goal_run_id);
-            }
         }
     });
 }
