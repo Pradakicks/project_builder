@@ -54,6 +54,10 @@ export async function cancelGoalRun(goalRunId: string): Promise<GoalRun> {
   return loggedInvoke("cancel_goal_run", { goalRunId });
 }
 
+export async function rerunVerification(goalRunId: string): Promise<GoalRun> {
+  return loggedInvoke("rerun_verification", { goalRunId });
+}
+
 export async function listInterruptedRuns(): Promise<GoalRun[]> {
   return loggedInvoke("list_interrupted_runs", {});
 }

@@ -129,6 +129,45 @@ pub fn stop_goal_run(
     Ok(run)
 }
 
+/// Re-enter the Verification phase without invoking the CTO repair agent.
+///
+/// Intended for use after a blocked verification run where the operator has
+/// made a manual fix and wants to re-run the acceptance suite to confirm the
+/// fix holds. Force-sets phase=Verification, status=Running; preserves
+/// retry_count (so this doesn't count against the MAX_REPAIR_RETRIES budget)
+/// and keeps current_plan_id / current_piece_id intact.
+#[tracing::instrument(skip(state, app_handle))]
+#[tauri::command]
+pub fn rerun_verification(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    goal_run_id: String,
+) -> Result<GoalRun, String> {
+    let updated = update_goal_run_impl(
+        &state.db,
+        goal_run_id.clone(),
+        GoalRunUpdate {
+            phase: Some(GoalRunPhase::Verification),
+            status: Some(GoalRunStatus::Running),
+            stop_requested: Some(false),
+            blocker_reason: Some(None),
+            last_failure_summary: Some(None),
+            last_failure_fingerprint: Some(None),
+            attention_required: Some(false),
+            ..Default::default()
+        },
+    )?;
+    append_event(
+        &state.db,
+        &goal_run_id,
+        &GoalRunPhase::Verification,
+        GoalRunEventKind::PhaseStarted,
+        "Rerun verification requested by operator",
+    );
+    spawn_goal_run_executor(app_handle, goal_run_id);
+    Ok(updated)
+}
+
 /// Soft-pause: mark Paused, fire the cancellation token to unwind external CLI
 /// children + the heartbeat, but preserve current piece/task so Resume picks up
 /// the same phase. Does not clear retry counters or failure metadata.

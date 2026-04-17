@@ -34,6 +34,7 @@ interface GoalRunStore {
   stopGoalRun: (goalRunId: string) => Promise<void>;
   pauseGoalRun: (goalRunId: string) => Promise<void>;
   cancelGoalRun: (goalRunId: string) => Promise<void>;
+  rerunVerification: (goalRunId: string) => Promise<void>;
   refreshRuntimeStatus: (projectId?: string) => Promise<void>;
   startRuntime: (projectId?: string) => Promise<void>;
   stopRuntime: (projectId?: string) => Promise<void>;
@@ -316,6 +317,13 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     await get().refreshDeliverySnapshot(goalRunId);
     stopPolling();
     toast("Autopilot cancelled", "info");
+  },
+
+  rerunVerification: async (goalRunId) => {
+    const run = await goalRunApi.rerunVerification(goalRunId);
+    syncGoalRunState(run);
+    ensurePolling(goalRunId);
+    toast("Rerunning verification", "info");
   },
 
   refreshRuntimeStatus: async (projectId) => {

@@ -104,6 +104,7 @@ pub fn run() {
             commands::goal_run_commands::stop_goal_run,
             commands::goal_run_commands::pause_goal_run,
             commands::goal_run_commands::cancel_goal_run,
+            commands::goal_run_commands::rerun_verification,
             commands::goal_run_commands::list_interrupted_runs,
             commands::goal_run_commands::get_goal_run_events,
             commands::agent_commands::run_piece_agent,

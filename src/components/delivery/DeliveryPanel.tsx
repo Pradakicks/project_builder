@@ -266,6 +266,7 @@ export function DeliveryPanel() {
   const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
+  const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
   const addToast = useToastStore((s) => s.addToast);
   const runtimeSnapshot = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
@@ -333,6 +334,15 @@ export function DeliveryPanel() {
       await pauseGoalRun(currentRun.id);
     } catch (error) {
       addToast(`Failed to pause goal run: ${error}`, "warning");
+    }
+  };
+
+  const handleRerunVerification = async () => {
+    if (!currentRun) return;
+    try {
+      await rerunVerification(currentRun.id);
+    } catch (error) {
+      addToast(`Failed to rerun verification: ${error}`, "warning");
     }
   };
 
@@ -571,6 +581,17 @@ export function DeliveryPanel() {
                   className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
                 >
                   {orchestrating ? "Running…" : "Resume goal"}
+                </button>
+              ) : null}
+              {currentRun.phase === "verification" &&
+              (currentRun.status === "blocked" || currentRun.status === "failed") ? (
+                <button
+                  onClick={() => void handleRerunVerification()}
+                  disabled={orchestrating}
+                  className="rounded border border-sky-700 px-3 py-1 text-[11px] text-sky-300 hover:bg-sky-950/40 disabled:opacity-50"
+                  title="Rerun the acceptance suite without invoking repair agent (use after manual fix)"
+                >
+                  Rerun verification
                 </button>
               ) : null}
               {currentRun.status === "running" || currentRun.status === "retrying" ? (
