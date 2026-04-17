@@ -9,10 +9,16 @@ pub enum CheckKind {
     Shell,
     Http,
     TcpPort,
+    LogScan,
     Skipped,
 }
 
 /// One concrete check run during the Verification phase.
+///
+/// `expected` / `actual` are the structured human-readable contract for a
+/// check — e.g. `expected = "status in 200..=399"`, `actual = "status 500"`.
+/// Older rows and simpler check kinds may leave both `None`; rendering code
+/// falls back to the free-form `detail` string in that case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationCheck {
@@ -23,6 +29,10 @@ pub struct VerificationCheck {
     /// Concise detail: exit code text, HTTP status, error message, etc.
     pub detail: String,
     pub duration_ms: i64,
+    #[serde(default)]
+    pub expected: Option<String>,
+    #[serde(default)]
+    pub actual: Option<String>,
 }
 
 /// Structured result of the Verification phase, stored as JSON in the
@@ -91,6 +101,8 @@ mod tests {
                 passed: true,
                 detail: "exited 0".to_string(),
                 duration_ms: 100,
+                expected: None,
+                actual: None,
             }],
             started_at: "2024-01-01T00:00:00Z".to_string(),
             finished_at: "2024-01-01T00:00:01Z".to_string(),
@@ -101,6 +113,29 @@ mod tests {
         assert!(parsed.passed);
         assert_eq!(parsed.checks.len(), 1);
         assert_eq!(parsed.message, "1/1 checks passed");
+    }
+
+    #[test]
+    fn parse_verification_result_accepts_rows_without_expected_actual_fields() {
+        // Legacy rows produced before `expected`/`actual` were added must still
+        // deserialize cleanly via the `#[serde(default)]` fallback.
+        let raw = r#"{
+            "passed": true,
+            "checks": [{
+                "name": "verify command",
+                "kind": "shell",
+                "passed": true,
+                "detail": "exited 0",
+                "durationMs": 42
+            }],
+            "startedAt": "2024-01-01T00:00:00Z",
+            "finishedAt": "2024-01-01T00:00:01Z",
+            "message": "1/1 checks passed"
+        }"#;
+        let parsed = parse_verification_result(raw);
+        assert_eq!(parsed.checks.len(), 1);
+        assert!(parsed.checks[0].expected.is_none());
+        assert!(parsed.checks[0].actual.is_none());
     }
 
     #[test]
@@ -122,6 +157,8 @@ mod tests {
                 passed: false,
                 detail: "connection refused".to_string(),
                 duration_ms: 60_000,
+                expected: None,
+                actual: None,
             }],
             started_at: "2024-01-01T00:00:00Z".to_string(),
             finished_at: "2024-01-01T00:01:00Z".to_string(),

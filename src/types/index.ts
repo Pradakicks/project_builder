@@ -327,7 +327,7 @@ export interface LiveActivity {
   total: number;
 }
 
-export type CheckKind = "shell" | "http" | "tcpPort" | "skipped";
+export type CheckKind = "shell" | "http" | "tcpPort" | "logScan" | "skipped";
 
 export interface VerificationCheck {
   name: string;
@@ -335,6 +335,8 @@ export interface VerificationCheck {
   passed: boolean;
   detail: string;
   durationMs: number;
+  expected?: string | null;
+  actual?: string | null;
 }
 
 export interface VerificationResult {

@@ -1448,6 +1448,8 @@ pub(crate) async fn verify_runtime_impl(
                 format!("exited {exit_code} via `{verify_command}`")
             },
             duration_ms,
+            expected: Some("exit code 0".to_string()),
+            actual: Some(format!("exit code {exit_code}")),
         });
         if !passed {
             let finished_at = chrono::Utc::now().to_rfc3339();
@@ -1482,6 +1484,8 @@ pub(crate) async fn verify_runtime_impl(
                     passed: true,
                     detail: format!("HTTP 200 from {url}"),
                     duration_ms,
+                    expected: Some(format!("HTTP 200 from {url}")),
+                    actual: Some(format!("HTTP 200 from {url}")),
                 });
             }
             Err(err) => {
@@ -1491,6 +1495,8 @@ pub(crate) async fn verify_runtime_impl(
                     passed: false,
                     detail: err.clone(),
                     duration_ms,
+                    expected: Some(format!("HTTP 200 from {url}")),
+                    actual: Some(err.clone()),
                 });
                 let finished_at = chrono::Utc::now().to_rfc3339();
                 return Ok(VerificationResult {
@@ -1513,6 +1519,8 @@ pub(crate) async fn verify_runtime_impl(
             detail: "No verifyCommand or appUrl/portHint configured — skipping verification"
                 .to_string(),
             duration_ms: 0,
+            expected: None,
+            actual: None,
         });
     }
 
