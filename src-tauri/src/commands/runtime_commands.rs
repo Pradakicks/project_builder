@@ -204,6 +204,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url,
             port_hint,
+            acceptance_suite: None,
         }));
     }
 
@@ -225,6 +226,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:8080".to_string()),
                 port_hint: Some(8080),
+                acceptance_suite: None,
             }));
         } else {
             return Ok(Some(ProjectRuntimeSpec {
@@ -235,6 +237,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -265,6 +268,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:8080".to_string()),
                 port_hint: Some(8080),
+                acceptance_suite: None,
             }));
         } else {
             return Ok(Some(ProjectRuntimeSpec {
@@ -275,6 +279,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -290,6 +295,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Graceful { timeout_seconds: 15 },
             app_url: None,
             port_hint: None,
+            acceptance_suite: None,
         }));
     }
 
@@ -304,6 +310,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: None,
             port_hint: None,
+            acceptance_suite: None,
         }));
     }
 
@@ -318,6 +325,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: None,
             port_hint: None,
+            acceptance_suite: None,
         }));
     }
 
@@ -339,6 +347,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:3000".to_string()),
                 port_hint: Some(3000),
+                acceptance_suite: None,
             }));
         } else if gemfile_content.contains("sinatra") {
             let ruby_entrypoints = ["app.rb", "server.rb", "main.rb"];
@@ -360,6 +369,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:4567".to_string()),
                 port_hint: Some(4567),
+                acceptance_suite: None,
             }));
         } else {
             let ruby_entrypoints = ["app.rb", "server.rb", "main.rb"];
@@ -376,6 +386,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -402,6 +413,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:8000".to_string()),
             port_hint: Some(8000),
+            acceptance_suite: None,
         }));
     }
 
@@ -434,6 +446,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                     stop_behavior: RuntimeStopBehavior::Kill,
                     app_url: Some("http://127.0.0.1:8000".to_string()),
                     port_hint: Some(8000),
+                    acceptance_suite: None,
                 }));
             }
 
@@ -503,6 +516,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url,
                 port_hint,
+                acceptance_suite: None,
             }));
         }
     }
@@ -523,6 +537,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:8080".to_string()),
             port_hint: Some(8080),
+            acceptance_suite: None,
         }));
     }
 
@@ -545,6 +560,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -1932,6 +1948,7 @@ mod tests {
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:3000".to_string()),
             port_hint: Some(3000),
+            acceptance_suite: None,
         };
 
         let updated = configure_runtime_impl(&state_db, &sessions, project.id.clone(), spec.clone())
@@ -1970,6 +1987,7 @@ mod tests {
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:4810".to_string()),
             port_hint: Some(4810),
+            acceptance_suite: None,
         };
 
         let project = {
@@ -2038,6 +2056,7 @@ mod tests {
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:4820".to_string()),
             port_hint: Some(4820),
+            acceptance_suite: None,
         };
 
         let project = {

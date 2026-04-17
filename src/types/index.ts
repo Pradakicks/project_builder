@@ -179,6 +179,44 @@ export type RuntimeStopBehavior =
       timeoutSeconds?: number;
     };
 
+export type LogScanMode = "mustMatch" | "mustNotMatch";
+
+export type AcceptanceCheck =
+  | {
+      kind: "httpProbe";
+      name: string;
+      path?: string;
+      expectedStatusMin?: number;
+      expectedStatusMax?: number;
+      expectedBodyContains?: string | null;
+      expectedContentType?: string | null;
+      timeoutSeconds?: number;
+    }
+  | {
+      kind: "shell";
+      name: string;
+      command: string;
+      timeoutSeconds?: number;
+    }
+  | {
+      kind: "logScan";
+      name: string;
+      patterns: string[];
+      mode?: LogScanMode;
+      lastNLines?: number;
+    }
+  | {
+      kind: "tcpPort";
+      name: string;
+      port: number;
+      timeoutSeconds?: number;
+    };
+
+export interface AcceptanceSuite {
+  checks: AcceptanceCheck[];
+  stopOnFirstFailure?: boolean;
+}
+
 export interface ProjectRuntimeSpec {
   installCommand: string | null;
   runCommand: string;
@@ -186,6 +224,8 @@ export interface ProjectRuntimeSpec {
   verifyCommand: string | null;
   stopBehavior: RuntimeStopBehavior;
   appUrl: string | null;
+  /** Optional acceptance suite. When absent, the backend derives a default. */
+  acceptanceSuite?: AcceptanceSuite | null;
   portHint: number | null;
 }
 
