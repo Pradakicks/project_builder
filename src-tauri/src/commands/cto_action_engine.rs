@@ -297,9 +297,12 @@ pub(crate) fn normalize_action(raw: Value, action_index: usize) -> Result<Value,
         }
         "generatePlan" => {
             ensure_allowed_keys(raw, &["action", "guidance"], action_index)?;
+            // Guidance is optional — the system prompt advertises it that way
+            // and the executor uses `unwrap_or_default()` when running the plan.
+            let guidance = read_optional_string(raw.get("guidance"))?.unwrap_or_default();
             json!({
                 "action": "generatePlan",
-                "guidance": read_string(raw.get("guidance"), "guidance", action_index)?,
+                "guidance": guidance,
             })
         }
         "approvePlan" | "rejectPlan" | "runAllTasks" | "mergeBranches" => {
@@ -968,6 +971,31 @@ mod tests {
         assert!(review.actions.is_empty());
         assert_eq!(review.validation_errors.len(), 1);
         assert!(review.validation_errors[0].contains("invalid JSON"));
+    }
+
+    #[test]
+    fn review_accepts_generate_plan_without_guidance() {
+        // Regression: the CTO system prompt describes guidance as optional and
+        // the executor uses unwrap_or_default(), so the validator must not
+        // reject a bare {"action": "generatePlan"} action block.
+        let review = review_cto_actions_impl(
+            "```action\n{\"action\":\"generatePlan\"}\n```",
+        )
+        .expect("review");
+        assert_eq!(review.validation_errors, Vec::<String>::new());
+        assert_eq!(review.actions.len(), 1);
+        assert_eq!(review.actions[0]["action"], "generatePlan");
+        assert_eq!(review.actions[0]["guidance"], "");
+    }
+
+    #[test]
+    fn review_preserves_generate_plan_guidance_when_provided() {
+        let review = review_cto_actions_impl(
+            "```action\n{\"action\":\"generatePlan\",\"guidance\":\"focus on auth\"}\n```",
+        )
+        .expect("review");
+        assert_eq!(review.validation_errors, Vec::<String>::new());
+        assert_eq!(review.actions[0]["guidance"], "focus on auth");
     }
 
     #[test]
