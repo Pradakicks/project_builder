@@ -785,8 +785,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
         )?;
 
     'verification: loop {
-        let verification_result =
-            runtime_commands::verify_runtime_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await;
+        let verification_result = runtime_commands::verify_runtime_impl(
+            &state.db,
+            &state.runtime_sessions,
+            goal_run.project_id.clone(),
+            cancel.clone(),
+        )
+        .await;
 
         let verification_result: VerificationResult = match verification_result {
             Ok(result) => result,
