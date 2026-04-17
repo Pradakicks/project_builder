@@ -35,6 +35,7 @@ function createRuntimeSpecDraft(): ProjectRuntimeSpec {
     stopBehavior: { kind: "kill" },
     appUrl: null,
     portHint: null,
+    acceptanceSuite: null,
   };
 }
 
@@ -43,7 +44,75 @@ function cloneRuntimeSpec(spec: ProjectRuntimeSpec): ProjectRuntimeSpec {
     ...spec,
     readinessCheck: { ...spec.readinessCheck },
     stopBehavior: { ...spec.stopBehavior },
+    acceptanceSuite: spec.acceptanceSuite
+      ? {
+          stopOnFirstFailure: spec.acceptanceSuite.stopOnFirstFailure,
+          checks: spec.acceptanceSuite.checks.map((c) => ({ ...c })),
+        }
+      : spec.acceptanceSuite ?? null,
   };
+}
+
+function AcceptanceSuiteEditor({
+  draft,
+  onChange,
+}: {
+  draft: ProjectRuntimeSpec;
+  onChange: (next: ProjectRuntimeSpec) => void;
+}) {
+  const [jsonText, setJsonText] = useState(() =>
+    draft.acceptanceSuite
+      ? JSON.stringify(draft.acceptanceSuite, null, 2)
+      : "",
+  );
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  const apply = (text: string) => {
+    setJsonText(text);
+    if (!text.trim()) {
+      setParseError(null);
+      onChange({ ...draft, acceptanceSuite: null });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null || !Array.isArray(parsed.checks)) {
+        setParseError("Suite must be an object with a `checks` array.");
+        return;
+      }
+      setParseError(null);
+      onChange({ ...draft, acceptanceSuite: parsed });
+    } catch (e) {
+      setParseError(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  return (
+    <details className="rounded border border-gray-800 bg-gray-900/50 p-3">
+      <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-gray-400">
+        Acceptance suite (advanced)
+      </summary>
+      <p className="mt-2 text-[11px] text-gray-500">
+        Optional list of post-start checks run during the Verification phase. Leave blank to use
+        the default suite (log scan for fatal patterns + HTTP root probe + your verify command).
+        Supported kinds: <code>httpProbe</code>, <code>shell</code>, <code>logScan</code>,{" "}
+        <code>tcpPort</code>.
+      </p>
+      <textarea
+        value={jsonText}
+        onChange={(e) => apply(e.target.value)}
+        placeholder={
+          '{\n  "checks": [\n    { "kind": "httpProbe", "name": "health", "path": "/api/health" },\n    { "kind": "logScan", "name": "panic", "patterns": ["panic!?", "FATAL"] }\n  ]\n}'
+        }
+        rows={8}
+        spellCheck={false}
+        className="mt-2 w-full rounded border border-gray-700 bg-gray-950 px-2 py-1.5 font-mono text-[11px] text-gray-200 focus:border-blue-500 focus:outline-none"
+      />
+      {parseError && (
+        <p className="mt-1 text-[11px] text-red-400">{parseError}</p>
+      )}
+    </details>
+  );
 }
 
 export function SettingsPage() {
@@ -796,6 +865,11 @@ export function SettingsPage() {
                           </label>
                         </div>
                       )}
+
+                      <AcceptanceSuiteEditor
+                        draft={runtimeSpecDraft}
+                        onChange={(next) => updateRuntimeSpec(() => next)}
+                      />
                     </div>
                   )}
                 </div>
