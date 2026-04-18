@@ -584,12 +584,14 @@ export function DeliveryPanel() {
                 </button>
               ) : null}
               {currentRun.phase === "verification" &&
-              (currentRun.status === "blocked" || currentRun.status === "failed") ? (
+              (currentRun.status === "blocked" ||
+                currentRun.status === "failed" ||
+                currentRun.status === "completed") ? (
                 <button
                   onClick={() => void handleRerunVerification()}
                   disabled={orchestrating}
                   className="rounded border border-sky-700 px-3 py-1 text-[11px] text-sky-300 hover:bg-sky-950/40 disabled:opacity-50"
-                  title="Rerun the acceptance suite without invoking repair agent (use after manual fix)"
+                  title="Rerun the acceptance suite without invoking repair agent"
                 >
                   Rerun verification
                 </button>
