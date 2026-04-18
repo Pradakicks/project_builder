@@ -1,15 +1,18 @@
 use crate::commands::goal_run_executor::spawn_goal_run_executor;
 use crate::commands::runtime_commands::{self, RuntimeSessions};
-use crate::db::Database;
+#[cfg(test)]
 use crate::db::AgentHistoryMetadata;
+use crate::db::Database;
 use crate::models::{
     parse_verification_result, GoalRun, GoalRunCodeEvidence, GoalRunDeliverySnapshot, GoalRunEvent,
     GoalRunEventKind, GoalRunPhase, GoalRunRetryState, GoalRunStatus, GoalRunUpdate, LiveActivity,
     PlanTask, TaskStatus, VerificationResult, WorkPlan,
 };
 use crate::AppState;
-use tauri::{AppHandle, State};
+#[cfg(test)]
 use std::collections::HashMap;
+use tauri::{AppHandle, State};
+use tokio_util::sync::CancellationToken;
 
 pub(crate) fn create_goal_run_impl(
     db: &std::sync::Mutex<Database>,
@@ -136,11 +139,10 @@ pub fn stop_goal_run(
 /// fix holds. Force-sets phase=Verification, status=Running; preserves
 /// retry_count (so this doesn't count against the MAX_REPAIR_RETRIES budget)
 /// and keeps current_plan_id / current_piece_id intact.
-#[tracing::instrument(skip(state, app_handle))]
+#[tracing::instrument(skip(state))]
 #[tauri::command]
-pub fn rerun_verification(
+pub async fn rerun_verification(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     goal_run_id: String,
 ) -> Result<GoalRun, String> {
     let updated = update_goal_run_impl(
@@ -164,8 +166,90 @@ pub fn rerun_verification(
         GoalRunEventKind::PhaseStarted,
         "Rerun verification requested by operator",
     );
-    spawn_goal_run_executor(app_handle, goal_run_id);
-    Ok(updated)
+
+    match runtime_commands::verify_runtime_impl(
+        &state.db,
+        &state.runtime_sessions,
+        updated.project_id.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    {
+        Ok(result) => {
+            let result_json =
+                serde_json::to_string(&result).unwrap_or_else(|_| result.message.clone());
+            if result.passed {
+                let completed = update_goal_run_impl(
+                    &state.db,
+                    goal_run_id.clone(),
+                    GoalRunUpdate {
+                        phase: Some(GoalRunPhase::Verification),
+                        status: Some(GoalRunStatus::Completed),
+                        blocker_reason: Some(None),
+                        last_failure_summary: Some(None),
+                        last_failure_fingerprint: Some(None),
+                        verification_summary: Some(Some(result_json)),
+                        attention_required: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                append_event(
+                    &state.db,
+                    &goal_run_id,
+                    &GoalRunPhase::Verification,
+                    GoalRunEventKind::PhaseCompleted,
+                    "Verification completed",
+                );
+                Ok(completed)
+            } else {
+                let blocked = update_goal_run_impl(
+                    &state.db,
+                    goal_run_id.clone(),
+                    GoalRunUpdate {
+                        phase: Some(GoalRunPhase::Verification),
+                        status: Some(GoalRunStatus::Blocked),
+                        blocker_reason: Some(Some(result.message.clone())),
+                        last_failure_summary: Some(Some(result.message.clone())),
+                        last_failure_fingerprint: Some(None),
+                        verification_summary: Some(Some(result_json)),
+                        attention_required: Some(true),
+                        ..Default::default()
+                    },
+                )?;
+                append_event(
+                    &state.db,
+                    &goal_run_id,
+                    &GoalRunPhase::Verification,
+                    GoalRunEventKind::Blocked,
+                    &result.message,
+                );
+                Ok(blocked)
+            }
+        }
+        Err(error) => {
+            let blocked = update_goal_run_impl(
+                &state.db,
+                goal_run_id.clone(),
+                GoalRunUpdate {
+                    phase: Some(GoalRunPhase::Verification),
+                    status: Some(GoalRunStatus::Blocked),
+                    blocker_reason: Some(Some(error.clone())),
+                    last_failure_summary: Some(Some(error.clone())),
+                    last_failure_fingerprint: Some(None),
+                    attention_required: Some(true),
+                    ..Default::default()
+                },
+            )?;
+            append_event(
+                &state.db,
+                &goal_run_id,
+                &GoalRunPhase::Verification,
+                GoalRunEventKind::Blocked,
+                &error,
+            );
+            Ok(blocked)
+        }
+    }
 }
 
 /// Soft-pause: mark Paused, fire the cancellation token to unwind external CLI
