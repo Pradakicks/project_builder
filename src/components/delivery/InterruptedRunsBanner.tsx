@@ -75,7 +75,10 @@ export function InterruptedRunsBanner() {
   return (
     <div className="fixed left-1/2 top-3 z-50 w-[min(640px,calc(100%-24px))] -translate-x-1/2 rounded-lg border border-orange-800/70 bg-orange-950/90 px-4 py-3 text-[12px] text-orange-100 shadow-lg shadow-black/30 backdrop-blur">
       <div className="flex items-start gap-3">
-        <div className="flex-1">
+        {/* min-w-0 lets the flex child actually shrink so the prompt's `truncate`
+            class kicks in — without it, long unbreakable text pushes this column
+            past the banner's width and shoves the button column off-screen. */}
+        <div className="min-w-0 flex-1">
           <p className="font-medium">
             {runs.length === 1
               ? "1 goal run was interrupted"
@@ -87,11 +90,11 @@ export function InterruptedRunsBanner() {
           <ul className="mt-2 space-y-1">
             {runs.map((run) => (
               <li key={run.id} className="flex items-center gap-2 text-[11px]">
-                <span className="flex-1 truncate text-orange-100/90">{run.prompt}</span>
+                <span className="min-w-0 flex-1 truncate text-orange-100/90">{run.prompt}</span>
                 <button
                   onClick={() => void resumeOne(run.id)}
                   disabled={busy}
-                  className="rounded border border-orange-700/80 px-2 py-0.5 text-[10px] text-orange-200 hover:bg-orange-900/60 disabled:opacity-50"
+                  className="shrink-0 rounded border border-orange-700/80 px-2 py-0.5 text-[10px] text-orange-200 hover:bg-orange-900/60 disabled:opacity-50"
                 >
                   Resume
                 </button>
@@ -99,7 +102,7 @@ export function InterruptedRunsBanner() {
             ))}
           </ul>
         </div>
-        <div className="flex flex-col gap-1">
+        <div className="flex shrink-0 flex-col gap-1">
           <button
             onClick={() => void resumeAll()}
             disabled={busy}
