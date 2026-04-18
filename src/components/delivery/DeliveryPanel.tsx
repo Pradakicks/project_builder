@@ -269,7 +269,7 @@ export function DeliveryPanel() {
   const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
   const addToast = useToastStore((s) => s.addToast);
-  const runtimeSnapshot = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
+  const runtimeSnapshot = runtimeStatus ?? deliverySnapshot?.runtimeStatus;
   const currentRun = deliverySnapshot?.goalRun ?? currentGoalRun;
   const retryState = deliverySnapshot?.retryState ?? null;
   const blockingPiece = deliverySnapshot?.blockingPiece ?? null;
@@ -479,7 +479,14 @@ export function DeliveryPanel() {
               ) : null}
               {(currentRun.lastFailureSummary || currentRun.blockerReason) ? (
                 <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
-                  <p className="text-amber-300">Blocking truth</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-amber-300">
+                      {currentRun.status === "blocked" ? "Active blocker" : "Last blocker"}
+                    </p>
+                    <span className="text-[10px] text-amber-300/70">
+                      {formatTime(currentRun.updatedAt)}
+                    </span>
+                  </div>
                   {currentRun.blockerReason ? (
                     <p className="mt-1 whitespace-pre-wrap">{currentRun.blockerReason}</p>
                   ) : null}
