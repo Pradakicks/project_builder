@@ -903,12 +903,21 @@ export function ChatPanel({
                   <p className="text-[11px] text-amber-300">
                     This run was interrupted when the app closed.
                   </p>
-                  <button
-                    onClick={() => void useGoalRunStore.getState().retryGoalRun(activeGoalRun.id)}
-                    className="w-full rounded border border-amber-700 bg-amber-900/20 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40"
-                  >
-                    Resume from {activeGoalRun.phase}
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => void useGoalRunStore.getState().retryGoalRun(activeGoalRun.id)}
+                      className="flex-1 rounded border border-amber-700 bg-amber-900/20 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40"
+                    >
+                      Resume from {activeGoalRun.phase}
+                    </button>
+                    <button
+                      onClick={() => void useGoalRunStore.getState().cancelGoalRun(activeGoalRun.id)}
+                      title="Drop this interrupted run — marks it as cancelled."
+                      className="rounded border border-gray-700 px-2.5 py-1.5 text-[11px] text-gray-300 hover:bg-gray-800"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
                 </div>
               )}
 
