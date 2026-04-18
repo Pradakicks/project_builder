@@ -712,6 +712,8 @@ export interface DebugReport {
   /** Last 50 toast messages (both auto-expired and manually dismissed). */
   toasts: DebugReportToast[];
   lastScenario: CapturedScenario | null;
+  /** Append-only history of captured failure scenarios (up to 10). */
+  scenarios: CapturedScenario[];
   /** Full ring buffer of frontend / IPC events — expanded from 50 to 250. */
   recentEvents: DebugEvent[];
   /** Tail of the Rust-side tracing log file when dev session is enabled. */

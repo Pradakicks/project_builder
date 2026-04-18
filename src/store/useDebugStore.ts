@@ -121,9 +121,19 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       : Promise.resolve(null);
 
     const backendTailPromise = debugApi.readDebugLogTail(200).catch(() => null);
+    const scenariosPromise = debugApi.listDebugScenarios().catch(() => []);
 
-    const [[runtimeStatus, runtimeLogTail], deliverySnapshot, backendLogTail] =
-      await Promise.all([runtimePromise, snapshotPromise, backendTailPromise]);
+    const [
+      [runtimeStatus, runtimeLogTail],
+      deliverySnapshot,
+      backendLogTail,
+      scenarios,
+    ] = await Promise.all([
+      runtimePromise,
+      snapshotPromise,
+      backendTailPromise,
+      scenariosPromise,
+    ]);
 
     const toastHistory = useToastStore.getState().getHistory();
 
@@ -144,6 +154,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       goalRun: deliverySnapshot ? { deliverySnapshot } : null,
       toasts: toastHistory,
       lastScenario: get().lastScenario,
+      scenarios,
       recentEvents: get().events.slice(-MAX_EVENTS),
       backendLogTail,
     };

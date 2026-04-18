@@ -21,6 +21,14 @@ fn latest_scenario_path() -> Option<PathBuf> {
     debug_session_dir().map(|dir| dir.join("latest-scenario.json"))
 }
 
+fn scenarios_log_path() -> Option<PathBuf> {
+    debug_session_dir().map(|dir| dir.join("scenarios.jsonl"))
+}
+
+/// Max scenarios kept in the append-only log. Small because each row can be
+/// a couple KB; we want fast full-read during `list_debug_scenarios`.
+const MAX_SCENARIOS_KEPT: usize = 10;
+
 #[tracing::instrument]
 #[tauri::command]
 pub fn get_debug_session_info() -> DebugSessionInfo {
@@ -61,10 +69,64 @@ pub fn record_debug_scenario(
     let json = serde_json::to_string_pretty(&scenario).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())?;
 
+    // Also append to scenarios.jsonl for history, keeping only the last
+    // MAX_SCENARIOS_KEPT. File-side cap is enforced by read-all / take-tail /
+    // rewrite; O(n) per write is fine for a ~10-row file.
+    if let Some(log_path) = scenarios_log_path() {
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let line = serde_json::to_string(&scenario).map_err(|e| e.to_string())?;
+        let mut lines: Vec<String> = if log_path.exists() {
+            fs::read_to_string(&log_path)
+                .map_err(|e| e.to_string())?
+                .lines()
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        lines.push(line);
+        if lines.len() > MAX_SCENARIOS_KEPT {
+            let drop = lines.len() - MAX_SCENARIOS_KEPT;
+            lines.drain(0..drop);
+        }
+        fs::write(&log_path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+    }
+
     Ok(DebugScenarioRecord {
         scenario,
         path: Some(path.display().to_string()),
     })
+}
+
+/// Return the scenarios kept in the append-only log, oldest first.
+#[tracing::instrument]
+#[tauri::command]
+pub fn list_debug_scenarios() -> Result<Vec<DebugScenarioRecordInput>, String> {
+    if !cfg!(debug_assertions) {
+        return Ok(Vec::new());
+    }
+    let Some(log_path) = scenarios_log_path() else {
+        return Ok(Vec::new());
+    };
+    if !log_path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(&log_path).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<DebugScenarioRecordInput>(line) {
+            Ok(v) => out.push(v),
+            // Skip malformed rows rather than failing the whole read; the log
+            // is best-effort and a corrupt row shouldn't blind the panel.
+            Err(_) => continue,
+        }
+    }
+    Ok(out)
 }
 
 #[tracing::instrument]

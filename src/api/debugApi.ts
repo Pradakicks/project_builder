@@ -88,3 +88,39 @@ export async function getLastDebugScenario(): Promise<CapturedScenario | null> {
 export async function readDebugLogTail(limit = 120): Promise<DebugLogTail> {
   return loggedInvoke("read_debug_log_tail", { limit });
 }
+
+export async function listDebugScenarios(): Promise<CapturedScenario[]> {
+  const rows = await loggedInvoke<
+    {
+      id: string;
+      kind: "cto-chat";
+      status: "failed" | "rejected";
+      projectId: string;
+      projectName: string | null;
+      prompt: string;
+      conversation: { role: string; content: string }[];
+      assistantText: string | null;
+      cleanedContent: string | null;
+      review: unknown;
+      decision: unknown;
+      error: string | null;
+      capturedAt: string;
+    }[]
+  >("list_debug_scenarios");
+  return rows.map((record) => ({
+    id: record.id,
+    kind: record.kind,
+    status: record.status,
+    projectId: record.projectId,
+    projectName: record.projectName,
+    prompt: record.prompt,
+    conversation: record.conversation,
+    assistantText: record.assistantText,
+    cleanedContent: record.cleanedContent,
+    review: record.review as CapturedScenario["review"],
+    decision: record.decision as CapturedScenario["decision"],
+    error: record.error,
+    capturedAt: record.capturedAt,
+    path: null,
+  }));
+}

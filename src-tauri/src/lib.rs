@@ -143,6 +143,7 @@ pub fn run() {
             commands::debug_commands::get_debug_session_info,
             commands::debug_commands::record_debug_scenario,
             commands::debug_commands::get_last_debug_scenario,
+            commands::debug_commands::list_debug_scenarios,
             commands::debug_commands::read_debug_log_tail,
         ])
         .run(tauri::generate_context!())
