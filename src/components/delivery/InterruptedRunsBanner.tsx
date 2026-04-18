@@ -5,7 +5,9 @@ import type { GoalRun } from "../../types";
 
 /// Startup banner for goal runs that were mid-execution when the app was
 /// last closed (or crashed). One-click resume-all + per-run resume. Dismiss
-/// is session-only — a new app launch will re-surface any still-interrupted runs.
+/// cancels the listed runs so they don't resurface on the next launch —
+/// preserves the runs as history (status=failed, reason="Cancelled by
+/// operator") but gets them out of the interrupted queue.
 export function InterruptedRunsBanner() {
   const [runs, setRuns] = useState<GoalRun[]>([]);
   const [dismissed, setDismissed] = useState(false);
@@ -55,6 +57,21 @@ export function InterruptedRunsBanner() {
     }
   };
 
+  const dismissAll = async () => {
+    setBusy(true);
+    try {
+      for (const run of runs) {
+        await goalRunApi.cancelGoalRun(run.id);
+      }
+      setRuns([]);
+      setDismissed(true);
+    } catch (err) {
+      addToast(`Failed to dismiss runs: ${err}`, "warning");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="fixed left-1/2 top-3 z-50 w-[min(640px,calc(100%-24px))] -translate-x-1/2 rounded-lg border border-orange-800/70 bg-orange-950/90 px-4 py-3 text-[12px] text-orange-100 shadow-lg shadow-black/30 backdrop-blur">
       <div className="flex items-start gap-3">
@@ -91,8 +108,10 @@ export function InterruptedRunsBanner() {
             Resume all
           </button>
           <button
-            onClick={() => setDismissed(true)}
-            className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800"
+            onClick={() => void dismissAll()}
+            disabled={busy}
+            title="Cancel these runs so they don't re-appear on next launch"
+            className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 disabled:opacity-50"
           >
             Dismiss
           </button>
