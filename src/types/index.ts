@@ -681,11 +681,39 @@ export interface CapturedScenario {
   path?: string | null;
 }
 
+export interface DebugReportRuntime {
+  status: ProjectRuntimeStatus;
+  logTail: DebugLogTail;
+}
+
+export interface DebugReportGoalRun {
+  deliverySnapshot: GoalRunDeliverySnapshot;
+}
+
+export interface DebugReportToast {
+  id: string;
+  message: string;
+  type: "error" | "info" | "warning";
+  createdAt: string;
+}
+
 export interface DebugReport {
   generatedAt: string;
+  app: {
+    activeProjectId: string | null;
+    activeView: string;
+    activeGoalRunId: string | null;
+  };
   session: DebugSessionSummary | null;
-  activeProjectId: string | null;
-  activeView: string;
+  /** Null when no active project or fetch failed. */
+  runtime: DebugReportRuntime | null;
+  /** Null when no active goal run. */
+  goalRun: DebugReportGoalRun | null;
+  /** Last 50 toast messages (both auto-expired and manually dismissed). */
+  toasts: DebugReportToast[];
   lastScenario: CapturedScenario | null;
+  /** Full ring buffer of frontend / IPC events — expanded from 50 to 250. */
   recentEvents: DebugEvent[];
+  /** Tail of the Rust-side tracing log file when dev session is enabled. */
+  backendLogTail: DebugLogTail | null;
 }

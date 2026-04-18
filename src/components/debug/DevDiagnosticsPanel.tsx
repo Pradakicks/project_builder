@@ -55,13 +55,17 @@ export function DevDiagnosticsPanel() {
     return null;
   }
 
+  const [copying, setCopying] = useState(false);
   const copyReport = async () => {
+    setCopying(true);
     try {
-      const report = buildReport(activeProjectId, activeView);
+      const report = await buildReport(activeProjectId, activeView);
       await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
       useToastStore.getState().addToast("Copied debug report", "info");
     } catch (error) {
       useToastStore.getState().addToast(`Failed to copy debug report: ${error}`, "warning");
+    } finally {
+      setCopying(false);
     }
   };
 
@@ -121,9 +125,10 @@ export function DevDiagnosticsPanel() {
           <div className="grid grid-cols-2 gap-2 border-b border-gray-800 px-4 py-3 text-[11px] text-gray-300">
             <button
               onClick={() => void copyReport()}
-              className="rounded border border-gray-700 px-2 py-1 hover:bg-gray-900"
+              disabled={copying}
+              className="rounded border border-gray-700 px-2 py-1 hover:bg-gray-900 disabled:opacity-50"
             >
-              Copy Debug Report
+              {copying ? "Collecting…" : "Copy Debug Report"}
             </button>
             <button
               onClick={() => void replayLastScenario()}
