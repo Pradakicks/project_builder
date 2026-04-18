@@ -32,6 +32,9 @@ interface GoalRunStore {
   continueAutopilot: (goalRunId: string) => Promise<void>;
   retryGoalRun: (goalRunId: string) => Promise<void>;
   stopGoalRun: (goalRunId: string) => Promise<void>;
+  pauseGoalRun: (goalRunId: string) => Promise<void>;
+  cancelGoalRun: (goalRunId: string) => Promise<void>;
+  rerunVerification: (goalRunId: string) => Promise<void>;
   refreshRuntimeStatus: (projectId?: string) => Promise<void>;
   startRuntime: (projectId?: string) => Promise<void>;
   stopRuntime: (projectId?: string) => Promise<void>;
@@ -41,6 +44,10 @@ interface GoalRunStore {
 let pollTimer: ReturnType<typeof window.setInterval> | null = null;
 let polledGoalRunId: string | null = null;
 let unlistenProgress: (() => void) | null = null;
+// Monotonic session counter. Each `stopPolling` / `ensurePolling` bumps this so
+// async listener registrations that resolve after their session ended can self-
+// cancel instead of leaking a subscription that mutates stale state.
+let pollSession = 0;
 
 function toast(message: string, kind: "info" | "warning" = "warning") {
   useToastStore.getState().addToast(message, kind);
@@ -92,6 +99,7 @@ async function refreshGoalRunState(goalRunId: string) {
 }
 
 function stopPolling() {
+  pollSession += 1;
   if (pollTimer) {
     window.clearInterval(pollTimer);
     pollTimer = null;
@@ -109,10 +117,14 @@ function ensurePolling(goalRunId: string) {
     return;
   }
   stopPolling();
+  const mySession = ++pollSession;
   polledGoalRunId = goalRunId;
 
-  // Register event listener for sub-2s live activity updates
+  // Register event listener for sub-2s live activity updates. Registration is
+  // async, so a rapid re-poll can resolve it after `stopPolling` has already
+  // advanced `pollSession` — in that case we bail / unlisten.
   void goalRunApi.onImplementationProgress((event) => {
+    if (mySession !== pollSession) return;
     if (event.goalRunId !== goalRunId) return;
     if (event.status === "started") {
       useGoalRunStore.setState({
@@ -131,6 +143,10 @@ function ensurePolling(goalRunId: string) {
       useGoalRunStore.setState({ liveActivity: null });
     }
   }).then((unlisten) => {
+    if (mySession !== pollSession) {
+      unlisten();
+      return;
+    }
     unlistenProgress = unlisten;
   }).catch((error) => {
     devLog("warn", "Store:GoalRun", "Failed to register implementation-progress listener", error);
@@ -287,6 +303,29 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     toast("Autopilot stopped", "info");
   },
 
+  pauseGoalRun: async (goalRunId) => {
+    const paused = await goalRunApi.pauseGoalRun(goalRunId);
+    syncGoalRunState(paused);
+    await get().refreshDeliverySnapshot(goalRunId);
+    stopPolling();
+    toast("Autopilot paused — resume when ready", "info");
+  },
+
+  cancelGoalRun: async (goalRunId) => {
+    const cancelled = await goalRunApi.cancelGoalRun(goalRunId);
+    syncGoalRunState(cancelled);
+    await get().refreshDeliverySnapshot(goalRunId);
+    stopPolling();
+    toast("Autopilot cancelled", "info");
+  },
+
+  rerunVerification: async (goalRunId) => {
+    const run = await goalRunApi.rerunVerification(goalRunId);
+    syncGoalRunState(run);
+    ensurePolling(goalRunId);
+    toast("Rerunning verification", "info");
+  },
+
   refreshRuntimeStatus: async (projectId) => {
     const activeProjectId = projectId ?? get().projectId;
     if (!activeProjectId) return;
@@ -297,6 +336,8 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         lines: [],
       })),
     ]);
+    // Drop stale results if the user switched projects while we were fetching.
+    if (get().projectId && get().projectId !== activeProjectId) return;
     set({ runtimeStatus, runtimeLogs: logs.lines });
   },
 
@@ -308,6 +349,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       path: null,
       lines: [],
     }));
+    if (get().projectId && get().projectId !== activeProjectId) return;
     set({ runtimeStatus, runtimeLogs: logs.lines });
   },
 
@@ -319,6 +361,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       path: null,
       lines: [],
     }));
+    if (get().projectId && get().projectId !== activeProjectId) return;
     set({ runtimeStatus, runtimeLogs: logs.lines });
   },
 

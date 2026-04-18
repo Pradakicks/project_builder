@@ -7,8 +7,9 @@ pub mod models;
 mod test_support;
 
 use db::Database;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct AppState {
@@ -16,6 +17,10 @@ pub struct AppState {
     /// Tracks which pieces currently have an agent running (prevents double-runs).
     pub running_pieces: Mutex<HashSet<String>>,
     pub running_goal_runs: Mutex<HashSet<String>>,
+    /// Live cancellation tokens for running goal-run executors.
+    /// Keyed by goal_run_id; firing the token unwinds the executor
+    /// (and its heartbeat task + any spawned external CLI).
+    pub goal_run_cancels: Mutex<HashMap<String, CancellationToken>>,
     pub runtime_sessions: Mutex<commands::runtime_commands::RuntimeSessions>,
 }
 
@@ -43,9 +48,11 @@ pub fn run() {
     // On startup, mark any goal runs that were mid-execution as interrupted.
     // This covers the case where the app was force-quit while the autopilot was running.
     {
-        let count = database.mark_all_interrupted_runs().unwrap_or(0);
+        // Stale = heartbeat absent or older than 30s. Paused rows are never touched
+        // (pause has no live heartbeat by design). See goal_run_queries.rs.
+        let count = database.mark_stale_runs_interrupted(30).unwrap_or(0);
         if count > 0 {
-            info!(count, "Marked interrupted goal runs on startup");
+            info!(count, "Marked stale goal runs as interrupted on startup");
         }
         let runtime_count = database.mark_runtime_sessions_interrupted().unwrap_or(0);
         if runtime_count > 0 {
@@ -60,7 +67,13 @@ pub fn run() {
             db: Mutex::new(database),
             running_pieces: Mutex::new(HashSet::new()),
             running_goal_runs: Mutex::new(HashSet::new()),
-            runtime_sessions: Mutex::new(std::collections::HashMap::new()),
+            goal_run_cancels: Mutex::new(HashMap::new()),
+            runtime_sessions: Mutex::new(HashMap::new()),
+        })
+        .setup(|app| {
+            let handle = app.handle().clone();
+            commands::goal_run_scheduler::spawn_backoff_scheduler(handle);
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::project_commands::create_project,
@@ -89,6 +102,10 @@ pub fn run() {
             commands::goal_run_commands::get_goal_run_delivery_snapshot,
             commands::goal_run_commands::resume_goal_run,
             commands::goal_run_commands::stop_goal_run,
+            commands::goal_run_commands::pause_goal_run,
+            commands::goal_run_commands::cancel_goal_run,
+            commands::goal_run_commands::rerun_verification,
+            commands::goal_run_commands::list_interrupted_runs,
             commands::goal_run_commands::get_goal_run_events,
             commands::agent_commands::run_piece_agent,
             commands::agent_commands::get_agent_history,
@@ -126,6 +143,7 @@ pub fn run() {
             commands::debug_commands::get_debug_session_info,
             commands::debug_commands::record_debug_scenario,
             commands::debug_commands::get_last_debug_scenario,
+            commands::debug_commands::list_debug_scenarios,
             commands::debug_commands::read_debug_log_tail,
         ])
         .run(tauri::generate_context!())

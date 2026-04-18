@@ -9,10 +9,16 @@ pub enum CheckKind {
     Shell,
     Http,
     TcpPort,
+    LogScan,
     Skipped,
 }
 
 /// One concrete check run during the Verification phase.
+///
+/// `expected` / `actual` are the structured human-readable contract for a
+/// check — e.g. `expected = "status in 200..=399"`, `actual = "status 500"`.
+/// Older rows and simpler check kinds may leave both `None`; rendering code
+/// falls back to the free-form `detail` string in that case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationCheck {
@@ -23,6 +29,10 @@ pub struct VerificationCheck {
     /// Concise detail: exit code text, HTTP status, error message, etc.
     pub detail: String,
     pub duration_ms: i64,
+    #[serde(default)]
+    pub expected: Option<String>,
+    #[serde(default)]
+    pub actual: Option<String>,
 }
 
 /// Structured result of the Verification phase, stored as JSON in the
@@ -37,6 +47,49 @@ pub struct VerificationResult {
     pub finished_at: String, // RFC-3339
     /// One-line human summary suitable for `blocker_reason` / banners.
     pub message: String,
+}
+
+/// Input to the CTO repair prompt assembler. Carries what the repair agent
+/// needs to diagnose a failure: the one-line summary plus, when available,
+/// the structured per-check breakdown from Verification.
+///
+/// Non-Verification phases (Implementation, RuntimeExecution) don't yet emit
+/// structured failure data, so they construct this via `from_summary` and
+/// the downstream prompt renderer degrades gracefully to the minimal shape.
+#[derive(Debug, Clone)]
+pub struct PhaseFailureContext {
+    pub summary: String,
+    pub failed_checks: Vec<VerificationCheck>,
+    pub passed_checks: Vec<VerificationCheck>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+impl PhaseFailureContext {
+    pub fn from_summary(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            failed_checks: vec![],
+            passed_checks: vec![],
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    pub fn from_verification(result: &VerificationResult) -> Self {
+        let (failed, passed): (Vec<_>, Vec<_>) = result
+            .checks
+            .iter()
+            .cloned()
+            .partition(|check| !check.passed);
+        Self {
+            summary: result.message.clone(),
+            failed_checks: failed,
+            passed_checks: passed,
+            started_at: Some(result.started_at.clone()),
+            finished_at: Some(result.finished_at.clone()),
+        }
+    }
 }
 
 /// Tolerant deserializer: accepts a JSON `VerificationResult` or falls back to
@@ -91,6 +144,8 @@ mod tests {
                 passed: true,
                 detail: "exited 0".to_string(),
                 duration_ms: 100,
+                expected: None,
+                actual: None,
             }],
             started_at: "2024-01-01T00:00:00Z".to_string(),
             finished_at: "2024-01-01T00:00:01Z".to_string(),
@@ -104,12 +159,84 @@ mod tests {
     }
 
     #[test]
+    fn parse_verification_result_accepts_rows_without_expected_actual_fields() {
+        // Legacy rows produced before `expected`/`actual` were added must still
+        // deserialize cleanly via the `#[serde(default)]` fallback.
+        let raw = r#"{
+            "passed": true,
+            "checks": [{
+                "name": "verify command",
+                "kind": "shell",
+                "passed": true,
+                "detail": "exited 0",
+                "durationMs": 42
+            }],
+            "startedAt": "2024-01-01T00:00:00Z",
+            "finishedAt": "2024-01-01T00:00:01Z",
+            "message": "1/1 checks passed"
+        }"#;
+        let parsed = parse_verification_result(raw);
+        assert_eq!(parsed.checks.len(), 1);
+        assert!(parsed.checks[0].expected.is_none());
+        assert!(parsed.checks[0].actual.is_none());
+    }
+
+    #[test]
     fn parse_verification_result_handles_legacy_plain_string() {
         let raw = "Verification passed via `npm test`";
         let parsed = parse_verification_result(raw);
         assert!(parsed.passed, "legacy strings default to passed=true");
         assert!(parsed.checks.is_empty(), "legacy strings produce no checks");
         assert_eq!(parsed.message, raw);
+    }
+
+    #[test]
+    fn phase_failure_context_from_summary_is_empty_except_for_summary() {
+        let ctx = PhaseFailureContext::from_summary("boom");
+        assert_eq!(ctx.summary, "boom");
+        assert!(ctx.failed_checks.is_empty());
+        assert!(ctx.passed_checks.is_empty());
+        assert!(ctx.started_at.is_none());
+        assert!(ctx.finished_at.is_none());
+    }
+
+    #[test]
+    fn phase_failure_context_from_verification_partitions_checks() {
+        let result = VerificationResult {
+            passed: false,
+            checks: vec![
+                VerificationCheck {
+                    name: "verify command".to_string(),
+                    kind: CheckKind::Shell,
+                    passed: true,
+                    detail: "exited 0".to_string(),
+                    duration_ms: 10,
+                    expected: None,
+                    actual: None,
+                },
+                VerificationCheck {
+                    name: "http readiness".to_string(),
+                    kind: CheckKind::Http,
+                    passed: false,
+                    detail: "connection refused".to_string(),
+                    duration_ms: 60_000,
+                    expected: Some("HTTP 200".to_string()),
+                    actual: Some("connection refused".to_string()),
+                },
+            ],
+            started_at: "2024-01-01T00:00:00Z".to_string(),
+            finished_at: "2024-01-01T00:01:00Z".to_string(),
+            message: "HTTP readiness check failed".to_string(),
+        };
+
+        let ctx = PhaseFailureContext::from_verification(&result);
+        assert_eq!(ctx.summary, "HTTP readiness check failed");
+        assert_eq!(ctx.failed_checks.len(), 1);
+        assert_eq!(ctx.failed_checks[0].name, "http readiness");
+        assert_eq!(ctx.passed_checks.len(), 1);
+        assert_eq!(ctx.passed_checks[0].name, "verify command");
+        assert_eq!(ctx.started_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(ctx.finished_at.as_deref(), Some("2024-01-01T00:01:00Z"));
     }
 
     #[test]
@@ -122,6 +249,8 @@ mod tests {
                 passed: false,
                 detail: "connection refused".to_string(),
                 duration_ms: 60_000,
+                expected: None,
+                actual: None,
             }],
             started_at: "2024-01-01T00:00:00Z".to_string(),
             finished_at: "2024-01-01T00:01:00Z".to_string(),
@@ -170,6 +299,8 @@ pub enum GoalRunStatus {
     Failed,
     /// Was running when the app closed; can be resumed
     Interrupted,
+    /// Explicitly paused by the operator; resume-able, not a failure
+    Paused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +314,10 @@ pub enum GoalRunEventKind {
     Failed,
     Stopped,
     Note,
+    Paused,
+    Resumed,
+    CancelledMidPhase,
+    HeartbeatStale,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +342,8 @@ pub struct GoalRun {
     pub last_failure_fingerprint: Option<String>,
     #[serde(default)]
     pub attention_required: bool,
+    #[serde(default)]
+    pub last_heartbeat_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -291,4 +428,5 @@ pub struct GoalRunUpdate {
     pub retry_backoff_until: Option<Option<String>>,
     pub last_failure_fingerprint: Option<Option<String>>,
     pub attention_required: Option<bool>,
+    pub last_heartbeat_at: Option<Option<String>>,
 }

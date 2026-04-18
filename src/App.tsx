@@ -1,6 +1,7 @@
 import { Suspense, lazy } from "react";
 import { ToastContainer } from "./components/ui/ToastContainer";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
+import { InterruptedRunsBanner } from "./components/delivery/InterruptedRunsBanner";
 import { useAppStore } from "./store/useAppStore";
 
 const ProjectsPage = lazy(() =>
@@ -65,6 +66,7 @@ function App() {
         {view === "editor" && <AppLayout />}
         {view === "settings" && <SettingsPage />}
       </Suspense>
+      <InterruptedRunsBanner />
       <ToastContainer />
       <ConfirmDialog />
       {DevDiagnosticsPanel ? (

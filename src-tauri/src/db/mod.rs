@@ -103,6 +103,11 @@ impl Database {
         }
 
         ensure_agent_history_metadata_column(&self.conn)?;
+        // Run additive column-presence guards unconditionally (idempotent). This
+        // catches the case where a column was added to an existing migration after
+        // a DB was already bumped to that version — the migration loop won't
+        // re-run, so without this tail pass the ALTER TABLE never fires.
+        ensure_goal_runs_schema(&self.conn)?;
         Ok(())
     }
 
@@ -360,6 +365,9 @@ fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
 }
 
 fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
+    // Fresh-install schema. `last_heartbeat_at` and `retry_backoff_until` columns
+    // are added below via additive ALTERs to handle legacy DBs that pre-date them;
+    // indexes on those columns are created after the ALTERs land.
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS goal_runs (
@@ -380,6 +388,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             retry_backoff_until TEXT,
             last_failure_fingerprint TEXT,
             attention_required INTEGER NOT NULL DEFAULT 0,
+            last_heartbeat_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -403,6 +412,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
     let mut has_retry_backoff_until = false;
     let mut has_last_failure_fingerprint = false;
     let mut has_attention_required = false;
+    let mut has_last_heartbeat_at = false;
 
     for column in columns {
         match column.map_err(|e| e.to_string())?.as_str() {
@@ -412,6 +422,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             "retry_backoff_until" => has_retry_backoff_until = true,
             "last_failure_fingerprint" => has_last_failure_fingerprint = true,
             "attention_required" => has_attention_required = true,
+            "last_heartbeat_at" => has_last_heartbeat_at = true,
             _ => {}
         }
     }
@@ -449,6 +460,19 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if !has_last_heartbeat_at {
+        conn.execute("ALTER TABLE goal_runs ADD COLUMN last_heartbeat_at TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Indexes on ALTER-added columns must run after the columns exist.
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_heartbeat ON goal_runs(last_heartbeat_at);
+        CREATE INDEX IF NOT EXISTS idx_goal_runs_backoff ON goal_runs(retry_backoff_until);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -662,6 +686,85 @@ mod tests {
         let projects = db.list_projects().expect("list projects");
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id, "project-1");
+
+        drop(db);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn head_version_db_missing_heartbeat_column_is_upgraded_on_open() {
+        // Regression: a DB at user_version = CURRENT_SCHEMA_VERSION but missing
+        // the `last_heartbeat_at` column (added to migrate_v4 after the version
+        // bump had already been tagged) must get the column backfilled on open.
+        // The migration loop only runs migrations with version > current, so the
+        // ALTER TABLE lives in `ensure_goal_runs_schema`, which this tail pass
+        // now invokes unconditionally.
+        let db_path = temp_db_path("head-missing-heartbeat");
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            "
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                root_piece_id TEXT,
+                settings_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_history (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                input_text TEXT NOT NULL DEFAULT '',
+                output_text TEXT NOT NULL DEFAULT '',
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            -- goal_runs table as it existed before last_heartbeat_at was added.
+            CREATE TABLE goal_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'prompt-received',
+                status TEXT NOT NULL DEFAULT 'running',
+                blocker_reason TEXT,
+                current_plan_id TEXT,
+                runtime_status_summary TEXT,
+                verification_summary TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_failure_summary TEXT,
+                stop_requested INTEGER NOT NULL DEFAULT 0,
+                current_piece_id TEXT,
+                current_task_id TEXT,
+                retry_backoff_until TEXT,
+                last_failure_fingerprint TEXT,
+                attention_required INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            ",
+        )
+        .expect("seed legacy-head schema");
+        conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION};"))
+            .expect("tag head version");
+        drop(conn);
+
+        let db = Database::new_at_path(&db_path).expect("open at head missing col");
+        assert!(
+            table_has_column(&db.conn, "goal_runs", "last_heartbeat_at"),
+            "tail ensure_goal_runs_schema pass must backfill last_heartbeat_at",
+        );
+
+        let project = db
+            .create_project("p1", "smoke")
+            .expect("create project");
+        // create_goal_run -> get_goal_run reads the last_heartbeat_at column.
+        let run = db
+            .create_goal_run(&project.id, "build something")
+            .expect("create_goal_run after backfill");
+        assert!(run.last_heartbeat_at.is_none());
 
         drop(db);
         cleanup(&db_path);

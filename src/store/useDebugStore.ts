@@ -5,6 +5,11 @@ import type {
   DebugReport,
   DebugSessionSummary,
 } from "../types";
+import * as runtimeApi from "../api/runtimeApi";
+import * as goalRunApi from "../api/goalRunApi";
+import * as debugApi from "../api/debugApi";
+import { useToastStore } from "./useToastStore";
+import { useGoalRunStore } from "./useGoalRunStore";
 
 const isDev = import.meta.env.DEV;
 const MAX_EVENTS = 250;
@@ -25,7 +30,10 @@ interface DebugStore {
   captureScenario: (scenario: CapturedScenario) => void;
   clearScenario: () => void;
   registerReplayHandler: (handler: ReplayHandler | null) => void;
-  buildReport: (activeProjectId: string | null, activeView: string) => DebugReport;
+  buildReport: (
+    activeProjectId: string | null,
+    activeView: string,
+  ) => Promise<DebugReport>;
 }
 
 function readJson<T>(key: string): T | null {
@@ -94,12 +102,61 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     set({ lastScenario: null });
   },
   registerReplayHandler: (handler) => set({ replayHandler: handler }),
-  buildReport: (activeProjectId, activeView) => ({
-    generatedAt: new Date().toISOString(),
-    session: get().session,
-    activeProjectId,
-    activeView,
-    lastScenario: get().lastScenario,
-    recentEvents: get().events.slice(-50),
-  }),
+  buildReport: async (activeProjectId, activeView) => {
+    // Pull the full picture: runtime status + log tail, current goal-run
+    // delivery snapshot, Rust-side trace tail, plus the local ring buffers.
+    // Each IPC call is guarded with .catch so a single failure doesn't blank
+    // the whole report — we want as much signal as possible in one paste.
+    const activeGoalRunId = useGoalRunStore.getState().currentGoalRun?.id ?? null;
+
+    const runtimePromise = activeProjectId
+      ? Promise.all([
+          runtimeApi.getRuntimeStatus(activeProjectId).catch(() => null),
+          runtimeApi.tailRuntimeLogs(activeProjectId, 200).catch(() => null),
+        ])
+      : Promise.resolve([null, null] as const);
+
+    const snapshotPromise = activeGoalRunId
+      ? goalRunApi.getGoalRunDeliverySnapshot(activeGoalRunId).catch(() => null)
+      : Promise.resolve(null);
+
+    const backendTailPromise = debugApi.readDebugLogTail(200).catch(() => null);
+    const scenariosPromise = debugApi.listDebugScenarios().catch(() => []);
+
+    const [
+      [runtimeStatus, runtimeLogTail],
+      deliverySnapshot,
+      backendLogTail,
+      scenarios,
+    ] = await Promise.all([
+      runtimePromise,
+      snapshotPromise,
+      backendTailPromise,
+      scenariosPromise,
+    ]);
+
+    const toastHistory = useToastStore.getState().getHistory();
+
+    return {
+      generatedAt: new Date().toISOString(),
+      app: {
+        activeProjectId,
+        activeView,
+        activeGoalRunId,
+      },
+      session: get().session,
+      runtime:
+        runtimeStatus && runtimeLogTail
+          ? { status: runtimeStatus, logTail: runtimeLogTail }
+          : runtimeStatus
+            ? { status: runtimeStatus, logTail: { path: null, lines: [] } }
+            : null,
+      goalRun: deliverySnapshot ? { deliverySnapshot } : null,
+      toasts: toastHistory,
+      lastScenario: get().lastScenario,
+      scenarios,
+      recentEvents: get().events.slice(-MAX_EVENTS),
+      backendLogTail,
+    };
+  },
 }));

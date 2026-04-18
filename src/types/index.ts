@@ -179,6 +179,44 @@ export type RuntimeStopBehavior =
       timeoutSeconds?: number;
     };
 
+export type LogScanMode = "mustMatch" | "mustNotMatch";
+
+export type AcceptanceCheck =
+  | {
+      kind: "httpProbe";
+      name: string;
+      path?: string;
+      expectedStatusMin?: number;
+      expectedStatusMax?: number;
+      expectedBodyContains?: string | null;
+      expectedContentType?: string | null;
+      timeoutSeconds?: number;
+    }
+  | {
+      kind: "shell";
+      name: string;
+      command: string;
+      timeoutSeconds?: number;
+    }
+  | {
+      kind: "logScan";
+      name: string;
+      patterns: string[];
+      mode?: LogScanMode;
+      lastNLines?: number;
+    }
+  | {
+      kind: "tcpPort";
+      name: string;
+      port: number;
+      timeoutSeconds?: number;
+    };
+
+export interface AcceptanceSuite {
+  checks: AcceptanceCheck[];
+  stopOnFirstFailure?: boolean;
+}
+
 export interface ProjectRuntimeSpec {
   installCommand: string | null;
   runCommand: string;
@@ -186,6 +224,8 @@ export interface ProjectRuntimeSpec {
   verifyCommand: string | null;
   stopBehavior: RuntimeStopBehavior;
   appUrl: string | null;
+  /** Optional acceptance suite. When absent, the backend derives a default. */
+  acceptanceSuite?: AcceptanceSuite | null;
   portHint: number | null;
 }
 
@@ -226,7 +266,14 @@ export type GoalRunPhase =
   | "runtime-execution"
   | "verification";
 
-export type GoalRunStatus = "running" | "retrying" | "blocked" | "completed" | "failed" | "interrupted";
+export type GoalRunStatus =
+  | "running"
+  | "retrying"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "paused";
 export type GoalRunEventKind =
   | "phase-started"
   | "phase-completed"
@@ -235,7 +282,11 @@ export type GoalRunEventKind =
   | "blocked"
   | "failed"
   | "stopped"
-  | "note";
+  | "note"
+  | "paused"
+  | "resumed"
+  | "cancelled-mid-phase"
+  | "heartbeat-stale";
 
 export interface GoalRun {
   id: string;
@@ -255,6 +306,7 @@ export interface GoalRun {
   retryBackoffUntil: string | null;
   lastFailureFingerprint: string | null;
   attentionRequired: boolean;
+  lastHeartbeatAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -315,7 +367,7 @@ export interface LiveActivity {
   total: number;
 }
 
-export type CheckKind = "shell" | "http" | "tcpPort" | "skipped";
+export type CheckKind = "shell" | "http" | "tcpPort" | "logScan" | "skipped";
 
 export interface VerificationCheck {
   name: string;
@@ -323,6 +375,8 @@ export interface VerificationCheck {
   passed: boolean;
   detail: string;
   durationMs: number;
+  expected?: string | null;
+  actual?: string | null;
 }
 
 export interface VerificationResult {
@@ -627,11 +681,41 @@ export interface CapturedScenario {
   path?: string | null;
 }
 
+export interface DebugReportRuntime {
+  status: ProjectRuntimeStatus;
+  logTail: DebugLogTail;
+}
+
+export interface DebugReportGoalRun {
+  deliverySnapshot: GoalRunDeliverySnapshot;
+}
+
+export interface DebugReportToast {
+  id: string;
+  message: string;
+  type: "error" | "info" | "warning";
+  createdAt: string;
+}
+
 export interface DebugReport {
   generatedAt: string;
+  app: {
+    activeProjectId: string | null;
+    activeView: string;
+    activeGoalRunId: string | null;
+  };
   session: DebugSessionSummary | null;
-  activeProjectId: string | null;
-  activeView: string;
+  /** Null when no active project or fetch failed. */
+  runtime: DebugReportRuntime | null;
+  /** Null when no active goal run. */
+  goalRun: DebugReportGoalRun | null;
+  /** Last 50 toast messages (both auto-expired and manually dismissed). */
+  toasts: DebugReportToast[];
   lastScenario: CapturedScenario | null;
+  /** Append-only history of captured failure scenarios (up to 10). */
+  scenarios: CapturedScenario[];
+  /** Full ring buffer of frontend / IPC events — expanded from 50 to 250. */
   recentEvents: DebugEvent[];
+  /** Tail of the Rust-side tracing log file when dev session is enabled. */
+  backendLogTail: DebugLogTail | null;
 }

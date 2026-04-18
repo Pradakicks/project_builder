@@ -340,7 +340,7 @@ async fn resolve_conflict_with_ai_internal<R: tauri::Runtime>(
                 }
             });
 
-            let result = run_external(engine, &config, tx).await?;
+            let result = run_external(engine, &config, tx, None).await?;
             let _ = stream_task.await;
 
             if result.exit_code != 0 {

@@ -686,6 +686,7 @@ mod tests {
                 },
                 verify_command: Some("npm test".to_string()),
                 stop_behavior: RuntimeStopBehavior::Kill,
+                acceptance_suite: None,
             }),
             ..ProjectSettings::default()
         };

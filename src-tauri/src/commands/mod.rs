@@ -4,6 +4,8 @@ pub mod cto_action_engine;
 pub mod debug_commands;
 pub mod goal_run_executor;
 pub mod goal_run_commands;
+pub mod goal_run_scheduler;
+pub mod repair_prompt;
 pub mod merge_commands;
 pub mod piece_commands;
 pub mod plan_commands;

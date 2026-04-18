@@ -1,9 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 import { openRuntimeInBrowser } from "../../api/runtimeApi";
-import type { GoalRun, GoalRunEvent, VerificationResult } from "../../types";
+import type { CheckKind, GoalRun, GoalRunEvent, VerificationCheck, VerificationResult } from "../../types";
 import { QuickRuntimeSetup } from "./QuickRuntimeSetup";
 
 function formatTime(value: string | null) {
@@ -11,30 +11,114 @@ function formatTime(value: string | null) {
   return new Date(value).toLocaleString();
 }
 
+const KIND_LABEL: Record<CheckKind, string> = {
+  shell: "shell",
+  http: "http",
+  tcpPort: "tcp",
+  logScan: "log",
+  skipped: "skip",
+};
+
+function CheckDetailRow({ check }: { check: VerificationCheck }) {
+  const [open, setOpen] = useState(false);
+  const hasExtras = Boolean(check.expected || check.actual);
+  const clickable = hasExtras || check.detail.length > 0;
+  const actual = check.actual ?? "";
+  const actualIsMultiline = actual.includes("\n");
+
+  return (
+    <li className="text-[10px]">
+      <button
+        type="button"
+        onClick={() => clickable && setOpen((v) => !v)}
+        className={`flex w-full items-start gap-1.5 text-left ${clickable ? "hover:bg-white/5" : "cursor-default"} rounded px-0.5 py-0.5`}
+      >
+        <span
+          className={
+            check.passed
+              ? "text-green-400"
+              : check.kind === "skipped"
+                ? "text-gray-500"
+                : "text-red-400"
+          }
+        >
+          {check.kind === "skipped" ? "–" : check.passed ? "✓" : "✗"}
+        </span>
+        <span className="shrink-0 rounded bg-gray-800/60 px-1 text-[9px] uppercase tracking-wide text-gray-400">
+          {KIND_LABEL[check.kind] ?? check.kind}
+        </span>
+        <span
+          className={`flex-1 truncate ${check.passed ? "text-gray-300" : check.kind === "skipped" ? "text-gray-500" : "text-red-200"}`}
+        >
+          {check.name}
+        </span>
+        <span className="shrink-0 text-gray-600">{check.durationMs}ms</span>
+        {clickable && (
+          <span className="shrink-0 text-gray-600">{open ? "▾" : "▸"}</span>
+        )}
+      </button>
+      {open && (
+        <div className="ml-4 mt-0.5 space-y-0.5 rounded bg-black/20 p-1.5 font-mono text-[10px] text-gray-300">
+          {check.expected && (
+            <div>
+              <span className="text-gray-500">expected </span>
+              <span className="text-gray-200">{check.expected}</span>
+            </div>
+          )}
+          {check.actual && !actualIsMultiline && (
+            <div>
+              <span className="text-gray-500">actual&nbsp;&nbsp; </span>
+              <span className={check.passed ? "text-gray-200" : "text-red-200"}>{check.actual}</span>
+            </div>
+          )}
+          {check.actual && actualIsMultiline && (
+            <div>
+              <div className="text-gray-500">actual</div>
+              <pre
+                className={`mt-0.5 whitespace-pre-wrap border-l-2 border-gray-700 pl-2 ${check.passed ? "text-gray-200" : "text-red-200"}`}
+              >
+                {check.actual}
+              </pre>
+            </div>
+          )}
+          {!check.expected && !check.actual && check.detail && (
+            <div>
+              <span className="text-gray-500">detail&nbsp;&nbsp; </span>
+              <span className="text-gray-200">{check.detail}</span>
+            </div>
+          )}
+          {(check.expected || check.actual) && check.detail && (
+            <div className="text-gray-500">
+              <span className="text-gray-600">detail&nbsp;&nbsp; </span>
+              <span className="text-gray-400">{check.detail}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
 function VerificationResultBlock({ result }: { result: VerificationResult }) {
   const passed = result.passed;
   const totalMs = result.checks.reduce((sum, c) => sum + c.durationMs, 0);
   const totalSecs = (totalMs / 1000).toFixed(1);
+  const passedCount = result.checks.filter((c) => c.passed).length;
   return (
     <div className={`rounded border p-2 ${passed ? "border-green-900/50 bg-green-950/20" : "border-red-900/50 bg-red-950/20"}`}>
       <div className="flex items-center justify-between">
         <p className={`text-[11px] font-medium ${passed ? "text-green-300" : "text-red-300"}`}>
           {passed ? "Verification passed" : "Verification failed"}
+          <span className="ml-2 text-[10px] text-gray-500">
+            {passedCount}/{result.checks.length} checks
+          </span>
         </p>
         <span className="text-[10px] text-gray-500">{totalSecs}s total</span>
       </div>
       {result.checks.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">
           {result.checks.map((check, i) => (
-            <li key={i} className="flex items-start gap-1.5 text-[10px]">
-              <span className={check.passed ? "text-green-400" : check.kind === "skipped" ? "text-gray-500" : "text-red-400"}>
-                {check.kind === "skipped" ? "–" : check.passed ? "✓" : "✗"}
-              </span>
-              <span className={`flex-1 truncate ${check.passed ? "text-gray-300" : check.kind === "skipped" ? "text-gray-500" : "text-red-200"}`}>
-                {check.name}
-              </span>
-              <span className="shrink-0 text-gray-600">{check.durationMs}ms</span>
-            </li>
+            <CheckDetailRow key={i} check={check} />
           ))}
         </ul>
       )}
@@ -132,6 +216,9 @@ function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): Pha
       } else if (e.kind === "blocked") {
         endedAt = e.createdAt;
         outcome = "blocked";
+      } else if (e.kind === "cancelled-mid-phase") {
+        endedAt = e.createdAt;
+        outcome = "failed";
       } else if (e.kind === "retry-scheduled") {
         repairSummaries.push(e.summary);
       }
@@ -176,8 +263,10 @@ export function DeliveryPanel() {
   const refreshRuntimeStatus = useGoalRunStore((s) => s.refreshRuntimeStatus);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
-  const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
+  const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
+  const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
+  const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
   const addToast = useToastStore((s) => s.addToast);
   const runtimeSnapshot = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
@@ -229,16 +318,6 @@ export function DeliveryPanel() {
     }
   };
 
-  const handleRetryGoal = async () => {
-    if (!currentRun) return;
-    try {
-      await retryGoalRun(currentRun.id);
-      addToast("Retried the active goal run", "info");
-    } catch (error) {
-      addToast(`Failed to retry goal run: ${error}`, "warning");
-    }
-  };
-
   const handleStopGoal = async () => {
     if (!currentRun) return;
     try {
@@ -246,6 +325,33 @@ export function DeliveryPanel() {
       addToast("Stopped the active goal run", "info");
     } catch (error) {
       addToast(`Failed to stop goal run: ${error}`, "warning");
+    }
+  };
+
+  const handlePauseGoal = async () => {
+    if (!currentRun) return;
+    try {
+      await pauseGoalRun(currentRun.id);
+    } catch (error) {
+      addToast(`Failed to pause goal run: ${error}`, "warning");
+    }
+  };
+
+  const handleRerunVerification = async () => {
+    if (!currentRun) return;
+    try {
+      await rerunVerification(currentRun.id);
+    } catch (error) {
+      addToast(`Failed to rerun verification: ${error}`, "warning");
+    }
+  };
+
+  const handleResumeGoal = async () => {
+    if (!currentRun) return;
+    try {
+      await continueAutopilot(currentRun.id);
+    } catch (error) {
+      addToast(`Failed to resume goal run: ${error}`, "warning");
     }
   };
 
@@ -279,9 +385,13 @@ export function DeliveryPanel() {
                   ? "bg-emerald-900/60 text-emerald-300"
                   : currentRun.status === "running" || currentRun.status === "retrying"
                     ? "bg-blue-900/60 text-blue-300"
-                    : currentRun.status === "blocked"
-                      ? "bg-amber-900/60 text-amber-300"
-                      : "bg-red-900/60 text-red-300"
+                    : currentRun.status === "paused"
+                      ? "bg-yellow-900/60 text-yellow-300"
+                      : currentRun.status === "blocked"
+                        ? "bg-amber-900/60 text-amber-300"
+                        : currentRun.status === "interrupted"
+                          ? "bg-orange-900/60 text-orange-300"
+                          : "bg-red-900/60 text-red-300"
               }`}
             >
               {currentRun.status}
@@ -461,22 +571,46 @@ export function DeliveryPanel() {
               >
                 Stop app
               </button>
-              {currentRun.status !== "completed" ? (
+              {currentRun.status === "paused" ||
+              currentRun.status === "interrupted" ||
+              currentRun.status === "blocked" ||
+              currentRun.status === "failed" ? (
                 <button
-                  onClick={() => void handleRetryGoal()}
+                  onClick={() => void handleResumeGoal()}
                   disabled={orchestrating}
-                  className="rounded border border-amber-700 px-3 py-1 text-[11px] text-amber-300 hover:bg-amber-950/40 disabled:opacity-50"
+                  className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
                 >
-                  {orchestrating ? "Running…" : "Retry goal"}
+                  {orchestrating ? "Running…" : "Resume goal"}
+                </button>
+              ) : null}
+              {currentRun.phase === "verification" &&
+              (currentRun.status === "blocked" ||
+                currentRun.status === "failed" ||
+                currentRun.status === "completed") ? (
+                <button
+                  onClick={() => void handleRerunVerification()}
+                  disabled={orchestrating}
+                  className="rounded border border-sky-700 px-3 py-1 text-[11px] text-sky-300 hover:bg-sky-950/40 disabled:opacity-50"
+                  title="Rerun the acceptance suite without invoking repair agent"
+                >
+                  Rerun verification
                 </button>
               ) : null}
               {currentRun.status === "running" || currentRun.status === "retrying" ? (
-                <button
-                  onClick={() => void handleStopGoal()}
-                  className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
-                >
-                  Stop goal
-                </button>
+                <>
+                  <button
+                    onClick={() => void handlePauseGoal()}
+                    className="rounded border border-yellow-700 px-3 py-1 text-[11px] text-yellow-300 hover:bg-yellow-950/40"
+                  >
+                    Pause goal
+                  </button>
+                  <button
+                    onClick={() => void handleStopGoal()}
+                    className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
+                  >
+                    Stop goal
+                  </button>
+                </>
               ) : null}
             </div>
           </section>

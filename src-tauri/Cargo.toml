@@ -24,6 +24,10 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 regex = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

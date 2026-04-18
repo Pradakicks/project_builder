@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn, error, trace};
 
 /// Result of an external tool run.
@@ -10,6 +11,24 @@ pub struct ExternalRunResult {
     pub output: String,
     pub duration_secs: u64,
 }
+
+/// Signal a TERM to the whole process group of `pid` (unix), then KILL after a short wait.
+/// Returns once the PGID is reaped (or the wait expires). No-op on non-unix.
+#[cfg(unix)]
+async fn terminate_process_group(pid: u32) {
+    let pgid = pid as libc::pid_t;
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    // Give the group up to 3s to exit cleanly.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_process_group(_pid: u32) {}
 
 /// Configuration for an external engine run.
 pub struct ExternalRunConfig {
@@ -72,11 +91,15 @@ async fn check_binary(program: &str) -> Result<(), String> {
 
 /// Run an external tool, streaming stdout line-by-line through the sender.
 ///
-/// Returns when the process exits or the timeout expires.
+/// Returns when the process exits, the timeout expires, or `cancel` fires.
+/// On cancel, the child's whole process group is SIGTERM'd (then SIGKILL'd) so
+/// grandchildren don't orphan. Pass `None` for `cancel` when no pause/resume
+/// orchestration is in play (e.g., ad-hoc piece runs from the UI).
 pub async fn run_external(
     engine: &str,
     config: &ExternalRunConfig,
     sender: mpsc::Sender<String>,
+    cancel: Option<CancellationToken>,
 ) -> Result<ExternalRunResult, String> {
     let (program, args) = build_command(engine, config)?;
 
@@ -92,6 +115,7 @@ pub async fn run_external(
     let mut cmd = Command::new(&program);
     cmd.args(&args)
         .current_dir(&config.working_dir)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -99,10 +123,24 @@ pub async fn run_external(
         cmd.env(key, val);
     }
 
+    // Unix: put the child in its own process group so cancel can kill the
+    // whole tree (CLI + any subprocesses it spawned) via killpg.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     let mut child = cmd.spawn().map_err(|e| {
         error!(program = %program, error = %e, "Failed to spawn external tool");
         format!("Failed to spawn {program}: {e}")
     })?;
+
+    let child_pid = child.id();
 
     let stdout = child
         .stdout
@@ -137,63 +175,79 @@ pub async fn run_external(
         output
     });
 
-    // Wait for completion with timeout
+    // Wait for completion with timeout OR cancellation.
     let timeout = Duration::from_secs(config.timeout_secs);
-    let result = tokio::time::timeout(timeout, child.wait()).await;
+    // A never-resolving future stands in for "no cancel token" so the select
+    // arm count stays the same regardless of caller.
+    let never = std::future::pending::<()>();
+    let cancel_fut = async {
+        if let Some(token) = cancel.as_ref() {
+            token.cancelled().await;
+        } else {
+            never.await;
+        }
+    };
 
-    let duration_secs = start.elapsed().as_secs();
-
-    match result {
-        Ok(Ok(status)) => {
-            let stdout_output = stdout_handle.await.unwrap_or_default();
-            let stderr_output = stderr_handle.await.unwrap_or_default();
-
-            // Combine outputs — stderr appended if non-empty
-            let mut full_output = stdout_output;
-            if !stderr_output.is_empty() {
-                if !full_output.is_empty() {
-                    full_output.push('\n');
+    tokio::select! {
+        // Graceful completion path
+        wait_result = tokio::time::timeout(timeout, child.wait()) => {
+            let duration_secs = start.elapsed().as_secs();
+            match wait_result {
+                Ok(Ok(status)) => {
+                    let stdout_output = stdout_handle.await.unwrap_or_default();
+                    let stderr_output = stderr_handle.await.unwrap_or_default();
+                    let mut full_output = stdout_output;
+                    if !stderr_output.is_empty() {
+                        if !full_output.is_empty() {
+                            full_output.push('\n');
+                        }
+                        full_output.push_str("[stderr]\n");
+                        full_output.push_str(&stderr_output);
+                    }
+                    let exit_code = status.code().unwrap_or(-1);
+                    if exit_code != 0 {
+                        warn!(engine, exit_code, duration_secs, "External tool exited with non-zero code");
+                    } else {
+                        info!(engine, exit_code, duration_secs, "External tool completed successfully");
+                    }
+                    Ok(ExternalRunResult { exit_code, output: full_output, duration_secs })
                 }
-                full_output.push_str("[stderr]\n");
-                full_output.push_str(&stderr_output);
+                Ok(Err(e)) => {
+                    error!(error = %e, "External tool process error");
+                    Err(format!("Process error: {e}"))
+                }
+                Err(_) => {
+                    if let Some(pid) = child_pid {
+                        terminate_process_group(pid).await;
+                    } else if let Err(e) = child.kill().await {
+                        warn!(error = %e, "Failed to kill timed-out process");
+                    }
+                    warn!(engine, timeout_secs = config.timeout_secs, "External tool timed out");
+                    let stdout_output = stdout_handle.await.unwrap_or_default();
+                    let stderr_output = stderr_handle.await.unwrap_or_default();
+                    let _ = sender
+                        .send(format!("\n[Timed out after {}s]\n", config.timeout_secs))
+                        .await;
+                    Err(format!(
+                        "Process timed out after {}s.\nPartial stdout:\n{}\nPartial stderr:\n{}",
+                        config.timeout_secs, stdout_output, stderr_output
+                    ))
+                }
             }
-
-            let exit_code = status.code().unwrap_or(-1);
-            if exit_code != 0 {
-                warn!(engine, exit_code, duration_secs, "External tool exited with non-zero code");
-            } else {
-                info!(engine, exit_code, duration_secs, "External tool completed successfully");
-            }
-            Ok(ExternalRunResult {
-                exit_code,
-                output: full_output,
-                duration_secs,
-            })
         }
-        Ok(Err(e)) => {
-            error!(error = %e, "External tool process error");
-            Err(format!("Process error: {e}"))
-        }
-        Err(_) => {
-            // Timeout — kill the child
-            if let Err(e) = child.kill().await {
-                warn!(error = %e, "Failed to kill timed-out process");
+        // Cancellation path: kill the group and surface a distinct error.
+        _ = cancel_fut => {
+            let duration_secs = start.elapsed().as_secs();
+            warn!(engine, duration_secs, "External tool cancelled mid-run; terminating process group");
+            if let Some(pid) = child_pid {
+                terminate_process_group(pid).await;
+            } else if let Err(e) = child.kill().await {
+                warn!(error = %e, "Failed to kill cancelled process");
             }
-            warn!(engine, timeout_secs = config.timeout_secs, "External tool timed out");
-            let stdout_output = stdout_handle.await.unwrap_or_default();
-
-            // Send timeout message through the channel
             let _ = sender
-                .send(format!(
-                    "\n[Timed out after {}s]\n",
-                    config.timeout_secs
-                ))
+                .send(format!("\n[Cancelled after {}s]\n", duration_secs))
                 .await;
-
-            Err(format!(
-                "Process timed out after {}s. Partial output:\n{}",
-                config.timeout_secs, stdout_output
-            ))
+            Err(format!("cancelled after {}s", duration_secs))
         }
     }
 }

@@ -97,6 +97,7 @@ pub async fn run_all_plan_tasks(
         &state.db,
         &state.running_pieces,
         &app_handle,
+        None,
     )
     .await
 }

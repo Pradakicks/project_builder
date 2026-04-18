@@ -3,10 +3,11 @@ use crate::agent::runner::resolve_llm_config;
 use crate::db::Database;
 use crate::llm::{self, LlmConfig};
 use crate::models::{
-    CheckKind, Project, ProjectRuntimeSession, ProjectRuntimeSpec, ProjectRuntimeStatus,
-    RuntimeLogTail, RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
-    VerificationCheck, VerificationResult,
+    AcceptanceCheck, AcceptanceSuite, CheckKind, LogScanMode, Project, ProjectRuntimeSession,
+    ProjectRuntimeSpec, ProjectRuntimeStatus, RuntimeLogTail, RuntimeReadinessCheck,
+    RuntimeSessionStatus, RuntimeStopBehavior, VerificationCheck, VerificationResult,
 };
+use tokio_util::sync::CancellationToken;
 use crate::AppState;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -204,6 +205,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url,
             port_hint,
+            acceptance_suite: None,
         }));
     }
 
@@ -225,6 +227,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:8080".to_string()),
                 port_hint: Some(8080),
+                acceptance_suite: None,
             }));
         } else {
             return Ok(Some(ProjectRuntimeSpec {
@@ -235,6 +238,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -265,6 +269,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:8080".to_string()),
                 port_hint: Some(8080),
+                acceptance_suite: None,
             }));
         } else {
             return Ok(Some(ProjectRuntimeSpec {
@@ -275,6 +280,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -290,6 +296,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Graceful { timeout_seconds: 15 },
             app_url: None,
             port_hint: None,
+            acceptance_suite: None,
         }));
     }
 
@@ -304,6 +311,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: None,
             port_hint: None,
+            acceptance_suite: None,
         }));
     }
 
@@ -318,6 +326,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: None,
             port_hint: None,
+            acceptance_suite: None,
         }));
     }
 
@@ -339,6 +348,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:3000".to_string()),
                 port_hint: Some(3000),
+                acceptance_suite: None,
             }));
         } else if gemfile_content.contains("sinatra") {
             let ruby_entrypoints = ["app.rb", "server.rb", "main.rb"];
@@ -360,6 +370,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: Some("http://127.0.0.1:4567".to_string()),
                 port_hint: Some(4567),
+                acceptance_suite: None,
             }));
         } else {
             let ruby_entrypoints = ["app.rb", "server.rb", "main.rb"];
@@ -376,6 +387,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -402,6 +414,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:8000".to_string()),
             port_hint: Some(8000),
+            acceptance_suite: None,
         }));
     }
 
@@ -434,6 +447,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                     stop_behavior: RuntimeStopBehavior::Kill,
                     app_url: Some("http://127.0.0.1:8000".to_string()),
                     port_hint: Some(8000),
+                    acceptance_suite: None,
                 }));
             }
 
@@ -503,6 +517,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url,
                 port_hint,
+                acceptance_suite: None,
             }));
         }
     }
@@ -523,6 +538,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:8080".to_string()),
             port_hint: Some(8080),
+            acceptance_suite: None,
         }));
     }
 
@@ -545,6 +561,7 @@ fn detect_runtime_spec_from_working_dir(working_dir: &Path) -> Result<Option<Pro
                 stop_behavior: RuntimeStopBehavior::Kill,
                 app_url: None,
                 port_hint: None,
+                acceptance_suite: None,
             }));
         }
     }
@@ -604,47 +621,6 @@ fn resolve_runtime_url(spec: &ProjectRuntimeSpec) -> Option<String> {
         .or_else(|| spec.port_hint.map(|port| format!("http://127.0.0.1:{port}")))
 }
 
-/// Poll `url` with GET until `expected_status` is returned or `timeout` elapses.
-///
-/// Returns `Ok(elapsed)` on success, `Err(last_error_message)` on timeout.
-/// The caller is responsible for any process-lifecycle concerns (kill on timeout, etc.).
-async fn poll_http_until_ready(
-    client: &reqwest::Client,
-    url: &str,
-    expected_status: u16,
-    timeout: Duration,
-    interval: Duration,
-) -> Result<Duration, String> {
-    let started = tokio::time::Instant::now();
-    let deadline = started + timeout;
-    let mut last_error = None;
-
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            return Err(last_error.unwrap_or_else(|| {
-                format!("Timed out waiting for HTTP response at {url}")
-            }));
-        }
-
-        match client.get(url).send().await {
-            Ok(response) if response.status().as_u16() == expected_status => {
-                return Ok(tokio::time::Instant::now().duration_since(started));
-            }
-            Ok(response) => {
-                last_error = Some(format!(
-                    "Unexpected status {} from {url}",
-                    response.status()
-                ));
-            }
-            Err(error) => {
-                last_error = Some(error.to_string());
-            }
-        }
-
-        sleep(interval).await;
-    }
-}
-
 fn shell_command(shell_cmd: &str, working_dir: &Path) -> Command {
     let mut cmd = if cfg!(windows) {
         let mut command = Command::new("cmd");
@@ -658,8 +634,41 @@ fn shell_command(shell_cmd: &str, working_dir: &Path) -> Command {
 
     cmd.current_dir(working_dir);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // Unix: put the shell and all its descendants in their own process group
+    // so `stop_runtime` can reap the whole tree via killpg. Without this, the
+    // `sh -lc "npm start"` wrapper spawns `node server.js` in its own PGID,
+    // and killing the shell leaves node orphaned and holding its port.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     cmd
 }
+
+/// SIGTERM the entire process group, wait up to 2s for it to exit, then SIGKILL
+/// any stragglers. Mirror of `agent::external::terminate_process_group`. The
+/// short grace (2s vs 3s) matches our runtime `stop_behavior.graceful` default.
+#[cfg(unix)]
+async fn terminate_runtime_process_group(pid: u32) {
+    let pgid = pid as libc::pid_t;
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_runtime_process_group(_pid: u32) {}
 
 async fn append_runtime_log(
     handle: &Arc<RuntimeSessionHandle>,
@@ -1145,16 +1154,37 @@ pub(crate) async fn stop_runtime_session(
                 };
             }
             None => {
+                // Capture the PID before we kill the direct child — after
+                // kill() the child struct's id() becomes None, so we need to
+                // reap the process group *before* calling child.kill() /
+                // wait().
+                let pgid = child.id();
+
                 match stop_behavior {
                     RuntimeStopBehavior::Kill => {
+                        if let Some(pid) = pgid {
+                            terminate_runtime_process_group(pid).await;
+                        }
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                     }
                     RuntimeStopBehavior::Graceful { timeout_seconds } => {
+                        // Send SIGTERM to the whole group first so children
+                        // (e.g. `node server.js` spawned by `npm start`) get
+                        // a chance to drain before we escalate.
+                        #[cfg(unix)]
+                        if let Some(pid) = pgid {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+                            }
+                        }
                         if timeout(Duration::from_secs(timeout_seconds), child.wait())
                             .await
                             .is_err()
                         {
+                            if let Some(pid) = pgid {
+                                terminate_runtime_process_group(pid).await;
+                            }
                             let _ = child.kill().await;
                             let _ = child.wait().await;
                         }
@@ -1390,6 +1420,7 @@ pub(crate) async fn verify_runtime_impl(
     state_db: &std::sync::Mutex<Database>,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
     project_id: String,
+    cancel: CancellationToken,
 ) -> Result<VerificationResult, String> {
     let project = {
         let db = state_db.lock().map_err(|e| e.to_string())?;
@@ -1415,121 +1446,645 @@ pub(crate) async fn verify_runtime_impl(
         return Err("Runtime must be running before verification".to_string());
     }
 
-    let started_at = chrono::Utc::now().to_rfc3339();
-    let mut checks: Vec<VerificationCheck> = Vec::new();
+    let suite = spec
+        .acceptance_suite
+        .clone()
+        .unwrap_or_else(|| derive_default_suite(&spec));
 
-    // --- Step 1: shell verify command (if configured) ---
-    if let Some(verify_command) = spec.verify_command.as_deref() {
-        let handle = {
-            let sessions = runtime_sessions.lock().map_err(|e| e.to_string())?;
-            sessions
-                .get(&project_id)
-                .cloned()
-                .ok_or_else(|| "Runtime session not found".to_string())?
-        };
-        let check_start = std::time::Instant::now();
-        let exit_code = run_shell_command_to_completion(
-            verify_command,
-            &working_directory,
-            handle,
-            "verify",
-            300,
-        )
-        .await?;
-        let duration_ms = check_start.elapsed().as_millis() as i64;
-        let passed = exit_code == 0;
-        checks.push(VerificationCheck {
-            name: "verify command".to_string(),
-            kind: CheckKind::Shell,
-            passed,
-            detail: if passed {
-                format!("exited 0 via `{verify_command}`")
-            } else {
-                format!("exited {exit_code} via `{verify_command}`")
-            },
-            duration_ms,
+    let started_at = chrono::Utc::now().to_rfc3339();
+
+    if suite.checks.is_empty() {
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        return Ok(VerificationResult {
+            passed: true,
+            message: "No verification configured — skipped".to_string(),
+            checks: vec![VerificationCheck {
+                name: "no verification configured".to_string(),
+                kind: CheckKind::Skipped,
+                passed: true,
+                detail: "Runtime spec has no acceptance suite and none could be derived."
+                    .to_string(),
+                duration_ms: 0,
+                expected: None,
+                actual: None,
+            }],
+            started_at,
+            finished_at,
         });
-        if !passed {
-            let finished_at = chrono::Utc::now().to_rfc3339();
-            return Ok(VerificationResult {
-                passed: false,
-                message: format!("Verify command failed (exit {exit_code})"),
-                checks,
-                started_at,
-                finished_at,
-            });
-        }
     }
 
-    // --- Step 2: HTTP readiness check (if app URL is available) ---
-    if let Some(url) = resolve_runtime_url(&spec) {
-        let client = reqwest::Client::new();
-        let check_start = std::time::Instant::now();
-        let result = poll_http_until_ready(
-            &client,
-            &url,
-            200,
-            Duration::from_secs(60),
-            Duration::from_millis(500),
+    let mut checks: Vec<VerificationCheck> = Vec::with_capacity(suite.checks.len());
+    for acceptance_check in &suite.checks {
+        if cancel.is_cancelled() {
+            return Err("Verification cancelled".to_string());
+        }
+        let check = run_acceptance_check(
+            acceptance_check,
+            &project_id,
+            &spec,
+            &working_directory,
+            runtime_sessions,
+            &cancel,
         )
         .await;
-        let duration_ms = check_start.elapsed().as_millis() as i64;
-        match result {
-            Ok(_) => {
-                checks.push(VerificationCheck {
-                    name: "http readiness".to_string(),
-                    kind: CheckKind::Http,
-                    passed: true,
-                    detail: format!("HTTP 200 from {url}"),
-                    duration_ms,
-                });
-            }
-            Err(err) => {
-                checks.push(VerificationCheck {
-                    name: "http readiness".to_string(),
-                    kind: CheckKind::Http,
-                    passed: false,
-                    detail: err.clone(),
-                    duration_ms,
-                });
-                let finished_at = chrono::Utc::now().to_rfc3339();
-                return Ok(VerificationResult {
-                    passed: false,
-                    message: format!("HTTP readiness check failed: {err}"),
-                    checks,
-                    started_at,
-                    finished_at,
-                });
-            }
+        let failed = !check.passed;
+        checks.push(check);
+        if failed && suite.stop_on_first_failure {
+            break;
         }
-    }
-
-    // --- Step 3: no checks configured ---
-    if checks.is_empty() {
-        checks.push(VerificationCheck {
-            name: "no verification configured".to_string(),
-            kind: CheckKind::Skipped,
-            passed: true,
-            detail: "No verifyCommand or appUrl/portHint configured — skipping verification"
-                .to_string(),
-            duration_ms: 0,
-        });
     }
 
     let passed_count = checks.iter().filter(|c| c.passed).count();
     let total_count = checks.len();
+    let passed = total_count > 0 && passed_count == total_count;
+
+    let first_failure = checks.iter().find(|c| !c.passed).cloned();
+    let message = if passed {
+        format!("{passed_count}/{total_count} checks passed")
+    } else if let Some(failed) = &first_failure {
+        format!("{}: {}", failed.name, failed.detail)
+    } else {
+        "Verification failed".to_string()
+    };
+
     let finished_at = chrono::Utc::now().to_rfc3339();
     Ok(VerificationResult {
-        passed: true,
-        message: if total_count == 1 && checks[0].kind == CheckKind::Skipped {
-            "No verification configured — skipped".to_string()
-        } else {
-            format!("{passed_count}/{total_count} checks passed")
-        },
+        passed,
+        message,
         checks,
         started_at,
         finished_at,
     })
+}
+
+/// When a project has no `acceptance_suite`, derive a safe default:
+///   1. Log scan for fatal-looking patterns (`MustNotMatch`).
+///   2. HTTP probe of `appUrl` / `portHint` if available (status 200–399).
+///   3. Shell of `verify_command` if configured.
+/// This preserves today's "try HTTP 200 + verify command" behavior while
+/// closing the "app prints FATAL but returns 200" gap.
+fn derive_default_suite(spec: &ProjectRuntimeSpec) -> AcceptanceSuite {
+    let mut checks: Vec<AcceptanceCheck> = Vec::new();
+
+    checks.push(AcceptanceCheck::LogScan {
+        name: "log scan — fatal patterns".to_string(),
+        patterns: vec![
+            r"(?i)panic!?".to_string(),
+            r"(?i)FATAL".to_string(),
+            r"(?i)unhandled (rejection|exception)".to_string(),
+            r"ECONNREFUSED".to_string(),
+        ],
+        mode: LogScanMode::MustNotMatch,
+        last_n_lines: 200,
+    });
+
+    if resolve_runtime_url(spec).is_some() {
+        checks.push(AcceptanceCheck::HttpProbe {
+            name: "http probe — root".to_string(),
+            path: "/".to_string(),
+            expected_status_min: 200,
+            expected_status_max: 399,
+            expected_body_contains: None,
+            expected_content_type: None,
+            timeout_seconds: 10,
+        });
+    }
+
+    if let Some(cmd) = spec.verify_command.as_deref() {
+        checks.push(AcceptanceCheck::Shell {
+            name: "verify command".to_string(),
+            command: cmd.to_string(),
+            timeout_seconds: 300,
+        });
+    }
+
+    AcceptanceSuite {
+        checks,
+        stop_on_first_failure: false,
+    }
+}
+
+async fn run_acceptance_check(
+    check: &AcceptanceCheck,
+    project_id: &str,
+    spec: &ProjectRuntimeSpec,
+    working_directory: &Path,
+    runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
+    cancel: &CancellationToken,
+) -> VerificationCheck {
+    match check {
+        AcceptanceCheck::HttpProbe {
+            name,
+            path,
+            expected_status_min,
+            expected_status_max,
+            expected_body_contains,
+            expected_content_type,
+            timeout_seconds,
+        } => {
+            run_http_probe_check(
+                name,
+                spec,
+                path,
+                *expected_status_min,
+                *expected_status_max,
+                expected_body_contains.as_deref(),
+                expected_content_type.as_deref(),
+                *timeout_seconds,
+                cancel,
+            )
+            .await
+        }
+        AcceptanceCheck::Shell {
+            name,
+            command,
+            timeout_seconds,
+        } => {
+            run_shell_acceptance_check(
+                name,
+                command,
+                *timeout_seconds,
+                project_id,
+                working_directory,
+                runtime_sessions,
+                cancel,
+            )
+            .await
+        }
+        AcceptanceCheck::LogScan {
+            name,
+            patterns,
+            mode,
+            last_n_lines,
+        } => {
+            run_log_scan_check(
+                name,
+                patterns,
+                mode,
+                *last_n_lines,
+                project_id,
+                runtime_sessions,
+            )
+            .await
+        }
+        AcceptanceCheck::TcpPort {
+            name,
+            port,
+            timeout_seconds,
+        } => run_tcp_port_check(name, *port, *timeout_seconds, cancel).await,
+    }
+}
+
+async fn run_http_probe_check(
+    name: &str,
+    spec: &ProjectRuntimeSpec,
+    path: &str,
+    status_min: u16,
+    status_max: u16,
+    body_contains: Option<&str>,
+    content_type: Option<&str>,
+    timeout_secs: u64,
+    cancel: &CancellationToken,
+) -> VerificationCheck {
+    let base = match resolve_runtime_url(spec) {
+        Some(url) => url,
+        None => {
+            return failed_check(
+                name,
+                CheckKind::Http,
+                0,
+                "No appUrl or portHint set; cannot run http probe",
+                Some(format!("status in {status_min}..={status_max} at {path}")),
+                Some("no runtime URL".to_string()),
+            );
+        }
+    };
+    let full_url = if path.starts_with('/') {
+        format!("{base}{path}")
+    } else {
+        format!("{base}/{path}")
+    };
+
+    let mut expected_parts = vec![format!("status in {status_min}..={status_max}")];
+    if let Some(ct) = content_type {
+        expected_parts.push(format!("content-type contains \"{ct}\""));
+    }
+    if let Some(bc) = body_contains {
+        expected_parts.push(format!("body contains \"{bc}\""));
+    }
+    let expected = Some(expected_parts.join("; "));
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return failed_check(
+                name,
+                CheckKind::Http,
+                0,
+                &format!("Failed to build HTTP client: {e}"),
+                expected,
+                Some(e.to_string()),
+            );
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let send = client.get(&full_url).send();
+    let response = tokio::select! {
+        r = send => r,
+        _ = cancel.cancelled() => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::Http,
+                duration_ms,
+                "Cancelled mid-probe",
+                expected,
+                Some("cancelled".to_string()),
+            );
+        }
+    };
+
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::Http,
+                duration_ms,
+                &format!("Request error: {e}"),
+                expected,
+                Some(format!("error: {e}")),
+            );
+        }
+    };
+
+    let status = response.status().as_u16();
+    let actual_content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body_result = tokio::select! {
+        r = response.text() => r,
+        _ = cancel.cancelled() => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::Http,
+                duration_ms,
+                "Cancelled while reading body",
+                expected,
+                Some("cancelled".to_string()),
+            );
+        }
+    };
+    let body = body_result.unwrap_or_else(|e| format!("[failed to read body: {e}]"));
+    let body_snippet: String = body.chars().take(512).collect();
+
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let mut fail_reasons: Vec<String> = Vec::new();
+    if status < status_min || status > status_max {
+        fail_reasons.push(format!("status {status} not in {status_min}..={status_max}"));
+    }
+    if let Some(ct_want) = content_type {
+        match actual_content_type.as_deref() {
+            Some(ct) if ct.to_lowercase().contains(&ct_want.to_lowercase()) => {}
+            Some(ct) => {
+                fail_reasons.push(format!("content-type \"{ct}\" missing \"{ct_want}\""));
+            }
+            None => fail_reasons.push(format!("no content-type header (wanted \"{ct_want}\")")),
+        }
+    }
+    if let Some(bc) = body_contains {
+        if !body.contains(bc) {
+            fail_reasons.push(format!("body did not contain \"{bc}\""));
+        }
+    }
+
+    let passed = fail_reasons.is_empty();
+    let actual = Some(format!(
+        "status {status}; content-type {}; body: {}",
+        actual_content_type.as_deref().unwrap_or("(none)"),
+        if body_snippet.is_empty() { "(empty)" } else { &body_snippet },
+    ));
+    let detail = if passed {
+        format!("HTTP {status} from {full_url}")
+    } else {
+        format!("{} — {}", fail_reasons.join("; "), full_url)
+    };
+
+    VerificationCheck {
+        name: name.to_string(),
+        kind: CheckKind::Http,
+        passed,
+        detail,
+        duration_ms,
+        expected,
+        actual,
+    }
+}
+
+async fn run_shell_acceptance_check(
+    name: &str,
+    command: &str,
+    timeout_secs: u64,
+    project_id: &str,
+    working_directory: &Path,
+    runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
+    cancel: &CancellationToken,
+) -> VerificationCheck {
+    let expected = Some("exit code 0".to_string());
+
+    let handle = {
+        let sessions = match runtime_sessions.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return failed_check(
+                    name,
+                    CheckKind::Shell,
+                    0,
+                    "Runtime sessions mutex poisoned",
+                    expected,
+                    Some("lock poisoned".to_string()),
+                );
+            }
+        };
+        match sessions.get(project_id).cloned() {
+            Some(h) => h,
+            None => {
+                return failed_check(
+                    name,
+                    CheckKind::Shell,
+                    0,
+                    "Runtime session not found — is the runtime started?",
+                    expected,
+                    Some("no session".to_string()),
+                );
+            }
+        }
+    };
+
+    let check_start = std::time::Instant::now();
+    let run = run_shell_command_to_completion(command, working_directory, handle, "verify", timeout_secs);
+    let result = tokio::select! {
+        r = run => r,
+        _ = cancel.cancelled() => {
+            let duration_ms = check_start.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::Shell,
+                duration_ms,
+                "Cancelled mid-command",
+                expected,
+                Some("cancelled".to_string()),
+            );
+        }
+    };
+    let duration_ms = check_start.elapsed().as_millis() as i64;
+
+    match result {
+        Ok(exit_code) => {
+            let passed = exit_code == 0;
+            VerificationCheck {
+                name: name.to_string(),
+                kind: CheckKind::Shell,
+                passed,
+                detail: if passed {
+                    format!("exited 0 via `{command}`")
+                } else {
+                    format!("exited {exit_code} via `{command}`")
+                },
+                duration_ms,
+                expected,
+                actual: Some(format!("exit code {exit_code}")),
+            }
+        }
+        Err(e) => failed_check(
+            name,
+            CheckKind::Shell,
+            duration_ms,
+            &format!("Shell command failed: {e}"),
+            expected,
+            Some(e),
+        ),
+    }
+}
+
+async fn run_log_scan_check(
+    name: &str,
+    patterns: &[String],
+    mode: &LogScanMode,
+    last_n_lines: usize,
+    project_id: &str,
+    runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
+) -> VerificationCheck {
+    let expected = Some(format!(
+        "{} match for [{}] over last {} lines",
+        match mode {
+            LogScanMode::MustMatch => "at least one",
+            LogScanMode::MustNotMatch => "no",
+        },
+        patterns
+            .iter()
+            .map(|p| format!("/{p}/"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        last_n_lines,
+    ));
+
+    let started = std::time::Instant::now();
+
+    let compiled: Result<Vec<regex::Regex>, _> = patterns
+        .iter()
+        .map(|p| regex::Regex::new(p))
+        .collect();
+    let regexes = match compiled {
+        Ok(r) => r,
+        Err(e) => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::LogScan,
+                duration_ms,
+                &format!("Invalid regex in log-scan patterns: {e}"),
+                expected,
+                Some(format!("regex error: {e}")),
+            );
+        }
+    };
+
+    let handle = {
+        let sessions = match runtime_sessions.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                let duration_ms = started.elapsed().as_millis() as i64;
+                return failed_check(
+                    name,
+                    CheckKind::LogScan,
+                    duration_ms,
+                    "Runtime sessions mutex poisoned",
+                    expected,
+                    Some("lock poisoned".to_string()),
+                );
+            }
+        };
+        sessions.get(project_id).cloned()
+    };
+    let handle = match handle {
+        Some(h) => h,
+        None => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::LogScan,
+                duration_ms,
+                "Runtime session not found — is the runtime started?",
+                expected,
+                Some("no session".to_string()),
+            );
+        }
+    };
+
+    let lines: Vec<String> = {
+        let recent = handle.recent_logs.lock().await;
+        let start = recent.len().saturating_sub(last_n_lines);
+        recent.iter().skip(start).cloned().collect()
+    };
+
+    // Find the first (pattern, line) match; for MustMatch we pass on the first,
+    // for MustNotMatch we fail on the first.
+    let hit = lines.iter().enumerate().find_map(|(idx, line)| {
+        regexes
+            .iter()
+            .find(|rx| rx.is_match(line))
+            .map(|rx| (idx, rx.as_str().to_string(), line.clone()))
+    });
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    match (mode, hit) {
+        (LogScanMode::MustMatch, Some((_, pattern, line))) => VerificationCheck {
+            name: name.to_string(),
+            kind: CheckKind::LogScan,
+            passed: true,
+            detail: format!("matched /{pattern}/ on line: {line}"),
+            duration_ms,
+            expected,
+            actual: Some(format!("matched /{pattern}/")),
+        },
+        (LogScanMode::MustMatch, None) => VerificationCheck {
+            name: name.to_string(),
+            kind: CheckKind::LogScan,
+            passed: false,
+            detail: format!("no pattern matched in last {} lines", lines.len()),
+            duration_ms,
+            expected,
+            actual: Some(format!("0 matches over {} lines", lines.len())),
+        },
+        (LogScanMode::MustNotMatch, None) => VerificationCheck {
+            name: name.to_string(),
+            kind: CheckKind::LogScan,
+            passed: true,
+            detail: format!("no forbidden pattern matched in last {} lines", lines.len()),
+            duration_ms,
+            expected,
+            actual: Some(format!("0 matches over {} lines", lines.len())),
+        },
+        (LogScanMode::MustNotMatch, Some((idx, pattern, line))) => {
+            let start = idx.saturating_sub(3);
+            let excerpt = lines[start..=idx].join("\n");
+            VerificationCheck {
+                name: name.to_string(),
+                kind: CheckKind::LogScan,
+                passed: false,
+                detail: format!("matched forbidden /{pattern}/ on line {}", idx + 1),
+                duration_ms,
+                expected,
+                actual: Some(format!(
+                    "matched /{pattern}/ on line {}:\n{}",
+                    idx + 1,
+                    excerpt,
+                )),
+            }
+        }
+    }
+}
+
+async fn run_tcp_port_check(
+    name: &str,
+    port: u16,
+    timeout_secs: u64,
+    cancel: &CancellationToken,
+) -> VerificationCheck {
+    let expected = Some(format!("TCP connect to 127.0.0.1:{port} within {timeout_secs}s"));
+    let started = std::time::Instant::now();
+    let connect = tokio::net::TcpStream::connect(("127.0.0.1", port));
+    let timed = tokio::time::timeout(Duration::from_secs(timeout_secs), connect);
+    let outcome = tokio::select! {
+        r = timed => r,
+        _ = cancel.cancelled() => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            return failed_check(
+                name,
+                CheckKind::TcpPort,
+                duration_ms,
+                "Cancelled mid-connect",
+                expected,
+                Some("cancelled".to_string()),
+            );
+        }
+    };
+    let duration_ms = started.elapsed().as_millis() as i64;
+    match outcome {
+        Ok(Ok(_)) => VerificationCheck {
+            name: name.to_string(),
+            kind: CheckKind::TcpPort,
+            passed: true,
+            detail: format!("connected to 127.0.0.1:{port}"),
+            duration_ms,
+            expected,
+            actual: Some(format!("connected in {duration_ms}ms")),
+        },
+        Ok(Err(e)) => failed_check(
+            name,
+            CheckKind::TcpPort,
+            duration_ms,
+            &format!("connect failed: {e}"),
+            expected,
+            Some(e.to_string()),
+        ),
+        Err(_) => failed_check(
+            name,
+            CheckKind::TcpPort,
+            duration_ms,
+            &format!("timed out after {timeout_secs}s"),
+            expected,
+            Some(format!("timeout after {timeout_secs}s")),
+        ),
+    }
+}
+
+fn failed_check(
+    name: &str,
+    kind: CheckKind,
+    duration_ms: i64,
+    detail: &str,
+    expected: Option<String>,
+    actual: Option<String>,
+) -> VerificationCheck {
+    VerificationCheck {
+        name: name.to_string(),
+        kind,
+        passed: false,
+        detail: detail.to_string(),
+        duration_ms,
+        expected,
+        actual,
+    }
 }
 
 pub(crate) async fn detect_runtime_with_agent_impl<R: tauri::Runtime>(
@@ -1756,7 +2311,14 @@ pub async fn verify_runtime(
     project_id: String,
 ) -> Result<VerificationResult, String> {
     info!(project_id = %project_id, "IPC: verify_runtime");
-    verify_runtime_impl(&state.db, &state.runtime_sessions, project_id).await
+    // Manual IPC entry has no ambient cancel token; create a never-fired one.
+    verify_runtime_impl(
+        &state.db,
+        &state.runtime_sessions,
+        project_id,
+        CancellationToken::new(),
+    )
+    .await
 }
 
 /// Walk `dir` to `max_depth`, collecting relative path strings, skipping common noise dirs.
@@ -1924,6 +2486,7 @@ mod tests {
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:3000".to_string()),
             port_hint: Some(3000),
+            acceptance_suite: None,
         };
 
         let updated = configure_runtime_impl(&state_db, &sessions, project.id.clone(), spec.clone())
@@ -1962,6 +2525,7 @@ mod tests {
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:4810".to_string()),
             port_hint: Some(4810),
+            acceptance_suite: None,
         };
 
         let project = {
@@ -2030,6 +2594,7 @@ mod tests {
             stop_behavior: RuntimeStopBehavior::Kill,
             app_url: Some("http://127.0.0.1:4820".to_string()),
             port_hint: Some(4820),
+            acceptance_suite: None,
         };
 
         let project = {
