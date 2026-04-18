@@ -634,8 +634,41 @@ fn shell_command(shell_cmd: &str, working_dir: &Path) -> Command {
 
     cmd.current_dir(working_dir);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // Unix: put the shell and all its descendants in their own process group
+    // so `stop_runtime` can reap the whole tree via killpg. Without this, the
+    // `sh -lc "npm start"` wrapper spawns `node server.js` in its own PGID,
+    // and killing the shell leaves node orphaned and holding its port.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     cmd
 }
+
+/// SIGTERM the entire process group, wait up to 2s for it to exit, then SIGKILL
+/// any stragglers. Mirror of `agent::external::terminate_process_group`. The
+/// short grace (2s vs 3s) matches our runtime `stop_behavior.graceful` default.
+#[cfg(unix)]
+async fn terminate_runtime_process_group(pid: u32) {
+    let pgid = pid as libc::pid_t;
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_runtime_process_group(_pid: u32) {}
 
 async fn append_runtime_log(
     handle: &Arc<RuntimeSessionHandle>,
@@ -1121,16 +1154,37 @@ pub(crate) async fn stop_runtime_session(
                 };
             }
             None => {
+                // Capture the PID before we kill the direct child — after
+                // kill() the child struct's id() becomes None, so we need to
+                // reap the process group *before* calling child.kill() /
+                // wait().
+                let pgid = child.id();
+
                 match stop_behavior {
                     RuntimeStopBehavior::Kill => {
+                        if let Some(pid) = pgid {
+                            terminate_runtime_process_group(pid).await;
+                        }
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                     }
                     RuntimeStopBehavior::Graceful { timeout_seconds } => {
+                        // Send SIGTERM to the whole group first so children
+                        // (e.g. `node server.js` spawned by `npm start`) get
+                        // a chance to drain before we escalate.
+                        #[cfg(unix)]
+                        if let Some(pid) = pgid {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+                            }
+                        }
                         if timeout(Duration::from_secs(timeout_seconds), child.wait())
                             .await
                             .is_err()
                         {
+                            if let Some(pid) = pgid {
+                                terminate_runtime_process_group(pid).await;
+                            }
                             let _ = child.kill().await;
                             let _ = child.wait().await;
                         }
