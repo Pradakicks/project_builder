@@ -155,7 +155,14 @@ export interface ValidationResult {
   output: string;
 }
 
-export type RuntimeSessionStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "failed";
+export type RuntimeSessionStatus =
+  | "idle"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "orphaned";
 
 export type RuntimeReadinessCheck =
   | { kind: "none" }

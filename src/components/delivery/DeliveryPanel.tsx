@@ -3,12 +3,113 @@ import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 import { openRuntimeInBrowser } from "../../api/runtimeApi";
-import type { CheckKind, GoalRun, GoalRunEvent, VerificationCheck, VerificationResult } from "../../types";
+import type {
+  CheckKind,
+  GoalRun,
+  GoalRunEvent,
+  GoalRunRetryState,
+  VerificationCheck,
+  VerificationResult,
+} from "../../types";
 import { QuickRuntimeSetup } from "./QuickRuntimeSetup";
 
 function formatTime(value: string | null) {
   if (!value) return "unknown";
   return new Date(value).toLocaleString();
+}
+
+export interface RuntimeLogView {
+  lines: string[];
+  source: "live" | "snapshot" | "empty";
+  updatedAt: string | null;
+}
+
+export function selectRuntimeLogView(
+  liveLogs: string[],
+  liveUpdatedAt: string | null,
+  snapshotLogs: string[],
+  snapshotUpdatedAt: string | null,
+): RuntimeLogView {
+  if (liveLogs.length > 0) {
+    return {
+      lines: liveLogs,
+      source: "live",
+      updatedAt: liveUpdatedAt,
+    };
+  }
+
+  if (snapshotLogs.length > 0) {
+    return {
+      lines: snapshotLogs,
+      source: "snapshot",
+      updatedAt: snapshotUpdatedAt,
+    };
+  }
+
+  return {
+    lines: [],
+    source: "empty",
+    updatedAt: liveUpdatedAt ?? snapshotUpdatedAt,
+  };
+}
+
+export interface FailureView {
+  currentBlocker: { text: string; updatedAt: string | null } | null;
+  previousFailures: Array<{ label: string; text: string; updatedAt: string | null }>;
+}
+
+function pushFailure(
+  list: Array<{ label: string; text: string; updatedAt: string | null }>,
+  label: string,
+  text: string | null | undefined,
+  updatedAt: string | null,
+) {
+  if (!text) return;
+  if (list.some((item) => item.text === text)) return;
+  list.push({ label, text, updatedAt });
+}
+
+export function buildFailureView(
+  currentRun: GoalRun | null,
+  retryState: GoalRunRetryState | null,
+  verificationResult: VerificationResult | null,
+): FailureView {
+  const currentBlocker =
+    currentRun?.status === "blocked"
+      ? {
+          text: currentRun.blockerReason ?? currentRun.lastFailureSummary ?? "Blocked",
+          updatedAt: currentRun.updatedAt,
+        }
+      : null;
+  const previousFailures: Array<{ label: string; text: string; updatedAt: string | null }> = [];
+
+  pushFailure(
+    previousFailures,
+    "Last failure",
+    currentRun?.lastFailureSummary,
+    currentRun?.updatedAt ?? null,
+  );
+  pushFailure(
+    previousFailures,
+    "Retry failure",
+    retryState?.lastFailureSummary,
+    currentRun?.updatedAt ?? null,
+  );
+  pushFailure(
+    previousFailures,
+    "Verification",
+    verificationResult?.message,
+    verificationResult?.finishedAt ?? null,
+  );
+
+  if (currentBlocker && previousFailures.some((item) => item.text === currentBlocker.text)) {
+    return {
+      currentBlocker,
+      previousFailures: previousFailures.filter((item) => item.text !== currentBlocker.text),
+    };
+  }
+
+  return { currentBlocker, previousFailures };
 }
 
 const KIND_LABEL: Record<CheckKind, string> = {
@@ -257,13 +358,15 @@ export function DeliveryPanel() {
   const goalRuns = useGoalRunStore((s) => s.goalRuns);
   const goalRunEvents = useGoalRunStore((s) => s.goalRunEvents);
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
+  const runtimeLogs = useGoalRunStore((s) => s.runtimeLogs);
+  const runtimeLogsUpdatedAt = useGoalRunStore((s) => s.runtimeLogsUpdatedAt);
   const loading = useGoalRunStore((s) => s.loading);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const lastError = useGoalRunStore((s) => s.lastError);
   const refreshRuntimeStatus = useGoalRunStore((s) => s.refreshRuntimeStatus);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
-  const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
+  const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
   const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
@@ -276,8 +379,8 @@ export function DeliveryPanel() {
   const blockingTask = deliverySnapshot?.blockingTask ?? null;
   const codeEvidence = deliverySnapshot?.codeEvidence ?? null;
   const verificationResult = deliverySnapshot?.verificationResult ?? null;
-  const runtimeLogs = runtimeSnapshot?.session?.recentLogs ?? [];
   const liveActivity = useGoalRunStore((s) => s.liveActivity);
+  const phaseActivity = useGoalRunStore((s) => s.phaseActivity);
 
   useEffect(() => {
     if (project?.id) {
@@ -295,6 +398,29 @@ export function DeliveryPanel() {
     [goalRuns],
   );
 
+  const runtimeLogView = useMemo(
+    () =>
+      selectRuntimeLogView(
+        runtimeLogs,
+        runtimeLogsUpdatedAt,
+        runtimeSnapshot?.session?.recentLogs ?? [],
+        runtimeSnapshot?.session?.updatedAt ?? null,
+      ),
+    [runtimeLogs, runtimeLogsUpdatedAt, runtimeSnapshot],
+  );
+
+  const failureView = useMemo(
+    () => buildFailureView(currentRun ?? null, retryState, verificationResult),
+    [currentRun, retryState, verificationResult],
+  );
+
+  const repairEvents = useMemo(() => {
+    const events = deliverySnapshot?.recentEvents ?? goalRunEvents;
+    return [...events]
+      .filter((event) => event.kind === "retry-scheduled" || event.kind === "retry-resumed")
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [deliverySnapshot, goalRunEvents]);
+
   const activeProjectId = project?.id ?? null;
   const hasAttention = Boolean(retryState?.attentionRequired ?? currentRun?.attentionRequired);
 
@@ -302,7 +428,7 @@ export function DeliveryPanel() {
     if (!activeProjectId) return;
     try {
       await startRuntime(activeProjectId);
-      addToast("Started the configured runtime", "info");
+      addToast("Started app. Watch Recent runtime logs for fresh output.", "info");
     } catch (error) {
       addToast(`Failed to start runtime: ${error}`, "warning");
     }
@@ -349,9 +475,9 @@ export function DeliveryPanel() {
   const handleResumeGoal = async () => {
     if (!currentRun) return;
     try {
-      await continueAutopilot(currentRun.id);
+      await retryGoalRun(currentRun.id);
     } catch (error) {
-      addToast(`Failed to resume goal run: ${error}`, "warning");
+      addToast(`Failed to resume with repair: ${error}`, "warning");
     }
   };
 
@@ -429,6 +555,21 @@ export function DeliveryPanel() {
           </section>
         )}
 
+        {phaseActivity && (
+          <section className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-[11px] text-cyan-100">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-medium">
+                {phaseActivity.phase}
+                {phaseActivity.stepIndex != null && phaseActivity.stepTotal != null
+                  ? ` (${phaseActivity.stepIndex}/${phaseActivity.stepTotal})`
+                  : ""}
+              </p>
+              <span className="text-cyan-300/70">{formatTime(phaseActivity.updatedAt)}</span>
+            </div>
+            <p className="mt-1 text-cyan-100/80">{phaseActivity.message}</p>
+          </section>
+        )}
+
         {currentRun ? (
           <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
             <div className="grid gap-3 text-[11px] md:grid-cols-2">
@@ -465,6 +606,15 @@ export function DeliveryPanel() {
                     ? `Next retry after ${formatTime(retryState.retryBackoffUntil)}`
                     : "No backoff scheduled"}
                 </p>
+                <p className="mt-1 text-gray-400">
+                  Retry count {retryState?.retryCount ?? currentRun.retryCount}
+                  {retryState?.stopRequested ? " · stop requested" : ""}
+                </p>
+                {repairEvents.length > 0 && (
+                  <p className="mt-1 text-amber-300/80">
+                    Latest repair event: {repairEvents[0]?.summary}
+                  </p>
+                )}
               </div>
               {currentRun.runtimeStatusSummary ? (
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
@@ -477,21 +627,42 @@ export function DeliveryPanel() {
               {verificationResult ? (
                 <VerificationResultBlock result={verificationResult} />
               ) : null}
-              {(currentRun.lastFailureSummary || currentRun.blockerReason) ? (
-                <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-amber-300">
-                      {currentRun.status === "blocked" ? "Active blocker" : "Last blocker"}
-                    </p>
-                    <span className="text-[10px] text-amber-300/70">
-                      {formatTime(currentRun.updatedAt)}
-                    </span>
-                  </div>
-                  {currentRun.blockerReason ? (
-                    <p className="mt-1 whitespace-pre-wrap">{currentRun.blockerReason}</p>
+              {failureView.currentBlocker || failureView.previousFailures.length > 0 ? (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {failureView.currentBlocker ? (
+                    <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-amber-300">Current blocker</p>
+                        <span className="text-[10px] text-amber-300/70">
+                          {formatTime(failureView.currentBlocker.updatedAt)}
+                        </span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap">{failureView.currentBlocker.text}</p>
+                    </div>
                   ) : null}
-                  {currentRun.lastFailureSummary ? (
-                    <p className="mt-1 whitespace-pre-wrap">{currentRun.lastFailureSummary}</p>
+                  {failureView.previousFailures.length > 0 ? (
+                    <div className="rounded border border-gray-800 bg-gray-950/60 p-2 text-gray-100">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-gray-300">Previous failures</p>
+                        <span className="text-[10px] text-gray-500">
+                          {failureView.previousFailures.length} item
+                          {failureView.previousFailures.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <ul className="mt-1.5 space-y-1">
+                        {failureView.previousFailures.map((failure) => (
+                          <li key={`${failure.label}:${failure.text}`} className="space-y-0.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-gray-400">{failure.label}</p>
+                              <span className="text-[10px] text-gray-600">
+                                {formatTime(failure.updatedAt)}
+                              </span>
+                            </div>
+                            <p className="whitespace-pre-wrap text-gray-200">{failure.text}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ) : null}
                 </div>
               ) : null}
@@ -564,13 +735,13 @@ export function DeliveryPanel() {
                 onClick={() => void refreshRuntimeStatus(activeProjectId ?? undefined)}
                 className="rounded border border-gray-700 px-3 py-1 text-[11px] text-gray-300 hover:bg-gray-800"
               >
-                Refresh runtime
+                Refresh logs
               </button>
               <button
                 onClick={() => void handleStartRuntime()}
                 className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40"
               >
-                Run app
+                Start app
               </button>
               <button
                 onClick={() => void handleStopRuntime()}
@@ -587,7 +758,7 @@ export function DeliveryPanel() {
                   disabled={orchestrating}
                   className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
                 >
-                  {orchestrating ? "Running…" : "Resume goal"}
+                  {orchestrating ? "Running…" : "Resume with repair"}
                 </button>
               ) : null}
               {currentRun.phase === "verification" &&
@@ -600,7 +771,7 @@ export function DeliveryPanel() {
                   className="rounded border border-sky-700 px-3 py-1 text-[11px] text-sky-300 hover:bg-sky-950/40 disabled:opacity-50"
                   title="Rerun the acceptance suite without invoking repair agent"
                 >
-                  Rerun verification
+                  Rerun checks only
                 </button>
               ) : null}
               {currentRun.status === "running" || currentRun.status === "retrying" ? (
@@ -683,24 +854,28 @@ export function DeliveryPanel() {
                 Runtime Evidence
               </p>
               <p className="text-[11px] text-gray-500">
-                Runtime status and tail from the persisted runtime session.
+                Live runtime status and the freshest tail the app has available.
               </p>
             </div>
           </div>
 
           {runtimeSnapshot ? (
             <div className="space-y-2 text-[11px]">
-              <div className="grid gap-2 md:grid-cols-2">
+              <div className="grid gap-2 md:grid-cols-3">
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <p className="text-gray-500">Runtime status</p>
                   <p className="mt-1 text-gray-200">{runtimeSnapshot.session?.status ?? "idle"}</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Runtime session</p>
+                  <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.sessionId ?? "none"}</p>
                 </div>
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <p className="text-gray-500">Runtime URL</p>
                   <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.url ?? runtimeSnapshot.spec?.appUrl ?? "none"}</p>
                 </div>
               </div>
-              <div className="grid gap-2 md:grid-cols-2">
+              <div className="grid gap-2 md:grid-cols-3">
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <p className="text-gray-500">Log path</p>
                   <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.logPath ?? "none"}</p>
@@ -709,12 +884,27 @@ export function DeliveryPanel() {
                   <p className="text-gray-500">Last runtime error</p>
                   <p className="mt-1 whitespace-pre-wrap text-gray-200">{runtimeSnapshot.session?.lastError ?? "none"}</p>
                 </div>
-              </div>
-              {runtimeLogs.length > 0 ? (
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
-                  <p className="text-gray-500">Recent runtime logs</p>
+                  <p className="text-gray-500">Log tail updated</p>
+                  <p className="mt-1 text-gray-200">
+                    {runtimeLogView.updatedAt ? formatTime(runtimeLogView.updatedAt) : "unknown"}
+                  </p>
+                </div>
+              </div>
+              {runtimeLogView.lines.length > 0 ? (
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-gray-500">Recent runtime logs</p>
+                    <span className="text-[10px] text-gray-500">
+                      {runtimeLogView.source === "live"
+                        ? "live store"
+                        : runtimeLogView.source === "snapshot"
+                          ? "snapshot fallback"
+                          : "empty"}
+                    </span>
+                  </div>
                   <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300">
-                    {runtimeLogs.join("\n")}
+                    {runtimeLogView.lines.join("\n")}
                   </pre>
                 </div>
               ) : (

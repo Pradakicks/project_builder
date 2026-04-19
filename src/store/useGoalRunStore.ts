@@ -6,6 +6,7 @@ import type {
   LiveActivity,
   PhaseActivity,
   ProjectRuntimeStatus,
+  RuntimeLogTail,
 } from "../types";
 import { devLog } from "../utils/devLog";
 import * as goalRunApi from "../api/goalRunApi";
@@ -20,6 +21,7 @@ interface GoalRunStore {
   goalRunEvents: GoalRunEvent[];
   runtimeStatus: ProjectRuntimeStatus | null;
   runtimeLogs: string[];
+  runtimeLogsUpdatedAt: string | null;
   loading: boolean;
   orchestrating: boolean;
   lastError: string | null;
@@ -50,6 +52,7 @@ let pollTimer: ReturnType<typeof window.setInterval> | null = null;
 let polledGoalRunId: string | null = null;
 let unlistenProgress: (() => void) | null = null;
 let unlistenPhaseProgress: (() => void) | null = null;
+let runtimeLogRefreshBurstToken = 0;
 // Monotonic session counter. Each `stopPolling` / `ensurePolling` bumps this so
 // async listener registrations that resolve after their session ended can self-
 // cancel instead of leaking a subscription that mutates stale state.
@@ -68,6 +71,83 @@ function syncGoalRunState(goalRun: GoalRun) {
   }));
 }
 
+function mergeRuntimeLogs(
+  currentLogs: string[],
+  currentUpdatedAt: string | null,
+  runtimeStatus: ProjectRuntimeStatus | null,
+  tail: RuntimeLogTail | null,
+  refreshedAt: string,
+) {
+  if (tail && tail.lines.length > 0) {
+    return {
+      runtimeLogs: tail.lines,
+      runtimeLogsUpdatedAt: refreshedAt,
+    };
+  }
+
+  const snapshotLogs = runtimeStatus?.session?.recentLogs ?? [];
+  if (snapshotLogs.length > 0) {
+    return {
+      runtimeLogs: snapshotLogs,
+      runtimeLogsUpdatedAt: runtimeStatus?.session?.updatedAt ?? refreshedAt,
+    };
+  }
+
+  return {
+    runtimeLogs: currentLogs,
+    runtimeLogsUpdatedAt: currentUpdatedAt,
+  };
+}
+
+function projectMismatch(activeProjectId: string) {
+  return Boolean(useGoalRunStore.getState().projectId && useGoalRunStore.getState().projectId !== activeProjectId);
+}
+
+async function syncRuntimeEvidence(activeProjectId: string, refreshedAt = new Date().toISOString()) {
+  const [runtimeStatus, logs] = await Promise.all([
+    runtimeApi.getRuntimeStatus(activeProjectId),
+    runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
+      path: null,
+      lines: [],
+    })),
+  ]);
+
+  if (projectMismatch(activeProjectId)) return;
+
+  useGoalRunStore.setState((state) => {
+    const merged = mergeRuntimeLogs(
+      state.runtimeLogs,
+      state.runtimeLogsUpdatedAt,
+      runtimeStatus,
+      logs,
+      refreshedAt,
+    );
+    return {
+      runtimeStatus,
+      runtimeLogs: merged.runtimeLogs,
+      runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
+    };
+  });
+}
+
+function cancelRuntimeLogRefreshBurst() {
+  runtimeLogRefreshBurstToken += 1;
+}
+
+function scheduleRuntimeLogRefreshBurst(activeProjectId: string) {
+  cancelRuntimeLogRefreshBurst();
+  const token = runtimeLogRefreshBurstToken;
+  for (const delay of [700, 1600, 2800]) {
+    window.setTimeout(() => {
+      if (token !== runtimeLogRefreshBurstToken) return;
+      if (projectMismatch(activeProjectId)) return;
+      void syncRuntimeEvidence(activeProjectId).catch((error) => {
+        devLog("warn", "Store:GoalRun", "Failed to refresh post-start runtime logs", error);
+      });
+    }, delay);
+  }
+}
+
 async function refreshGoalRunState(goalRunId: string) {
   const snapshot = await goalRunApi.getGoalRunDeliverySnapshot(goalRunId);
   const goalRun = snapshot.goalRun;
@@ -83,7 +163,13 @@ async function refreshGoalRunState(goalRunId: string) {
         ? snapshot.recentEvents
         : state.goalRunEvents,
     runtimeStatus: snapshot.runtimeStatus ?? state.runtimeStatus,
-    runtimeLogs: snapshot.runtimeStatus?.session?.recentLogs ?? [],
+    ...mergeRuntimeLogs(
+      state.runtimeLogs,
+      state.runtimeLogsUpdatedAt,
+      snapshot.runtimeStatus ?? state.runtimeStatus,
+      { path: null, lines: [] },
+      snapshot.runtimeStatus?.session?.updatedAt ?? new Date().toISOString(),
+    ),
     orchestrating:
       goalRun.status === "running" || goalRun.status === "retrying",
     // Reconcile liveActivity from snapshot if the event-driven state is stale
@@ -106,6 +192,7 @@ async function refreshGoalRunState(goalRunId: string) {
 
 function stopPolling() {
   pollSession += 1;
+  cancelRuntimeLogRefreshBurst();
   if (pollTimer) {
     window.clearInterval(pollTimer);
     pollTimer = null;
@@ -212,6 +299,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   goalRunEvents: [],
   runtimeStatus: null,
   runtimeLogs: [],
+  runtimeLogsUpdatedAt: null,
   loading: false,
   orchestrating: false,
   lastError: null,
@@ -236,7 +324,13 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
         deliverySnapshot: snapshot,
         goalRunEvents: snapshot?.recentEvents ?? [],
         runtimeStatus: snapshot?.runtimeStatus ?? runtimeStatus,
-        runtimeLogs: snapshot?.runtimeStatus?.session?.recentLogs ?? [],
+        ...mergeRuntimeLogs(
+          [],
+          null,
+          snapshot?.runtimeStatus ?? runtimeStatus,
+          { path: null, lines: [] },
+          snapshot?.runtimeStatus?.session?.updatedAt ?? new Date().toISOString(),
+        ),
         loading: false,
         orchestrating:
           currentGoalRun?.status === "running" ||
@@ -271,10 +365,18 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
           state.currentGoalRun?.id === goalRunId
             ? snapshot.runtimeStatus
             : state.runtimeStatus,
-        runtimeLogs:
-          state.currentGoalRun?.id === goalRunId
-            ? snapshot.runtimeStatus?.session?.recentLogs ?? []
-            : state.runtimeLogs,
+        ...(state.currentGoalRun?.id === goalRunId
+          ? mergeRuntimeLogs(
+              state.runtimeLogs,
+              state.runtimeLogsUpdatedAt,
+              snapshot.runtimeStatus,
+              { path: null, lines: [] },
+              snapshot.runtimeStatus?.session?.updatedAt ?? new Date().toISOString(),
+            )
+          : {
+              runtimeLogs: state.runtimeLogs,
+              runtimeLogsUpdatedAt: state.runtimeLogsUpdatedAt,
+            }),
       }));
     } catch (error) {
       devLog("warn", "Store:GoalRun", "Failed to load goal run events", error);
@@ -372,16 +474,11 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   refreshRuntimeStatus: async (projectId) => {
     const activeProjectId = projectId ?? get().projectId;
     if (!activeProjectId) return;
-    const [runtimeStatus, logs] = await Promise.all([
-      runtimeApi.getRuntimeStatus(activeProjectId),
-      runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
-        path: null,
-        lines: [],
-      })),
-    ]);
-    // Drop stale results if the user switched projects while we were fetching.
-    if (get().projectId && get().projectId !== activeProjectId) return;
-    set({ runtimeStatus, runtimeLogs: logs.lines });
+    try {
+      await syncRuntimeEvidence(activeProjectId);
+    } catch (error) {
+      devLog("warn", "Store:GoalRun", "Failed to refresh runtime status", error);
+    }
   },
 
   startRuntime: async (projectId) => {
@@ -392,8 +489,23 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       path: null,
       lines: [],
     }));
-    if (get().projectId && get().projectId !== activeProjectId) return;
-    set({ runtimeStatus, runtimeLogs: logs.lines });
+    if (projectMismatch(activeProjectId)) return;
+    const refreshedAt = new Date().toISOString();
+    useGoalRunStore.setState((state) => {
+      const merged = mergeRuntimeLogs(
+        state.runtimeLogs,
+        state.runtimeLogsUpdatedAt,
+        runtimeStatus,
+        logs,
+        refreshedAt,
+      );
+      return {
+        runtimeStatus,
+        runtimeLogs: merged.runtimeLogs,
+        runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
+      };
+    });
+    scheduleRuntimeLogRefreshBurst(activeProjectId);
   },
 
   stopRuntime: async (projectId) => {
@@ -404,8 +516,22 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       path: null,
       lines: [],
     }));
-    if (get().projectId && get().projectId !== activeProjectId) return;
-    set({ runtimeStatus, runtimeLogs: logs.lines });
+    if (projectMismatch(activeProjectId)) return;
+    const refreshedAt = new Date().toISOString();
+    useGoalRunStore.setState((state) => {
+      const merged = mergeRuntimeLogs(
+        state.runtimeLogs,
+        state.runtimeLogsUpdatedAt,
+        runtimeStatus,
+        logs,
+        refreshedAt,
+      );
+      return {
+        runtimeStatus,
+        runtimeLogs: merged.runtimeLogs,
+        runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
+      };
+    });
   },
 
   reset: () => {
@@ -418,6 +544,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       goalRunEvents: [],
       runtimeStatus: null,
       runtimeLogs: [],
+      runtimeLogsUpdatedAt: null,
       loading: false,
       orchestrating: false,
       lastError: null,
