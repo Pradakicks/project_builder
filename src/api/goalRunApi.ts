@@ -24,6 +24,32 @@ export function onImplementationProgress(
   return listenToEvent<ImplementationProgressEvent>("implementation-progress", callback);
 }
 
+/// Generalised sub-phase progress. Fires for any phase (planning, merging,
+/// runtime start, verification, ...), distinct from `implementation-progress`
+/// which only covers Implementation. Status values:
+///   - "started"   — phase has begun
+///   - "step"      — a meaningful sub-step happened (keep the count bounded —
+///                   "Merged piece X", "Starting runtime", "Running shell
+///                   verify", one check in the acceptance suite, etc.)
+///   - "completed" — phase ended successfully
+///   - "failed"    — phase ended with an error
+export interface PhaseProgressEvent {
+  goalRunId: string;
+  phase: string; // GoalRunPhase kebab-case (matches the `phase` column)
+  status: "started" | "step" | "completed" | "failed";
+  message: string;
+  pieceId?: string | null;
+  pieceName?: string | null;
+  stepIndex?: number | null;
+  stepTotal?: number | null;
+}
+
+export function onPhaseProgress(
+  callback: (payload: PhaseProgressEvent) => void,
+): Promise<import("@tauri-apps/api/event").UnlistenFn> {
+  return listenToEvent<PhaseProgressEvent>("phase-progress", callback);
+}
+
 export async function createGoalRun(
   projectId: string,
   prompt: string,

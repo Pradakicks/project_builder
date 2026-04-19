@@ -4,6 +4,7 @@ import type {
   GoalRunDeliverySnapshot,
   GoalRunEvent,
   LiveActivity,
+  PhaseActivity,
   ProjectRuntimeStatus,
 } from "../types";
 import { devLog } from "../utils/devLog";
@@ -24,6 +25,10 @@ interface GoalRunStore {
   lastError: string | null;
   /** Live activity during Implementation phase — updated from events at sub-2s cadence. */
   liveActivity: LiveActivity | null;
+  /** Rolling breadcrumb for the current phase (any phase). Updated from
+   *  `phase-progress` events so the UI can show "Merging branch X" or
+   *  "Running shell verify" instead of a frozen spinner. */
+  phaseActivity: PhaseActivity | null;
   loadGoalRuns: (projectId: string) => Promise<void>;
   loadGoalRunEvents: (goalRunId: string) => Promise<void>;
   refreshDeliverySnapshot: (goalRunId: string) => Promise<void>;
@@ -44,6 +49,7 @@ interface GoalRunStore {
 let pollTimer: ReturnType<typeof window.setInterval> | null = null;
 let polledGoalRunId: string | null = null;
 let unlistenProgress: (() => void) | null = null;
+let unlistenPhaseProgress: (() => void) | null = null;
 // Monotonic session counter. Each `stopPolling` / `ensurePolling` bumps this so
 // async listener registrations that resolve after their session ended can self-
 // cancel instead of leaking a subscription that mutates stale state.
@@ -108,8 +114,12 @@ function stopPolling() {
     unlistenProgress();
     unlistenProgress = null;
   }
+  if (unlistenPhaseProgress) {
+    unlistenPhaseProgress();
+    unlistenPhaseProgress = null;
+  }
   polledGoalRunId = null;
-  useGoalRunStore.setState({ liveActivity: null });
+  useGoalRunStore.setState({ liveActivity: null, phaseActivity: null });
 }
 
 function ensurePolling(goalRunId: string) {
@@ -152,6 +162,38 @@ function ensurePolling(goalRunId: string) {
     devLog("warn", "Store:GoalRun", "Failed to register implementation-progress listener", error);
   });
 
+  // Broader breadcrumb coverage: any phase can emit phase-progress.
+  void goalRunApi.onPhaseProgress((event) => {
+    if (mySession !== pollSession) return;
+    if (event.goalRunId !== goalRunId) return;
+    if (event.status === "completed" || event.status === "failed") {
+      // Terminal states: clear so we don't pin a stale "Merging branch X" after
+      // the phase moves on. Next `step`/`started` will repopulate.
+      useGoalRunStore.setState({ phaseActivity: null });
+      return;
+    }
+    useGoalRunStore.setState({
+      phaseActivity: {
+        phase: event.phase,
+        status: event.status,
+        message: event.message,
+        pieceId: event.pieceId ?? null,
+        pieceName: event.pieceName ?? null,
+        stepIndex: event.stepIndex ?? null,
+        stepTotal: event.stepTotal ?? null,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }).then((unlisten) => {
+    if (mySession !== pollSession) {
+      unlisten();
+      return;
+    }
+    unlistenPhaseProgress = unlisten;
+  }).catch((error) => {
+    devLog("warn", "Store:GoalRun", "Failed to register phase-progress listener", error);
+  });
+
   pollTimer = window.setInterval(() => {
     void refreshGoalRunState(goalRunId).catch((error) => {
       devLog("warn", "Store:GoalRun", "Failed to refresh running goal run", error);
@@ -174,6 +216,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   orchestrating: false,
   lastError: null,
   liveActivity: null,
+  phaseActivity: null,
 
   loadGoalRuns: async (projectId) => {
     set({ projectId, loading: true, lastError: null });
@@ -379,6 +422,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       orchestrating: false,
       lastError: null,
       liveActivity: null,
+      phaseActivity: null,
     });
   },
 }));

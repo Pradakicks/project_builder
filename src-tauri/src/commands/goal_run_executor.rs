@@ -11,9 +11,63 @@ use crate::AppState;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Status values for `phase-progress` events. Kept in sync with the TS
+/// `PhaseProgressEvent` union — see `src/api/goalRunApi.ts`.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PhaseProgressStatus {
+    Started,
+    Step,
+    Completed,
+    #[allow(dead_code)]
+    Failed,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PhaseProgressEvent {
+    pub goal_run_id: String,
+    pub phase: String,
+    pub status: PhaseProgressStatus,
+    pub message: String,
+    pub piece_id: Option<String>,
+    pub piece_name: Option<String>,
+    pub step_index: Option<u32>,
+    pub step_total: Option<u32>,
+}
+
+/// Emit a `phase-progress` breadcrumb to the frontend. Best-effort — a dropped
+/// event is never fatal, so all call sites just `let _ =`.
+pub(crate) fn emit_phase_progress<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    goal_run_id: &str,
+    phase: GoalRunPhase,
+    status: PhaseProgressStatus,
+    message: impl Into<String>,
+) {
+    let phase_str = serde_json::to_string(&phase)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let _ = app_handle.emit(
+        "phase-progress",
+        PhaseProgressEvent {
+            goal_run_id: goal_run_id.to_string(),
+            phase: phase_str,
+            status,
+            message: message.into(),
+            piece_id: None,
+            piece_name: None,
+            step_index: None,
+            step_total: None,
+        },
+    );
+}
+
 
 fn failure_fingerprint(phase: GoalRunPhase, message: &str) -> String {
     let normalized = message
@@ -355,6 +409,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
             "Planning started",
             None,
         );
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::Planning,
+            PhaseProgressStatus::Started,
+            "Planning started",
+        );
         goal_run = update_goal_run_state(
             &state.db,
             goal_run_id,
@@ -410,6 +471,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
             "Planning completed",
             Some(json!({ "planId": plan.id })),
         );
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::Planning,
+            PhaseProgressStatus::Completed,
+            "Planning completed",
+        );
         plan_holder = Some(plan);
     }
 
@@ -436,6 +504,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
             GoalRunEventKind::PhaseStarted,
             "Implementation started",
             Some(json!({ "planId": plan.id })),
+        );
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::Implementation,
+            PhaseProgressStatus::Started,
+            "Implementation started",
         );
 
         if stop_requested(&state.db, goal_run_id)? {
@@ -479,6 +554,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         "Implementation completed",
                         None,
                     );
+                    emit_phase_progress(
+                        app_handle,
+                        goal_run_id,
+                        GoalRunPhase::Implementation,
+                        PhaseProgressStatus::Completed,
+                        "Implementation completed",
+                    );
                     break 'implementation;
                 }
                 Err(error) => {
@@ -519,6 +601,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             GoalRunEventKind::RetryScheduled,
                             &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
                             Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                        );
+                        emit_phase_progress(
+                            app_handle,
+                            goal_run_id,
+                            GoalRunPhase::Implementation,
+                            PhaseProgressStatus::Step,
+                            format!("Repair attempt {}/{MAX_REPAIR_RETRIES}", current_retry + 1),
                         );
                         match attempt_cto_repair(
                             app_handle,
@@ -570,6 +659,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
             GoalRunEventKind::PhaseStarted,
             "Runtime configuration started",
             None,
+        );
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::RuntimeConfiguration,
+            PhaseProgressStatus::Started,
+            "Runtime configuration started",
         );
         goal_run = update_goal_run_state(
             &state.db,
@@ -640,6 +736,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
             "Runtime configured",
             None,
         );
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::RuntimeConfiguration,
+            PhaseProgressStatus::Completed,
+            "Runtime configured",
+        );
     } // end if start_ordinal <= RuntimeConfiguration
 
     if start_ordinal <= GoalRunPhase::RuntimeExecution.ordinal() {
@@ -655,6 +758,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
             GoalRunEventKind::PhaseStarted,
             "Runtime execution started",
             None,
+        );
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::RuntimeExecution,
+            PhaseProgressStatus::Started,
+            "Runtime execution started",
         );
         goal_run = update_goal_run_state(
             &state.db,
@@ -689,6 +799,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         GoalRunEventKind::PhaseCompleted,
                         "Runtime started",
                         None,
+                    );
+                    emit_phase_progress(
+                        app_handle,
+                        goal_run_id,
+                        GoalRunPhase::RuntimeExecution,
+                        PhaseProgressStatus::Completed,
+                        "Runtime started",
                     );
                     break 'runtime_execution;
                 }
@@ -729,6 +846,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             GoalRunEventKind::RetryScheduled,
                             &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
                             Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                        );
+                        emit_phase_progress(
+                            app_handle,
+                            goal_run_id,
+                            GoalRunPhase::RuntimeExecution,
+                            PhaseProgressStatus::Step,
+                            format!("Repair attempt {}/{MAX_REPAIR_RETRIES}", current_retry + 1),
                         );
                         match attempt_cto_repair(
                             app_handle,
@@ -783,6 +907,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 ..Default::default()
             },
         )?;
+        emit_phase_progress(
+            app_handle,
+            goal_run_id,
+            GoalRunPhase::Verification,
+            PhaseProgressStatus::Started,
+            "Verification started",
+        );
 
     'verification: loop {
         let verification_result = runtime_commands::verify_runtime_impl(
@@ -851,6 +982,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 "Verification completed",
                 Some(json!({ "message": verification_result.message })),
             );
+            emit_phase_progress(
+                app_handle,
+                goal_run_id,
+                GoalRunPhase::Verification,
+                PhaseProgressStatus::Completed,
+                "Verification completed",
+            );
             break 'verification;
         }
 
@@ -893,6 +1031,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 GoalRunEventKind::RetryScheduled,
                 &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
                 Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+            );
+            emit_phase_progress(
+                app_handle,
+                goal_run_id,
+                GoalRunPhase::Verification,
+                PhaseProgressStatus::Step,
+                format!("Repair attempt {}/{MAX_REPAIR_RETRIES}", current_retry + 1),
             );
             match attempt_cto_repair(
                 app_handle,

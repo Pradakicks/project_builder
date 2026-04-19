@@ -367,6 +367,20 @@ export interface LiveActivity {
   total: number;
 }
 
+/// Active-phase breadcrumb produced from `phase-progress` events. Superset of
+/// `LiveActivity` (which is Implementation-only). Populated for any phase.
+export interface PhaseActivity {
+  phase: string;
+  status: "started" | "step" | "completed" | "failed";
+  message: string;
+  pieceId: string | null;
+  pieceName: string | null;
+  stepIndex: number | null;
+  stepTotal: number | null;
+  /** ISO timestamp of the most recent event that produced this activity. */
+  updatedAt: string;
+}
+
 export type CheckKind = "shell" | "http" | "tcpPort" | "logScan" | "skipped";
 
 export interface VerificationCheck {
