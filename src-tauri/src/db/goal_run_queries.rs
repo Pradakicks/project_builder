@@ -52,7 +52,7 @@ impl Database {
         debug!(goal_run_id = id, "Getting goal run");
         self.conn
             .query_row(
-                "SELECT id, project_id, prompt, phase, status, blocker_reason, current_plan_id, runtime_status_summary, verification_summary, retry_count, last_failure_summary, stop_requested, current_piece_id, current_task_id, retry_backoff_until, last_failure_fingerprint, attention_required, last_heartbeat_at, created_at, updated_at FROM goal_runs WHERE id = ?1",
+                "SELECT id, project_id, prompt, phase, status, blocker_reason, current_plan_id, runtime_status_summary, verification_summary, retry_count, last_failure_summary, stop_requested, current_piece_id, current_task_id, retry_backoff_until, last_failure_fingerprint, attention_required, last_heartbeat_at, operator_repair_requested, created_at, updated_at FROM goal_runs WHERE id = ?1",
                 params![id],
                 |row| {
                     let phase: String = row.get(3)?;
@@ -76,8 +76,9 @@ impl Database {
                         last_failure_fingerprint: row.get(15)?,
                         attention_required: row.get::<_, i64>(16)? != 0,
                         last_heartbeat_at: row.get(17)?,
-                        created_at: row.get(18)?,
-                        updated_at: row.get(19)?,
+                        operator_repair_requested: row.get::<_, i64>(18)? != 0,
+                        created_at: row.get(19)?,
+                        updated_at: row.get(20)?,
                     })
                 },
             )
@@ -102,11 +103,7 @@ impl Database {
         ids.iter().map(|id| self.get_goal_run(id)).collect()
     }
 
-    pub fn update_goal_run(
-        &self,
-        id: &str,
-        updates: &GoalRunUpdate,
-    ) -> Result<GoalRun, String> {
+    pub fn update_goal_run(&self, id: &str, updates: &GoalRunUpdate) -> Result<GoalRun, String> {
         debug!(
             goal_run_id = id,
             has_prompt = updates.prompt.is_some(),
@@ -199,6 +196,10 @@ impl Database {
             sets.push("last_heartbeat_at = ?");
             params_vec.push(last_heartbeat_at.clone().into());
         }
+        if let Some(operator_repair_requested) = updates.operator_repair_requested {
+            sets.push("operator_repair_requested = ?");
+            params_vec.push(i64::from(operator_repair_requested).into());
+        }
 
         // No substantive updates → skip the write; only `updated_at` would change.
         if sets.len() == 1 {
@@ -270,7 +271,9 @@ impl Database {
     pub fn list_interrupted_runs(&self) -> Result<Vec<GoalRun>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id FROM goal_runs WHERE status = 'interrupted' ORDER BY updated_at DESC")
+            .prepare(
+                "SELECT id FROM goal_runs WHERE status = 'interrupted' ORDER BY updated_at DESC",
+            )
             .map_err(|e| e.to_string())?;
         let ids: Vec<String> = stmt
             .query_map([], |row| row.get(0))
@@ -318,21 +321,23 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
-        let rows = stmt.query_map(params![goal_run_id], |row| {
-            let phase: String = row.get(2)?;
-            let kind: String = row.get(3)?;
-            Ok(GoalRunEvent {
-                id: row.get(0)?,
-                goal_run_id: row.get(1)?,
-                phase: sql_to_goal_run_phase(&phase),
-                kind: sql_to_goal_run_event_kind(&kind),
-                summary: row.get(4)?,
-                payload_json: row.get(5)?,
-                created_at: row.get(6)?,
+        let rows = stmt
+            .query_map(params![goal_run_id], |row| {
+                let phase: String = row.get(2)?;
+                let kind: String = row.get(3)?;
+                Ok(GoalRunEvent {
+                    id: row.get(0)?,
+                    goal_run_id: row.get(1)?,
+                    phase: sql_to_goal_run_phase(&phase),
+                    kind: sql_to_goal_run_event_kind(&kind),
+                    summary: row.get(4)?,
+                    payload_json: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -375,6 +380,7 @@ mod tests {
         assert_eq!(created.retry_count, 0);
         assert!(created.blocker_reason.is_none());
         assert!(created.current_plan_id.is_none());
+        assert!(!created.operator_repair_requested);
 
         let updated = db
             .update_goal_run(
@@ -388,6 +394,7 @@ mod tests {
                     verification_summary: Some(Some("verification not started".to_string())),
                     retry_count: Some(2),
                     last_failure_summary: Some(Some("missing command".to_string())),
+                    operator_repair_requested: Some(true),
                     ..Default::default()
                 },
             )
@@ -395,12 +402,25 @@ mod tests {
 
         assert_eq!(updated.phase, GoalRunPhase::Planning);
         assert_eq!(updated.status, GoalRunStatus::Blocked);
-        assert_eq!(updated.blocker_reason.as_deref(), Some("Waiting on runtime spec"));
+        assert_eq!(
+            updated.blocker_reason.as_deref(),
+            Some("Waiting on runtime spec")
+        );
         assert_eq!(updated.current_plan_id.as_deref(), Some("plan-123"));
-        assert_eq!(updated.runtime_status_summary.as_deref(), Some("runtime not configured"));
-        assert_eq!(updated.verification_summary.as_deref(), Some("verification not started"));
+        assert_eq!(
+            updated.runtime_status_summary.as_deref(),
+            Some("runtime not configured")
+        );
+        assert_eq!(
+            updated.verification_summary.as_deref(),
+            Some("verification not started")
+        );
         assert_eq!(updated.retry_count, 2);
-        assert_eq!(updated.last_failure_summary.as_deref(), Some("missing command"));
+        assert_eq!(
+            updated.last_failure_summary.as_deref(),
+            Some("missing command")
+        );
+        assert!(updated.operator_repair_requested);
 
         let listed = db.list_goal_runs(&project.id).expect("list goal runs");
         assert_eq!(listed.len(), 1);

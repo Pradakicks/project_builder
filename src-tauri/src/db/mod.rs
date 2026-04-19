@@ -1,17 +1,17 @@
-mod queries;
 mod agent_queries;
 mod artifact_queries;
-mod goal_run_queries;
-mod runtime_session_queries;
-mod plan_queries;
 mod cto_queries;
+mod goal_run_queries;
+mod plan_queries;
+mod queries;
+mod runtime_session_queries;
 
-pub use queries::*;
 pub use agent_queries::*;
 #[allow(unused_imports)]
-pub use plan_queries::*;
-#[allow(unused_imports)]
 pub use goal_run_queries::*;
+#[allow(unused_imports)]
+pub use plan_queries::*;
+pub use queries::*;
 #[allow(unused_imports)]
 pub use runtime_session_queries::*;
 
@@ -29,23 +29,28 @@ struct Migration {
     apply: MigrationFn,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "Bootstrap the core application schema",
-    apply: migrate_v1,
-}, Migration {
-    version: 2,
-    description: "Add structured CTO audit records",
-    apply: migrate_v2,
-}, Migration {
-    version: 3,
-    description: "Add goal run orchestration state",
-    apply: migrate_v3,
-}, Migration {
-    version: CURRENT_SCHEMA_VERSION,
-    description: "Persist goal run executor state, events, and runtime sessions",
-    apply: migrate_v4,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "Bootstrap the core application schema",
+        apply: migrate_v1,
+    },
+    Migration {
+        version: 2,
+        description: "Add structured CTO audit records",
+        apply: migrate_v2,
+    },
+    Migration {
+        version: 3,
+        description: "Add goal run orchestration state",
+        apply: migrate_v3,
+    },
+    Migration {
+        version: CURRENT_SCHEMA_VERSION,
+        description: "Persist goal run executor state, events, and runtime sessions",
+        apply: migrate_v4,
+    },
+];
 
 pub struct Database {
     pub conn: Connection,
@@ -339,12 +344,18 @@ fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     if !has_execution_json {
-        conn.execute("ALTER TABLE cto_decisions ADD COLUMN execution_json TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN execution_json TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !has_rollback_json {
-        conn.execute("ALTER TABLE cto_decisions ADD COLUMN rollback_json TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN rollback_json TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !has_status {
         conn.execute(
@@ -389,6 +400,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             last_failure_fingerprint TEXT,
             attention_required INTEGER NOT NULL DEFAULT 0,
             last_heartbeat_at TEXT,
+            operator_repair_requested INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -413,6 +425,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
     let mut has_last_failure_fingerprint = false;
     let mut has_attention_required = false;
     let mut has_last_heartbeat_at = false;
+    let mut has_operator_repair_requested = false;
 
     for column in columns {
         match column.map_err(|e| e.to_string())?.as_str() {
@@ -423,6 +436,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             "last_failure_fingerprint" => has_last_failure_fingerprint = true,
             "attention_required" => has_attention_required = true,
             "last_heartbeat_at" => has_last_heartbeat_at = true,
+            "operator_repair_requested" => has_operator_repair_requested = true,
             _ => {}
         }
     }
@@ -443,8 +457,11 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     if !has_retry_backoff_until {
-        conn.execute("ALTER TABLE goal_runs ADD COLUMN retry_backoff_until TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN retry_backoff_until TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !has_last_failure_fingerprint {
         conn.execute(
@@ -461,8 +478,18 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     if !has_last_heartbeat_at {
-        conn.execute("ALTER TABLE goal_runs ADD COLUMN last_heartbeat_at TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN last_heartbeat_at TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_operator_repair_requested {
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN operator_repair_requested INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     // Indexes on ALTER-added columns must run after the columns exist.
@@ -604,7 +631,11 @@ mod tests {
 
         let reopened = Database::new_at_path(&db_path).expect("reopen database");
         assert_eq!(user_version(&reopened.conn), CURRENT_SCHEMA_VERSION);
-        assert!(table_has_column(&reopened.conn, "agent_history", "metadata_json"));
+        assert!(table_has_column(
+            &reopened.conn,
+            "agent_history",
+            "metadata_json"
+        ));
 
         let projects = reopened.list_projects().expect("list projects");
         assert_eq!(projects.len(), 1);
@@ -757,9 +788,7 @@ mod tests {
             "tail ensure_goal_runs_schema pass must backfill last_heartbeat_at",
         );
 
-        let project = db
-            .create_project("p1", "smoke")
-            .expect("create project");
+        let project = db.create_project("p1", "smoke").expect("create project");
         // create_goal_run -> get_goal_run reads the last_heartbeat_at column.
         let run = db
             .create_goal_run(&project.id, "build something")

@@ -15,6 +15,7 @@ vi.mock("../api/goalRunApi", () => ({
   getGoalRun: vi.fn(),
   createGoalRun: vi.fn(),
   resumeGoalRun: vi.fn(),
+  resumeGoalRunWithRepair: vi.fn(),
   updateGoalRun: vi.fn(),
   stopGoalRun: vi.fn(),
   pauseGoalRun: vi.fn(),

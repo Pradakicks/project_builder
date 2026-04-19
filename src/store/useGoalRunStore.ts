@@ -37,6 +37,7 @@ interface GoalRunStore {
   selectGoalRun: (goalRunId: string) => Promise<void>;
   beginPromptRun: (projectId: string, prompt: string) => Promise<GoalRun>;
   continueAutopilot: (goalRunId: string) => Promise<void>;
+  continueAutopilotWithRepair: (goalRunId: string) => Promise<void>;
   retryGoalRun: (goalRunId: string) => Promise<void>;
   stopGoalRun: (goalRunId: string) => Promise<void>;
   pauseGoalRun: (goalRunId: string) => Promise<void>;
@@ -420,6 +421,22 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     syncGoalRunState(resumed);
     ensurePolling(goalRunId);
     toast("Autopilot resumed", "info");
+  },
+
+  continueAutopilotWithRepair: async (goalRunId) => {
+    const run =
+      get().currentGoalRun?.id === goalRunId
+        ? get().currentGoalRun
+        : get().goalRuns.find((item) => item.id === goalRunId) ?? null;
+    if (!run) {
+      throw new Error("Goal run not loaded");
+    }
+
+    set({ lastError: null });
+    const resumed = await goalRunApi.resumeGoalRunWithRepair(goalRunId);
+    syncGoalRunState(resumed);
+    ensurePolling(goalRunId);
+    toast("Repair requested", "info");
   },
 
   retryGoalRun: async (goalRunId) => {

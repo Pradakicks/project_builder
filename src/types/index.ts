@@ -286,6 +286,7 @@ export type GoalRunEventKind =
   | "phase-completed"
   | "retry-scheduled"
   | "retry-resumed"
+  | "repair-requested"
   | "repair-started"
   | "repair-skipped"
   | "repair-executed"
@@ -318,6 +319,7 @@ export interface GoalRun {
   lastFailureFingerprint: string | null;
   attentionRequired: boolean;
   lastHeartbeatAt: string | null;
+  operatorRepairRequested: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -338,6 +340,7 @@ export interface GoalRunUpdate {
   retryBackoffUntil?: string | null;
   lastFailureFingerprint?: string | null;
   attentionRequired?: boolean;
+  operatorRepairRequested?: boolean;
 }
 
 export interface GoalRunEvent {
@@ -357,6 +360,7 @@ export interface GoalRunRetryState {
   lastFailureSummary: string | null;
   lastFailureFingerprint: string | null;
   attentionRequired: boolean;
+  operatorRepairRequested: boolean;
 }
 
 export interface GoalRunCodeEvidence {

@@ -94,6 +94,8 @@ enum RepairSkipReason {
     NoActions,
     OnlyBlockedActions,
     NoExecutableActions,
+    RetryBudgetExhausted,
+    RepeatedFailure,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -130,7 +132,10 @@ fn repair_event_payload(
     outcome: Option<&RepairOutcome>,
 ) -> serde_json::Value {
     match outcome {
-        Some(RepairOutcome::Skipped { reason, decision_id }) => json!({
+        Some(RepairOutcome::Skipped {
+            reason,
+            decision_id,
+        }) => json!({
             "context": context,
             "outcome": {
                 "kind": "skipped",
@@ -197,7 +202,10 @@ fn preview_text(text: &str, max_chars: usize) -> String {
     }
 
     let mut preview: String = text.chars().take(max_chars).collect();
-    preview.push_str(&format!("…[truncated {} more chars]", total_chars - max_chars));
+    preview.push_str(&format!(
+        "…[truncated {} more chars]",
+        total_chars - max_chars
+    ));
     preview
 }
 
@@ -208,6 +216,60 @@ fn repair_summary(phase: &GoalRunPhase) -> String {
             .unwrap_or_default()
             .trim_matches('"')
     )
+}
+
+fn repair_skip_reason_label(reason: RepairSkipReason) -> &'static str {
+    match reason {
+        RepairSkipReason::NoApiKey => "no API key available",
+        RepairSkipReason::NoActions => "repair agent returned no actions",
+        RepairSkipReason::OnlyBlockedActions => "repair agent only proposed executor actions",
+        RepairSkipReason::NoExecutableActions => "repair agent produced no executable actions",
+        RepairSkipReason::RetryBudgetExhausted => "automatic repair budget exhausted",
+        RepairSkipReason::RepeatedFailure => "same failure repeated",
+    }
+}
+
+fn repair_outcome_blocker(outcome: &RepairOutcome) -> Option<String> {
+    match outcome {
+        RepairOutcome::Skipped { reason, .. } => Some(format!(
+            "CTO repair skipped: {}",
+            repair_skip_reason_label(*reason)
+        )),
+        RepairOutcome::Failed { stage, error, .. } => {
+            Some(format!("CTO repair failed during {stage:?}: {error}"))
+        }
+        RepairOutcome::Executed { .. } => None,
+    }
+}
+
+fn log_repair_not_attempted(
+    db: &Mutex<Database>,
+    goal_run_id: &str,
+    phase: GoalRunPhase,
+    error: &str,
+    fingerprint: &str,
+    retry_count: i64,
+    reason: RepairSkipReason,
+) {
+    log_event(
+        db,
+        goal_run_id,
+        phase,
+        GoalRunEventKind::RepairSkipped,
+        &format!("CTO repair skipped: {}", repair_skip_reason_label(reason)),
+        Some(json!({
+            "outcome": {
+                "kind": "skipped",
+                "reason": reason,
+            },
+            "failure": {
+                "summary": error,
+                "fingerprint": fingerprint,
+                "retryCount": retry_count,
+                "maxRepairRetries": MAX_REPAIR_RETRIES,
+            }
+        })),
+    );
 }
 
 fn persist_repair_decision(
@@ -227,7 +289,6 @@ fn persist_repair_decision(
     let db = db.lock().map_err(|e| e.to_string())?;
     db.insert_cto_decision(project_id, &decision)
 }
-
 
 fn failure_fingerprint(phase: GoalRunPhase, message: &str) -> String {
     let normalized = message
@@ -267,13 +328,7 @@ fn log_event(
 ) {
     if let Ok(db) = db.lock() {
         let payload_str = payload.map(|value| value.to_string());
-        let _ = db.append_goal_run_event(
-            goal_run_id,
-            phase,
-            kind,
-            summary,
-            payload_str.as_deref(),
-        );
+        let _ = db.append_goal_run_event(goal_run_id, phase, kind, summary, payload_str.as_deref());
     }
 }
 
@@ -728,9 +783,10 @@ async fn advance_goal_run<R: tauri::Runtime>(
 
     // If resuming past Planning, load the existing plan from DB now so later phases have it.
     let rehydrated_plan: Option<WorkPlan> = if start_ordinal > GoalRunPhase::Planning.ordinal() {
-        initial.current_plan_id.as_deref().and_then(|plan_id| {
-            state.db.lock().ok()?.get_work_plan(plan_id).ok()
-        })
+        initial
+            .current_plan_id
+            .as_deref()
+            .and_then(|plan_id| state.db.lock().ok()?.get_work_plan(plan_id).ok())
     } else {
         None
     };
@@ -811,8 +867,15 @@ async fn advance_goal_run<R: tauri::Runtime>(
             {
                 plan
             }
-            _ => runner::run_leader_agent(&goal_run.project_id, &goal_run.prompt, &state.db, app_handle)
-                .await?,
+            _ => {
+                runner::run_leader_agent(
+                    &goal_run.project_id,
+                    &goal_run.prompt,
+                    &state.db,
+                    app_handle,
+                )
+                .await?
+            }
         };
 
         if plan.status == crate::models::PlanStatus::Draft {
@@ -942,6 +1005,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         .map(|prev| prev == fingerprint)
                         .unwrap_or(false);
 
+                    let mut repair_blocker: Option<String> = None;
                     if current_retry < MAX_REPAIR_RETRIES && !same_failure {
                         goal_run = update_goal_run_state(
                             &state.db,
@@ -962,8 +1026,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             goal_run_id,
                             GoalRunPhase::Implementation,
                             GoalRunEventKind::RetryScheduled,
-                            &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
-                            Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                            &format!(
+                                "Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}",
+                                current_retry + 1
+                            ),
+                            Some(
+                                json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 }),
+                            ),
                         );
                         emit_phase_progress(
                             app_handle,
@@ -981,9 +1050,15 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         )
                         .await
                         {
-                            Ok(RepairOutcome::Executed { .. })
-                            | Ok(RepairOutcome::Skipped { .. }) => continue 'implementation,
-                            Ok(RepairOutcome::Failed { stage, error, decision_id }) => {
+                            Ok(RepairOutcome::Executed { .. }) => continue 'implementation,
+                            Ok(outcome @ RepairOutcome::Skipped { .. }) => {
+                                repair_blocker = repair_outcome_blocker(&outcome);
+                            }
+                            Ok(RepairOutcome::Failed {
+                                stage,
+                                error,
+                                decision_id,
+                            }) => {
                                 warn!(
                                     goal_run_id,
                                     ?stage,
@@ -991,6 +1066,8 @@ async fn advance_goal_run<R: tauri::Runtime>(
                                     repair_error = %error,
                                     "CTO repair agent failed"
                                 );
+                                repair_blocker =
+                                    Some(format!("CTO repair failed during {stage:?}: {error}"));
                             }
                             Err(repair_err) => {
                                 warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
@@ -998,13 +1075,14 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         }
                     }
 
+                    let final_error = repair_blocker.unwrap_or_else(|| error.clone());
                     update_goal_run_state(
                         &state.db,
                         goal_run_id,
                         GoalRunUpdate {
                             phase: Some(GoalRunPhase::Implementation),
                             status: Some(GoalRunStatus::Failed),
-                            last_failure_summary: Some(Some(error.clone())),
+                            last_failure_summary: Some(Some(final_error.clone())),
                             last_failure_fingerprint: Some(Some(fingerprint.clone())),
                             attention_required: Some(true),
                             ..Default::default()
@@ -1015,10 +1093,10 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         goal_run_id,
                         GoalRunPhase::Implementation,
                         GoalRunEventKind::Failed,
-                        &error,
+                        &final_error,
                         Some(json!({ "fingerprint": fingerprint })),
                     );
-                    return Err(error);
+                    return Err(final_error);
                 }
             }
         }
@@ -1050,11 +1128,16 @@ async fn advance_goal_run<R: tauri::Runtime>(
             },
         )?;
 
-        let runtime_status =
-            runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
+        let runtime_status = runtime_commands::get_runtime_status_impl(
+            &state.db,
+            &state.runtime_sessions,
+            goal_run.project_id.clone(),
+        )
+        .await?;
         if runtime_status.spec.is_none() {
             let mut detected =
-                runtime_commands::detect_runtime_impl(&state.db, goal_run.project_id.clone()).await?;
+                runtime_commands::detect_runtime_impl(&state.db, goal_run.project_id.clone())
+                    .await?;
             if detected.is_none() {
                 detected = runtime_commands::detect_runtime_with_agent_impl(
                     &state.db,
@@ -1099,7 +1182,12 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 detected,
             )
             .await?;
-            let _ = runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
+            let _ = runtime_commands::get_runtime_status_impl(
+                &state.db,
+                &state.runtime_sessions,
+                goal_run.project_id.clone(),
+            )
+            .await?;
         }
         log_event(
             &state.db,
@@ -1121,8 +1209,12 @@ async fn advance_goal_run<R: tauri::Runtime>(
     if start_ordinal <= GoalRunPhase::RuntimeExecution.ordinal() {
         // Re-fetch runtime_status here so it's always available regardless of whether
         // RuntimeConfiguration was skipped.
-        let runtime_status =
-            runtime_commands::get_runtime_status_impl(&state.db, &state.runtime_sessions, goal_run.project_id.clone()).await?;
+        let runtime_status = runtime_commands::get_runtime_status_impl(
+            &state.db,
+            &state.runtime_sessions,
+            goal_run.project_id.clone(),
+        )
+        .await?;
 
         log_event(
             &state.db,
@@ -1197,6 +1289,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         .map(|prev| prev == fingerprint)
                         .unwrap_or(false);
 
+                    let mut repair_blocker: Option<String> = None;
                     if current_retry < MAX_REPAIR_RETRIES && !same_failure {
                         goal_run = update_goal_run_state(
                             &state.db,
@@ -1217,8 +1310,13 @@ async fn advance_goal_run<R: tauri::Runtime>(
                             goal_run_id,
                             GoalRunPhase::RuntimeExecution,
                             GoalRunEventKind::RetryScheduled,
-                            &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
-                            Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                            &format!(
+                                "Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}",
+                                current_retry + 1
+                            ),
+                            Some(
+                                json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 }),
+                            ),
                         );
                         emit_phase_progress(
                             app_handle,
@@ -1236,9 +1334,15 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         )
                         .await
                         {
-                            Ok(RepairOutcome::Executed { .. })
-                            | Ok(RepairOutcome::Skipped { .. }) => continue 'runtime_execution,
-                            Ok(RepairOutcome::Failed { stage, error, decision_id }) => {
+                            Ok(RepairOutcome::Executed { .. }) => continue 'runtime_execution,
+                            Ok(outcome @ RepairOutcome::Skipped { .. }) => {
+                                repair_blocker = repair_outcome_blocker(&outcome);
+                            }
+                            Ok(RepairOutcome::Failed {
+                                stage,
+                                error,
+                                decision_id,
+                            }) => {
                                 warn!(
                                     goal_run_id,
                                     ?stage,
@@ -1246,6 +1350,8 @@ async fn advance_goal_run<R: tauri::Runtime>(
                                     repair_error = %error,
                                     "CTO repair agent failed"
                                 );
+                                repair_blocker =
+                                    Some(format!("CTO repair failed during {stage:?}: {error}"));
                             }
                             Err(repair_err) => {
                                 warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
@@ -1253,14 +1359,15 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         }
                     }
 
+                    let final_error = repair_blocker.unwrap_or_else(|| error.clone());
                     update_goal_run_state(
                         &state.db,
                         goal_run_id,
                         GoalRunUpdate {
                             phase: Some(GoalRunPhase::RuntimeExecution),
                             status: Some(GoalRunStatus::Blocked),
-                            blocker_reason: Some(Some(error.clone())),
-                            last_failure_summary: Some(Some(error.clone())),
+                            blocker_reason: Some(Some(final_error.clone())),
+                            last_failure_summary: Some(Some(final_error.clone())),
                             last_failure_fingerprint: Some(Some(fingerprint.clone())),
                             attention_required: Some(true),
                             ..Default::default()
@@ -1271,7 +1378,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         goal_run_id,
                         GoalRunPhase::RuntimeExecution,
                         GoalRunEventKind::Blocked,
-                        &error,
+                        &final_error,
                         Some(json!({ "fingerprint": fingerprint })),
                     );
                     return Ok(());
@@ -1298,33 +1405,62 @@ async fn advance_goal_run<R: tauri::Runtime>(
             "Verification started",
         );
 
-    'verification: loop {
-        let verification_result = runtime_commands::verify_runtime_impl(
-            &state.db,
-            &state.runtime_sessions,
-            goal_run.project_id.clone(),
-            cancel.clone(),
-        )
-        .await;
+        'verification: loop {
+            let verification_result = runtime_commands::verify_runtime_impl(
+                &state.db,
+                &state.runtime_sessions,
+                goal_run.project_id.clone(),
+                cancel.clone(),
+            )
+            .await;
 
-        let verification_result: VerificationResult = match verification_result {
-            Ok(result) => result,
-            Err(infra_error) => {
-                if cancel.is_cancelled() {
+            let verification_result: VerificationResult = match verification_result {
+                Ok(result) => result,
+                Err(infra_error) => {
+                    if cancel.is_cancelled() {
+                        return Ok(());
+                    }
+                    // Infrastructure error (runtime not running, spec missing) — blocked, no repair.
+                    let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &infra_error);
+                    update_goal_run_state(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunUpdate {
+                            phase: Some(GoalRunPhase::Verification),
+                            status: Some(GoalRunStatus::Blocked),
+                            blocker_reason: Some(Some(infra_error.clone())),
+                            last_failure_summary: Some(Some(infra_error.clone())),
+                            last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                            attention_required: Some(true),
+                            ..Default::default()
+                        },
+                    )?;
+                    log_event(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunPhase::Verification,
+                        GoalRunEventKind::Blocked,
+                        &infra_error,
+                        Some(json!({ "fingerprint": fingerprint })),
+                    );
                     return Ok(());
                 }
-                // Infrastructure error (runtime not running, spec missing) — blocked, no repair.
-                let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &infra_error);
+            };
+
+            let result_json = serde_json::to_string(&verification_result)
+                .unwrap_or_else(|_| verification_result.message.clone());
+
+            if verification_result.passed {
                 update_goal_run_state(
                     &state.db,
                     goal_run_id,
                     GoalRunUpdate {
                         phase: Some(GoalRunPhase::Verification),
-                        status: Some(GoalRunStatus::Blocked),
-                        blocker_reason: Some(Some(infra_error.clone())),
-                        last_failure_summary: Some(Some(infra_error.clone())),
-                        last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                        attention_required: Some(true),
+                        status: Some(GoalRunStatus::Completed),
+                        blocker_reason: Some(None),
+                        last_failure_summary: Some(None),
+                        verification_summary: Some(Some(result_json)),
+                        attention_required: Some(false),
                         ..Default::default()
                     },
                 )?;
@@ -1332,78 +1468,199 @@ async fn advance_goal_run<R: tauri::Runtime>(
                     &state.db,
                     goal_run_id,
                     GoalRunPhase::Verification,
-                    GoalRunEventKind::Blocked,
-                    &infra_error,
-                    Some(json!({ "fingerprint": fingerprint })),
+                    GoalRunEventKind::PhaseCompleted,
+                    "Verification completed",
+                    Some(json!({ "message": verification_result.message })),
                 );
+                emit_phase_progress(
+                    app_handle,
+                    goal_run_id,
+                    GoalRunPhase::Verification,
+                    PhaseProgressStatus::Completed,
+                    "Verification completed",
+                );
+                break 'verification;
+            }
+
+            // Verification check failure — attempt CTO repair (same pattern as RuntimeExecution).
+            if cancel.is_cancelled() {
                 return Ok(());
             }
-        };
+            let error = verification_result.message.clone();
+            let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &error);
+            let gate_run = {
+                let db = state.db.lock().map_err(|e| e.to_string())?;
+                db.get_goal_run(goal_run_id)?
+            };
+            let current_retry = gate_run.retry_count;
+            let operator_repair_requested = gate_run.operator_repair_requested;
+            let same_failure = goal_run
+                .last_failure_fingerprint
+                .as_deref()
+                .map(|prev| prev == fingerprint)
+                .unwrap_or(false);
 
-        let result_json = serde_json::to_string(&verification_result)
-            .unwrap_or_else(|_| verification_result.message.clone());
+            if operator_repair_requested || (current_retry < MAX_REPAIR_RETRIES && !same_failure) {
+                let next_retry_count = if operator_repair_requested {
+                    current_retry
+                } else {
+                    current_retry + 1
+                };
+                goal_run = update_goal_run_state(
+                    &state.db,
+                    goal_run_id,
+                    GoalRunUpdate {
+                        phase: Some(GoalRunPhase::Verification),
+                        status: Some(GoalRunStatus::Retrying),
+                        retry_count: Some(next_retry_count),
+                        last_failure_summary: Some(Some(error.clone())),
+                        last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                        verification_summary: Some(Some(result_json.clone())),
+                        blocker_reason: Some(None),
+                        attention_required: Some(false),
+                        operator_repair_requested: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                if operator_repair_requested {
+                    emit_phase_progress(
+                        app_handle,
+                        goal_run_id,
+                        GoalRunPhase::Verification,
+                        PhaseProgressStatus::Step,
+                        "Operator repair attempt",
+                    );
+                } else {
+                    log_event(
+                        &state.db,
+                        goal_run_id,
+                        GoalRunPhase::Verification,
+                        GoalRunEventKind::RetryScheduled,
+                        &format!(
+                            "Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}",
+                            current_retry + 1
+                        ),
+                        Some(
+                            json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 }),
+                        ),
+                    );
+                    emit_phase_progress(
+                        app_handle,
+                        goal_run_id,
+                        GoalRunPhase::Verification,
+                        PhaseProgressStatus::Step,
+                        format!("Repair attempt {}/{MAX_REPAIR_RETRIES}", current_retry + 1),
+                    );
+                }
+                match attempt_cto_repair(
+                    app_handle,
+                    &state.db,
+                    &goal_run,
+                    GoalRunPhase::Verification,
+                    &PhaseFailureContext::from_verification(&verification_result),
+                )
+                .await
+                {
+                    Ok(RepairOutcome::Executed { .. }) => continue 'verification,
+                    Ok(outcome @ RepairOutcome::Skipped { .. }) => {
+                        let repair_blocker = repair_outcome_blocker(&outcome)
+                            .unwrap_or_else(|| "CTO repair skipped".to_string());
+                        update_goal_run_state(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunUpdate {
+                                phase: Some(GoalRunPhase::Verification),
+                                status: Some(GoalRunStatus::Blocked),
+                                blocker_reason: Some(Some(repair_blocker.clone())),
+                                last_failure_summary: Some(Some(error.clone())),
+                                last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                                verification_summary: Some(Some(result_json)),
+                                attention_required: Some(true),
+                                operator_repair_requested: Some(false),
+                                ..Default::default()
+                            },
+                        )?;
+                        log_event(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunPhase::Verification,
+                            GoalRunEventKind::Blocked,
+                            &repair_blocker,
+                            Some(json!({ "fingerprint": fingerprint })),
+                        );
+                        return Ok(());
+                    }
+                    Ok(RepairOutcome::Failed {
+                        stage,
+                        error: repair_error,
+                        decision_id,
+                    }) => {
+                        warn!(
+                            goal_run_id,
+                            ?stage,
+                            decision_id = decision_id.as_deref().unwrap_or(""),
+                            repair_error = %repair_error,
+                            "CTO repair agent failed during verification"
+                        );
+                        let repair_blocker =
+                            format!("CTO repair failed during {stage:?}: {repair_error}");
+                        update_goal_run_state(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunUpdate {
+                                phase: Some(GoalRunPhase::Verification),
+                                status: Some(GoalRunStatus::Blocked),
+                                blocker_reason: Some(Some(repair_blocker.clone())),
+                                last_failure_summary: Some(Some(error.clone())),
+                                last_failure_fingerprint: Some(Some(fingerprint.clone())),
+                                verification_summary: Some(Some(result_json)),
+                                attention_required: Some(true),
+                                operator_repair_requested: Some(false),
+                                ..Default::default()
+                            },
+                        )?;
+                        log_event(
+                            &state.db,
+                            goal_run_id,
+                            GoalRunPhase::Verification,
+                            GoalRunEventKind::Blocked,
+                            &repair_blocker,
+                            Some(json!({ "fingerprint": fingerprint })),
+                        );
+                        return Ok(());
+                    }
+                    Err(repair_err) => {
+                        warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed during verification");
+                    }
+                }
+            } else {
+                let reason = if current_retry >= MAX_REPAIR_RETRIES {
+                    RepairSkipReason::RetryBudgetExhausted
+                } else {
+                    RepairSkipReason::RepeatedFailure
+                };
+                log_repair_not_attempted(
+                    &state.db,
+                    goal_run_id,
+                    GoalRunPhase::Verification,
+                    &error,
+                    &fingerprint,
+                    current_retry,
+                    reason,
+                );
+            }
 
-        if verification_result.passed {
             update_goal_run_state(
                 &state.db,
                 goal_run_id,
                 GoalRunUpdate {
                     phase: Some(GoalRunPhase::Verification),
-                    status: Some(GoalRunStatus::Completed),
-                    blocker_reason: Some(None),
-                    last_failure_summary: Some(None),
-                    verification_summary: Some(Some(result_json)),
-                    attention_required: Some(false),
-                    ..Default::default()
-                },
-            )?;
-            log_event(
-                &state.db,
-                goal_run_id,
-                GoalRunPhase::Verification,
-                GoalRunEventKind::PhaseCompleted,
-                "Verification completed",
-                Some(json!({ "message": verification_result.message })),
-            );
-            emit_phase_progress(
-                app_handle,
-                goal_run_id,
-                GoalRunPhase::Verification,
-                PhaseProgressStatus::Completed,
-                "Verification completed",
-            );
-            break 'verification;
-        }
-
-        // Verification check failure — attempt CTO repair (same pattern as RuntimeExecution).
-        if cancel.is_cancelled() {
-            return Ok(());
-        }
-        let error = verification_result.message.clone();
-        let fingerprint = failure_fingerprint(GoalRunPhase::Verification, &error);
-        let current_retry = {
-            let db = state.db.lock().map_err(|e| e.to_string())?;
-            db.get_goal_run(goal_run_id)?.retry_count
-        };
-        let same_failure = goal_run
-            .last_failure_fingerprint
-            .as_deref()
-            .map(|prev| prev == fingerprint)
-            .unwrap_or(false);
-
-        if current_retry < MAX_REPAIR_RETRIES && !same_failure {
-            goal_run = update_goal_run_state(
-                &state.db,
-                goal_run_id,
-                GoalRunUpdate {
-                    phase: Some(GoalRunPhase::Verification),
-                    status: Some(GoalRunStatus::Retrying),
-                    retry_count: Some(current_retry + 1),
+                    status: Some(GoalRunStatus::Blocked),
+                    blocker_reason: Some(Some(error.clone())),
                     last_failure_summary: Some(Some(error.clone())),
                     last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                    verification_summary: Some(Some(result_json.clone())),
-                    blocker_reason: Some(None),
-                    attention_required: Some(false),
+                    verification_summary: Some(Some(result_json)),
+                    attention_required: Some(true),
                     ..Default::default()
                 },
             )?;
@@ -1411,67 +1668,12 @@ async fn advance_goal_run<R: tauri::Runtime>(
                 &state.db,
                 goal_run_id,
                 GoalRunPhase::Verification,
-                GoalRunEventKind::RetryScheduled,
-                &format!("Repair attempt {}/{MAX_REPAIR_RETRIES}: {error}", current_retry + 1),
-                Some(json!({ "fingerprint": fingerprint, "retryCount": current_retry + 1 })),
+                GoalRunEventKind::Blocked,
+                &error,
+                Some(json!({ "fingerprint": fingerprint })),
             );
-            emit_phase_progress(
-                app_handle,
-                goal_run_id,
-                GoalRunPhase::Verification,
-                PhaseProgressStatus::Step,
-                format!("Repair attempt {}/{MAX_REPAIR_RETRIES}", current_retry + 1),
-            );
-            match attempt_cto_repair(
-                app_handle,
-                &state.db,
-                &goal_run,
-                GoalRunPhase::Verification,
-                &PhaseFailureContext::from_verification(&verification_result),
-            )
-            .await
-            {
-                Ok(RepairOutcome::Executed { .. })
-                | Ok(RepairOutcome::Skipped { .. }) => continue 'verification,
-                Ok(RepairOutcome::Failed { stage, error, decision_id }) => {
-                    warn!(
-                        goal_run_id,
-                        ?stage,
-                        decision_id = decision_id.as_deref().unwrap_or(""),
-                        repair_error = %error,
-                        "CTO repair agent failed during verification"
-                    );
-                }
-                Err(repair_err) => {
-                    warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed during verification");
-                }
-            }
+            return Ok(());
         }
-
-        update_goal_run_state(
-            &state.db,
-            goal_run_id,
-            GoalRunUpdate {
-                phase: Some(GoalRunPhase::Verification),
-                status: Some(GoalRunStatus::Blocked),
-                blocker_reason: Some(Some(error.clone())),
-                last_failure_summary: Some(Some(error.clone())),
-                last_failure_fingerprint: Some(Some(fingerprint.clone())),
-                verification_summary: Some(Some(result_json)),
-                attention_required: Some(true),
-                ..Default::default()
-            },
-        )?;
-        log_event(
-            &state.db,
-            goal_run_id,
-            GoalRunPhase::Verification,
-            GoalRunEventKind::Blocked,
-            &error,
-            Some(json!({ "fingerprint": fingerprint })),
-        );
-        return Ok(());
-    }
     } // end if start_ordinal <= Verification
 
     info!(goal_run_id = %goal_run_id, "Goal run executor finished");

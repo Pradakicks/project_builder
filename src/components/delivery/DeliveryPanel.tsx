@@ -265,6 +265,15 @@ const PHASE_LABELS: Record<string, string> = {
 const REPAIR_EVENT_KINDS = new Set([
   "retry-scheduled",
   "retry-resumed",
+  "repair-requested",
+  "repair-started",
+  "repair-skipped",
+  "repair-executed",
+  "repair-failed",
+]);
+
+const REPAIR_OUTCOME_EVENT_KINDS = new Set([
+  "repair-requested",
   "repair-started",
   "repair-skipped",
   "repair-executed",
@@ -375,7 +384,7 @@ export function DeliveryPanel() {
   const refreshRuntimeStatus = useGoalRunStore((s) => s.refreshRuntimeStatus);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
-  const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
+  const continueAutopilotWithRepair = useGoalRunStore((s) => s.continueAutopilotWithRepair);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
   const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
@@ -426,7 +435,7 @@ export function DeliveryPanel() {
   const repairEvents = useMemo(() => {
     const events = deliverySnapshot?.recentEvents ?? goalRunEvents;
     return [...events]
-      .filter((event) => REPAIR_EVENT_KINDS.has(event.kind))
+      .filter((event) => REPAIR_OUTCOME_EVENT_KINDS.has(event.kind))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [deliverySnapshot, goalRunEvents]);
 
@@ -484,7 +493,7 @@ export function DeliveryPanel() {
   const handleResumeGoal = async () => {
     if (!currentRun) return;
     try {
-      await continueAutopilot(currentRun.id);
+      await continueAutopilotWithRepair(currentRun.id);
     } catch (error) {
       addToast(`Failed to resume with repair: ${error}`, "warning");
     }
@@ -621,9 +630,14 @@ export function DeliveryPanel() {
                 </p>
                 {repairEvents.length > 0 && (
                   <p className="mt-1 text-amber-300/80">
-                    Latest repair event: {repairEvents[0]?.summary}
+                    Repair status: {repairEvents[0]?.summary}
                   </p>
                 )}
+                {(retryState?.retryCount ?? currentRun.retryCount) >= 3 ? (
+                  <p className="mt-1 text-gray-500">
+                    Automatic repair budget is exhausted; Resume with repair requests one operator repair attempt.
+                  </p>
+                ) : null}
               </div>
               {currentRun.runtimeStatusSummary ? (
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">

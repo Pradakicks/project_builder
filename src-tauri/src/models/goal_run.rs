@@ -310,6 +310,7 @@ pub enum GoalRunEventKind {
     PhaseCompleted,
     RetryScheduled,
     RetryResumed,
+    RepairRequested,
     RepairStarted,
     RepairSkipped,
     RepairExecuted,
@@ -348,6 +349,8 @@ pub struct GoalRun {
     pub attention_required: bool,
     #[serde(default)]
     pub last_heartbeat_at: Option<String>,
+    #[serde(default)]
+    pub operator_repair_requested: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -373,6 +376,8 @@ pub struct GoalRunRetryState {
     pub last_failure_summary: Option<String>,
     pub last_failure_fingerprint: Option<String>,
     pub attention_required: bool,
+    #[serde(default)]
+    pub operator_repair_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,4 +438,5 @@ pub struct GoalRunUpdate {
     pub last_failure_fingerprint: Option<Option<String>>,
     pub attention_required: Option<bool>,
     pub last_heartbeat_at: Option<Option<String>>,
+    pub operator_repair_requested: Option<bool>,
 }

@@ -68,6 +68,10 @@ export async function resumeGoalRun(goalRunId: string): Promise<GoalRun> {
   return loggedInvoke("resume_goal_run", { goalRunId });
 }
 
+export async function resumeGoalRunWithRepair(goalRunId: string): Promise<GoalRun> {
+  return loggedInvoke("resume_goal_run_with_repair", { goalRunId });
+}
+
 export async function stopGoalRun(goalRunId: string): Promise<GoalRun> {
   return loggedInvoke("stop_goal_run", { goalRunId });
 }

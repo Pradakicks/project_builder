@@ -56,7 +56,10 @@ pub fn run() {
         }
         let runtime_count = database.mark_runtime_sessions_orphaned().unwrap_or(0);
         if runtime_count > 0 {
-            info!(runtime_count, "Marked stale runtime sessions as orphaned on startup");
+            info!(
+                runtime_count,
+                "Marked stale runtime sessions as orphaned on startup"
+            );
         }
     }
 
@@ -101,6 +104,7 @@ pub fn run() {
             commands::goal_run_commands::update_goal_run,
             commands::goal_run_commands::get_goal_run_delivery_snapshot,
             commands::goal_run_commands::resume_goal_run,
+            commands::goal_run_commands::resume_goal_run_with_repair,
             commands::goal_run_commands::stop_goal_run,
             commands::goal_run_commands::pause_goal_run,
             commands::goal_run_commands::cancel_goal_run,
