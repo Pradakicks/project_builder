@@ -2738,6 +2738,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn log_scan_fails_on_forced_fatal_with_excerpt() {
+        let sessions = Mutex::new(HashMap::new());
+        let project_id = format!("forced-fatal-{}", uuid::Uuid::new_v4());
+        let spec = ProjectRuntimeSpec {
+            install_command: None,
+            run_command: "node server.js".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: None,
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: Some("http://127.0.0.1:3030".to_string()),
+            port_hint: Some(3030),
+            acceptance_suite: None,
+        };
+        let handle = create_runtime_handle(&project_id, &spec)
+            .await
+            .expect("create runtime handle");
+        append_runtime_log(&handle, "runtime", "spawning run command")
+            .await
+            .expect("append setup line");
+        append_runtime_log(&handle, "stdout", "FATAL: forced for test")
+            .await
+            .expect("append fatal line");
+        {
+            let mut session = handle.session.lock().await;
+            session.status = RuntimeSessionStatus::Running;
+        }
+        {
+            let mut guard = sessions.lock().expect("lock runtime sessions");
+            guard.insert(project_id.clone(), handle);
+        }
+
+        let check = run_log_scan_check(
+            "log scan -- fatal patterns",
+            &[r"(?i)FATAL".to_string()],
+            &LogScanMode::MustNotMatch,
+            200,
+            &project_id,
+            &sessions,
+        )
+        .await;
+
+        assert!(!check.passed);
+        assert_eq!(check.kind, CheckKind::LogScan);
+        assert!(check.detail.contains("matched forbidden /(?i)FATAL/"));
+        assert!(check
+            .actual
+            .as_deref()
+            .unwrap_or("")
+            .contains("FATAL: forced for test"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_status_falls_back_to_persisted_session_without_live_process() {
         let dir = temp_dir("persisted-status");
         let db_path = dir.join("data.db");

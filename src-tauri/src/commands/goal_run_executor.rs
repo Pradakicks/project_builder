@@ -1481,6 +1481,7 @@ async fn advance_goal_run<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn preview_text_truncates_long_strings() {
@@ -1521,5 +1522,85 @@ mod tests {
         assert_eq!(repair_context.retry_count, 2);
         assert_eq!(repair_context.failed_check_count, 1);
         assert_eq!(repair_context.prompt_preview, "prompt preview");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_with_no_actions_persists_skipped_event() {
+        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+        crate::llm::set_test_llm_responses(crate::llm::TestLlmResponses::default());
+
+        let workspace = std::env::temp_dir().join(format!(
+            "project-builder-repair-skip-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let db_path = workspace.join("data.db");
+        let db = Database::new_at_path(&db_path).expect("open db");
+        let state_db = Mutex::new(db);
+
+        let (project_id, goal_run) = {
+            let db = state_db.lock().expect("lock db");
+            let project = db
+                .create_project_with_settings(
+                    "Repair Skip",
+                    "No-actions repair path",
+                    crate::models::ProjectSettings {
+                        working_directory: Some(workspace.to_string_lossy().to_string()),
+                        ..Default::default()
+                    },
+                )
+                .expect("create project");
+            let goal_run = db
+                .create_goal_run(&project.id, "trigger repair")
+                .expect("create goal run");
+            (project.id, goal_run)
+        };
+
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+        app.manage(AppState {
+            db: state_db,
+            running_pieces: Mutex::new(HashSet::new()),
+            running_goal_runs: Mutex::new(HashSet::new()),
+            goal_run_cancels: Mutex::new(HashMap::new()),
+            runtime_sessions: Mutex::new(HashMap::new()),
+        });
+
+        let state = app_handle.state::<AppState>();
+        let outcome = attempt_cto_repair(
+            &app_handle,
+            &state.db,
+            &goal_run,
+            GoalRunPhase::Verification,
+            &PhaseFailureContext::from_summary("forced failure"),
+        )
+        .await
+        .expect("repair outcome");
+
+        match outcome {
+            RepairOutcome::Skipped {
+                reason: RepairSkipReason::NoActions,
+                decision_id: Some(_),
+            } => {}
+            other => panic!("expected no-actions skip, got {other:?}"),
+        }
+
+        let events = {
+            let db = state.db.lock().expect("lock db");
+            db.list_goal_run_events(&goal_run.id)
+                .expect("list goal run events")
+        };
+        let skipped = events
+            .iter()
+            .find(|event| event.kind == GoalRunEventKind::RepairSkipped)
+            .expect("repair skipped event");
+        assert!(skipped.summary.contains("no actions"));
+        assert!(skipped
+            .payload_json
+            .as_deref()
+            .unwrap_or("")
+            .contains(&project_id));
+
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }
