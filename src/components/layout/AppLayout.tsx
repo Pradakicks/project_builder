@@ -44,6 +44,11 @@ const ActivityFeed = lazy(() =>
     default: module.ActivityFeed,
   })),
 );
+const ProjectStatusBar = lazy(() =>
+  import("../monitoring/ProjectStatusBar").then((module) => ({
+    default: module.ProjectStatusBar,
+  })),
+);
 const AgentsPanel = lazy(() =>
   import("../agents/AgentsPanel").then((module) => ({
     default: module.AgentsPanel,
@@ -289,6 +294,14 @@ export function AppLayout() {
     <div className="flex h-full flex-col bg-gray-950 text-gray-100">
       <Toolbar />
       <Breadcrumbs />
+      <Suspense fallback={null}>
+        <ProjectStatusBar
+          onOpenTab={(tab) => {
+            setLeftTab(tab);
+            setLeftOpen(true);
+          }}
+        />
+      </Suspense>
       <div className="relative flex flex-1 overflow-hidden">
         <div className="flex w-72 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
           <div className="flex border-b border-gray-800">
