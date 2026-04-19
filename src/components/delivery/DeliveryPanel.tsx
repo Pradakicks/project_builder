@@ -262,6 +262,15 @@ const PHASE_LABELS: Record<string, string> = {
   "verification": "Verification",
 };
 
+const REPAIR_EVENT_KINDS = new Set([
+  "retry-scheduled",
+  "retry-resumed",
+  "repair-started",
+  "repair-skipped",
+  "repair-executed",
+  "repair-failed",
+]);
+
 function formatDuration(startedAt: string, endedAt: string): string {
   const ms = Date.parse(endedAt) - Date.parse(startedAt);
   if (ms < 0) return "";
@@ -320,7 +329,7 @@ function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): Pha
       } else if (e.kind === "cancelled-mid-phase") {
         endedAt = e.createdAt;
         outcome = "failed";
-      } else if (e.kind === "retry-scheduled") {
+      } else if (REPAIR_EVENT_KINDS.has(e.kind)) {
         repairSummaries.push(e.summary);
       }
     }
@@ -366,7 +375,7 @@ export function DeliveryPanel() {
   const refreshRuntimeStatus = useGoalRunStore((s) => s.refreshRuntimeStatus);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
-  const retryGoalRun = useGoalRunStore((s) => s.retryGoalRun);
+  const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
   const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
@@ -417,7 +426,7 @@ export function DeliveryPanel() {
   const repairEvents = useMemo(() => {
     const events = deliverySnapshot?.recentEvents ?? goalRunEvents;
     return [...events]
-      .filter((event) => event.kind === "retry-scheduled" || event.kind === "retry-resumed")
+      .filter((event) => REPAIR_EVENT_KINDS.has(event.kind))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [deliverySnapshot, goalRunEvents]);
 
@@ -475,7 +484,7 @@ export function DeliveryPanel() {
   const handleResumeGoal = async () => {
     if (!currentRun) return;
     try {
-      await retryGoalRun(currentRun.id);
+      await continueAutopilot(currentRun.id);
     } catch (error) {
       addToast(`Failed to resume with repair: ${error}`, "warning");
     }
