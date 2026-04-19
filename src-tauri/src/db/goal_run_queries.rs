@@ -510,16 +510,27 @@ mod tests {
                 None,
             )
             .expect("append second event");
+        let third = db
+            .append_goal_run_event(
+                &created.id,
+                GoalRunPhase::Verification,
+                GoalRunEventKind::RepairStarted,
+                "CTO repair agent started",
+                Some("{\"context\":{\"goalRunId\":\"goal-run-1\"}}"),
+            )
+            .expect("append third event");
 
         let events = db
             .list_goal_run_events(&created.id)
             .expect("list goal run events");
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].id, first.id);
         assert_eq!(events[0].kind, GoalRunEventKind::PhaseStarted);
         assert_eq!(events[0].payload_json.as_deref(), Some("{\"step\":1}"));
         assert_eq!(events[1].id, second.id);
         assert_eq!(events[1].kind, GoalRunEventKind::PhaseCompleted);
+        assert_eq!(events[2].id, third.id);
+        assert_eq!(events[2].kind, GoalRunEventKind::RepairStarted);
 
         cleanup(&db_path);
     }

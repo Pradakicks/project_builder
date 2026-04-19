@@ -4,8 +4,9 @@ use crate::commands::{cto_action_engine, runtime_commands};
 use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, Message};
 use crate::models::{
-    GoalRun, GoalRunEventKind, GoalRunPhase, GoalRunStatus, GoalRunUpdate, OutputMode, Phase,
-    PhaseFailureContext, VerificationResult, WorkPlan,
+    CtoDecisionExecution, CtoDecisionRecordInput, CtoDecisionReview, CtoDecisionStatus,
+    CtoRepairContext, GoalRun, GoalRunEventKind, GoalRunPhase, GoalRunStatus, GoalRunUpdate,
+    OutputMode, Phase, PhaseFailureContext, VerificationResult, WorkPlan,
 };
 use crate::AppState;
 use serde_json::{json, Value};
@@ -66,6 +67,165 @@ pub(crate) fn emit_phase_progress<R: tauri::Runtime>(
             step_total: None,
         },
     );
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairAttemptContext {
+    goal_run_id: String,
+    project_id: String,
+    phase: GoalRunPhase,
+    retry_count: i64,
+    failure_summary: String,
+    failed_check_count: usize,
+    passed_check_count: usize,
+    provider_name: String,
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    prompt_preview: String,
+    prompt_length: usize,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RepairSkipReason {
+    NoApiKey,
+    NoActions,
+    OnlyBlockedActions,
+    NoExecutableActions,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RepairFailureStage {
+    Chat,
+    Parse,
+    Execute,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RepairOutcome {
+    Skipped {
+        reason: RepairSkipReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_id: Option<String>,
+    },
+    Executed {
+        decision_id: String,
+        executed_actions: i64,
+        errors: Vec<String>,
+    },
+    Failed {
+        stage: RepairFailureStage,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_id: Option<String>,
+    },
+}
+
+fn repair_event_payload(
+    context: &RepairAttemptContext,
+    outcome: Option<&RepairOutcome>,
+) -> serde_json::Value {
+    match outcome {
+        Some(RepairOutcome::Skipped { reason, decision_id }) => json!({
+            "context": context,
+            "outcome": {
+                "kind": "skipped",
+                "reason": reason,
+                "decisionId": decision_id,
+            }
+        }),
+        Some(RepairOutcome::Executed {
+            decision_id,
+            executed_actions,
+            errors,
+        }) => json!({
+            "context": context,
+            "outcome": {
+                "kind": "executed",
+                "decisionId": decision_id,
+                "executedActions": executed_actions,
+                "errors": errors,
+            }
+        }),
+        Some(RepairOutcome::Failed {
+            stage,
+            error,
+            decision_id,
+        }) => json!({
+            "context": context,
+            "outcome": {
+                "kind": "failed",
+                "stage": stage,
+                "error": error,
+                "decisionId": decision_id,
+            }
+        }),
+        None => json!({
+            "context": context,
+        }),
+    }
+}
+
+fn repair_decision_review(
+    mut review: CtoDecisionReview,
+    context: &RepairAttemptContext,
+) -> CtoDecisionReview {
+    review.repair_context = Some(CtoRepairContext {
+        goal_run_id: context.goal_run_id.clone(),
+        phase: context.phase.clone(),
+        retry_count: context.retry_count,
+        provider_name: context.provider_name.clone(),
+        model: context.model.clone(),
+        base_url: context.base_url.clone(),
+        failure_summary: context.failure_summary.clone(),
+        failed_check_count: context.failed_check_count,
+        passed_check_count: context.passed_check_count,
+        prompt_preview: context.prompt_preview.clone(),
+        prompt_length: context.prompt_length,
+    });
+    review
+}
+
+fn preview_text(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.trim().to_string();
+    }
+
+    let mut preview: String = text.chars().take(max_chars).collect();
+    preview.push_str(&format!("…[truncated {} more chars]", total_chars - max_chars));
+    preview
+}
+
+fn repair_summary(phase: &GoalRunPhase) -> String {
+    format!(
+        "Autonomous CTO repair during {}",
+        serde_json::to_string(phase)
+            .unwrap_or_default()
+            .trim_matches('"')
+    )
+}
+
+fn persist_repair_decision(
+    db: &Mutex<Database>,
+    project_id: &str,
+    review: CtoDecisionReview,
+    execution: Option<CtoDecisionExecution>,
+    status: CtoDecisionStatus,
+    summary: &str,
+) -> Result<crate::models::CtoDecision, String> {
+    let decision = CtoDecisionRecordInput {
+        summary: summary.to_string(),
+        review,
+        execution,
+        status,
+    };
+    let db = db.lock().map_err(|e| e.to_string())?;
+    db.insert_cto_decision(project_id, &decision)
 }
 
 
@@ -152,19 +312,20 @@ const MAX_REPAIR_RETRIES: i64 = 3;
 ///
 /// Calls the CTO LLM with the failure context, parses any action blocks,
 /// executes fix-up actions (excluding runPiece / runAllTasks / retryGoalStep,
-/// which the executor handles itself by re-running the phase), and returns
-/// `true` when at least one action was executed.
+/// which the executor handles itself by re-running the phase), and returns a
+/// structured outcome describing whether the repair was skipped, executed, or
+/// failed.
 async fn attempt_cto_repair<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     db: &Mutex<Database>,
     goal_run: &GoalRun,
     phase: GoalRunPhase,
     failure: &PhaseFailureContext,
-) -> Result<bool, String> {
+) -> Result<RepairOutcome, String> {
     let state = app_handle.state::<AppState>();
 
     // Resolve LLM config
-    let (messages, provider_name, api_key, model, base_url) = {
+    let (messages, context, api_key) = {
         let db = db.lock().map_err(|e| e.to_string())?;
         let project = db.get_project(&goal_run.project_id)?;
         let (provider_name, api_key, model, base_url) =
@@ -174,55 +335,157 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
         let mut messages: Vec<Message> = agent::build_cto_prompt(&db, &goal_run.project_id);
 
         // Append the repair user turn built from structured failure context.
+        let repair_prompt = build_repair_prompt(phase.clone(), failure);
         messages.push(Message {
             role: "user".to_string(),
-            content: build_repair_prompt(phase.clone(), failure),
+            content: repair_prompt.clone(),
         });
 
-        (messages, provider_name, api_key, model, base_url)
+        let context = RepairAttemptContext {
+            goal_run_id: goal_run.id.clone(),
+            project_id: goal_run.project_id.clone(),
+            phase: phase.clone(),
+            retry_count: goal_run.retry_count,
+            failure_summary: failure.summary.trim().to_string(),
+            failed_check_count: failure.failed_checks.len(),
+            passed_check_count: failure.passed_checks.len(),
+            provider_name,
+            model: model.clone(),
+            base_url,
+            prompt_preview: preview_text(&repair_prompt, 900),
+            prompt_length: repair_prompt.chars().count(),
+        };
+
+        (messages, context, api_key)
     };
 
     if api_key.is_empty() {
+        let outcome = RepairOutcome::Skipped {
+            reason: RepairSkipReason::NoApiKey,
+            decision_id: None,
+        };
         warn!(
             goal_run_id = %goal_run.id,
-            provider = %provider_name,
+            provider = %context.provider_name,
             "No API key available for CTO repair agent — skipping repair"
         );
-        return Ok(false);
+        log_event(
+            &state.db,
+            goal_run.id.as_str(),
+            phase.clone(),
+            GoalRunEventKind::RepairSkipped,
+            "CTO repair agent skipped: no API key available",
+            Some(repair_event_payload(&context, Some(&outcome))),
+        );
+        return Ok(outcome);
     }
 
-    let provider = llm::create_provider(&provider_name);
+    log_event(
+        &state.db,
+        goal_run.id.as_str(),
+        phase.clone(),
+        GoalRunEventKind::RepairStarted,
+        "CTO repair agent started",
+        Some(repair_event_payload(&context, None)),
+    );
+
+    let provider = llm::create_provider(&context.provider_name);
     let config = LlmConfig {
         api_key,
-        model,
-        base_url,
+        model: context.model.clone(),
+        base_url: context.base_url.clone(),
         max_tokens: 4096,
     };
 
     info!(
         goal_run_id = %goal_run.id,
         phase = ?phase,
-        failed_check_count = failure.failed_checks.len(),
-        passed_check_count = failure.passed_checks.len(),
+        failed_check_count = context.failed_check_count,
+        passed_check_count = context.passed_check_count,
         "Calling CTO repair agent"
     );
 
-    let response = provider.chat(&messages, &config).await?;
+    let response = match provider.chat(&messages, &config).await {
+        Ok(response) => response,
+        Err(error) => {
+            let outcome = RepairOutcome::Failed {
+                stage: RepairFailureStage::Chat,
+                error: error.to_string(),
+                decision_id: None,
+            };
+            log_event(
+                &state.db,
+                goal_run.id.as_str(),
+                phase.clone(),
+                GoalRunEventKind::RepairFailed,
+                "CTO repair agent failed while calling the model",
+                Some(repair_event_payload(&context, Some(&outcome))),
+            );
+            return Ok(outcome);
+        }
+    };
     let assistant_text = response.content;
 
     // Parse action blocks from the CTO response
-    let review = cto_action_engine::review_cto_actions_impl(&assistant_text)?;
+    let review = match cto_action_engine::review_cto_actions_impl(&assistant_text) {
+        Ok(review) => review,
+        Err(error) => {
+            let outcome = RepairOutcome::Failed {
+                stage: RepairFailureStage::Parse,
+                error: error.to_string(),
+                decision_id: None,
+            };
+            log_event(
+                &state.db,
+                goal_run.id.as_str(),
+                phase.clone(),
+                GoalRunEventKind::RepairFailed,
+                "CTO repair agent failed while parsing the model response",
+                Some(repair_event_payload(&context, Some(&outcome))),
+            );
+            return Ok(outcome);
+        }
+    };
+    let review_with_context = repair_decision_review(review.clone(), &context);
 
     if review.actions.is_empty() {
+        let decision = persist_repair_decision(
+            db,
+            &goal_run.project_id,
+            review_with_context,
+            None,
+            CtoDecisionStatus::Rejected,
+            &repair_summary(&phase),
+        )?;
+        let outcome = RepairOutcome::Skipped {
+            reason: RepairSkipReason::NoActions,
+            decision_id: Some(decision.id.clone()),
+        };
         info!(
             goal_run_id = %goal_run.id,
             "CTO repair agent returned no actions"
         );
-        return Ok(false);
+        log_event(
+            &state.db,
+            goal_run.id.as_str(),
+            phase.clone(),
+            GoalRunEventKind::RepairSkipped,
+            "CTO repair agent returned no actions",
+            Some(repair_event_payload(&context, Some(&outcome))),
+        );
+        return Ok(outcome);
     }
 
     // Filter out actions that conflict with the executor's own control flow
     let blocked_actions: &[&str] = &["runPiece", "runAllTasks", "retryGoalStep"];
+    let _blocked_action_count = review
+        .actions
+        .iter()
+        .filter(|action| {
+            let name = action.get("action").and_then(Value::as_str).unwrap_or("");
+            blocked_actions.contains(&name)
+        })
+        .count();
     let filtered_actions: Vec<Value> = review
         .actions
         .into_iter()
@@ -233,27 +496,118 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
         .collect();
 
     if filtered_actions.is_empty() {
+        let decision = persist_repair_decision(
+            db,
+            &goal_run.project_id,
+            review_with_context,
+            None,
+            CtoDecisionStatus::Rejected,
+            &repair_summary(&phase),
+        )?;
+        let reason = if review.validation_errors.is_empty() {
+            RepairSkipReason::OnlyBlockedActions
+        } else {
+            RepairSkipReason::NoExecutableActions
+        };
+        let outcome = RepairOutcome::Skipped {
+            reason,
+            decision_id: Some(decision.id.clone()),
+        };
         info!(
             goal_run_id = %goal_run.id,
             "CTO repair agent only proposed execution actions — retrying phase without changes"
         );
-        return Ok(false);
+        log_event(
+            &state.db,
+            goal_run.id.as_str(),
+            phase.clone(),
+            GoalRunEventKind::RepairSkipped,
+            "CTO repair agent only proposed execution actions",
+            Some(repair_event_payload(&context, Some(&outcome))),
+        );
+        return Ok(outcome);
     }
 
-    let filtered_review = crate::models::CtoDecisionReview {
-        assistant_text: review.assistant_text,
-        cleaned_content: review.cleaned_content,
+    let filtered_review = CtoDecisionReview {
+        assistant_text: review_with_context.assistant_text.clone(),
+        cleaned_content: review_with_context.cleaned_content.clone(),
         actions: filtered_actions,
-        validation_errors: review.validation_errors,
+        validation_errors: review_with_context.validation_errors.clone(),
+        repair_context: review_with_context.repair_context.clone(),
     };
 
-    let result = cto_action_engine::execute_cto_actions_impl(
+    let result = match cto_action_engine::execute_cto_actions_impl(
         &state.db,
         app_handle,
         goal_run.project_id.clone(),
-        filtered_review,
+        filtered_review.clone(),
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let decision = persist_repair_decision(
+                db,
+                &goal_run.project_id,
+                filtered_review.clone(),
+                None,
+                CtoDecisionStatus::Failed,
+                &repair_summary(&phase),
+            )?;
+            let outcome = RepairOutcome::Failed {
+                stage: RepairFailureStage::Execute,
+                error: error.clone(),
+                decision_id: Some(decision.id.clone()),
+            };
+            log_event(
+                &state.db,
+                goal_run.id.as_str(),
+                phase.clone(),
+                GoalRunEventKind::RepairFailed,
+                "CTO repair agent failed while executing actions",
+                Some(repair_event_payload(&context, Some(&outcome))),
+            );
+            return Ok(outcome);
+        }
+    };
+
+    let decision_status = if result.executed == 0 && result.errors.is_empty() {
+        CtoDecisionStatus::Rejected
+    } else if result.errors.is_empty() {
+        CtoDecisionStatus::Executed
+    } else {
+        CtoDecisionStatus::Failed
+    };
+    let decision = persist_repair_decision(
+        db,
+        &goal_run.project_id,
+        filtered_review.clone(),
+        Some(result.clone()),
+        decision_status,
+        &repair_summary(&phase),
+    )?;
+
+    if result.executed == 0 && result.errors.is_empty() {
+        let outcome = RepairOutcome::Skipped {
+            reason: RepairSkipReason::NoExecutableActions,
+            decision_id: Some(decision.id.clone()),
+        };
+        log_event(
+            &state.db,
+            goal_run.id.as_str(),
+            phase.clone(),
+            GoalRunEventKind::RepairSkipped,
+            "CTO repair agent executed no actions",
+            Some(repair_event_payload(&context, Some(&outcome))),
+        );
+        return Ok(outcome);
+    }
+
+    let outcome = RepairOutcome::Executed {
+        decision_id: decision.id.clone(),
+        executed_actions: result.executed,
+        errors: result.errors.clone(),
+    };
 
     info!(
         goal_run_id = %goal_run.id,
@@ -262,7 +616,16 @@ async fn attempt_cto_repair<R: tauri::Runtime>(
         "CTO repair agent executed actions"
     );
 
-    Ok(result.executed > 0)
+    log_event(
+        &state.db,
+        goal_run.id.as_str(),
+        phase,
+        GoalRunEventKind::RepairExecuted,
+        "CTO repair agent executed actions",
+        Some(repair_event_payload(&context, Some(&outcome))),
+    );
+
+    Ok(outcome)
 }
 
 /// RAII guard that owns the executor's slot in `running_goal_runs` and
@@ -618,7 +981,17 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         )
                         .await
                         {
-                            Ok(_) => continue 'implementation,
+                            Ok(RepairOutcome::Executed { .. })
+                            | Ok(RepairOutcome::Skipped { .. }) => continue 'implementation,
+                            Ok(RepairOutcome::Failed { stage, error, decision_id }) => {
+                                warn!(
+                                    goal_run_id,
+                                    ?stage,
+                                    decision_id = decision_id.as_deref().unwrap_or(""),
+                                    repair_error = %error,
+                                    "CTO repair agent failed"
+                                );
+                            }
                             Err(repair_err) => {
                                 warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
                             }
@@ -863,7 +1236,17 @@ async fn advance_goal_run<R: tauri::Runtime>(
                         )
                         .await
                         {
-                            Ok(_) => continue 'runtime_execution,
+                            Ok(RepairOutcome::Executed { .. })
+                            | Ok(RepairOutcome::Skipped { .. }) => continue 'runtime_execution,
+                            Ok(RepairOutcome::Failed { stage, error, decision_id }) => {
+                                warn!(
+                                    goal_run_id,
+                                    ?stage,
+                                    decision_id = decision_id.as_deref().unwrap_or(""),
+                                    repair_error = %error,
+                                    "CTO repair agent failed"
+                                );
+                            }
                             Err(repair_err) => {
                                 warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed");
                             }
@@ -1048,7 +1431,17 @@ async fn advance_goal_run<R: tauri::Runtime>(
             )
             .await
             {
-                Ok(_) => continue 'verification,
+                Ok(RepairOutcome::Executed { .. })
+                | Ok(RepairOutcome::Skipped { .. }) => continue 'verification,
+                Ok(RepairOutcome::Failed { stage, error, decision_id }) => {
+                    warn!(
+                        goal_run_id,
+                        ?stage,
+                        decision_id = decision_id.as_deref().unwrap_or(""),
+                        repair_error = %error,
+                        "CTO repair agent failed during verification"
+                    );
+                }
                 Err(repair_err) => {
                     warn!(goal_run_id, repair_err = %repair_err, "CTO repair agent failed during verification");
                 }
@@ -1083,4 +1476,50 @@ async fn advance_goal_run<R: tauri::Runtime>(
 
     info!(goal_run_id = %goal_run_id, "Goal run executor finished");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_text_truncates_long_strings() {
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let preview = preview_text(text, 10);
+        assert!(preview.starts_with("abcdefghij"));
+        assert!(preview.contains("truncated 16 more chars"));
+    }
+
+    #[test]
+    fn repair_decision_review_attaches_sanitized_context() {
+        let review = CtoDecisionReview {
+            assistant_text: "assistant".to_string(),
+            cleaned_content: "clean".to_string(),
+            actions: vec![],
+            validation_errors: vec![],
+            repair_context: None,
+        };
+        let context = RepairAttemptContext {
+            goal_run_id: "goal-run-1".to_string(),
+            project_id: "project-1".to_string(),
+            phase: GoalRunPhase::Verification,
+            retry_count: 2,
+            failure_summary: "verification failed".to_string(),
+            failed_check_count: 1,
+            passed_check_count: 0,
+            provider_name: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            base_url: Some("https://example.invalid".to_string()),
+            prompt_preview: "prompt preview".to_string(),
+            prompt_length: 14,
+        };
+
+        let reviewed = repair_decision_review(review, &context);
+        let repair_context = reviewed.repair_context.expect("repair context");
+        assert_eq!(repair_context.goal_run_id, "goal-run-1");
+        assert_eq!(repair_context.phase, GoalRunPhase::Verification);
+        assert_eq!(repair_context.retry_count, 2);
+        assert_eq!(repair_context.failed_check_count, 1);
+        assert_eq!(repair_context.prompt_preview, "prompt preview");
+    }
 }

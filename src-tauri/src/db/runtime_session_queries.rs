@@ -118,18 +118,21 @@ impl Database {
         }))
     }
 
-    pub fn mark_runtime_sessions_interrupted(&self) -> Result<usize, String> {
+    pub fn mark_runtime_sessions_orphaned(&self) -> Result<usize, String> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn
             .execute(
                 "UPDATE runtime_sessions
-                 SET status = 'stopped',
-                     last_error = COALESCE(last_error, 'Runtime session interrupted when the app closed'),
-                     ended_at = COALESCE(ended_at, ?1),
+                 SET status = 'orphaned',
+                     last_error = COALESCE(last_error, 'Runtime session became orphaned when the app closed'),
                      updated_at = ?1
                  WHERE status IN ('running', 'starting', 'stopping')",
                 params![now],
             )
             .map_err(|e| e.to_string())
+    }
+
+    pub fn mark_runtime_sessions_interrupted(&self) -> Result<usize, String> {
+        self.mark_runtime_sessions_orphaned()
     }
 }

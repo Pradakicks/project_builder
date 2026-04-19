@@ -360,6 +360,7 @@ pub(crate) fn review_cto_actions_impl(assistant_text: &str) -> Result<CtoDecisio
         cleaned_content: strip_action_blocks(assistant_text),
         actions,
         validation_errors,
+        repair_context: None,
     })
 }
 

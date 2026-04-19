@@ -621,6 +621,144 @@ fn resolve_runtime_url(spec: &ProjectRuntimeSpec) -> Option<String> {
         .or_else(|| spec.port_hint.map(|port| format!("http://127.0.0.1:{port}")))
 }
 
+fn is_managed_runtime_status(status: &RuntimeSessionStatus) -> bool {
+    matches!(
+        status,
+        RuntimeSessionStatus::Starting
+            | RuntimeSessionStatus::Running
+            | RuntimeSessionStatus::Stopping
+    )
+}
+
+fn runtime_session_detail(session: &ProjectRuntimeSession) -> String {
+    session.last_error.clone().unwrap_or_else(|| match session.status {
+        RuntimeSessionStatus::Orphaned => {
+            "Runtime session is orphaned after the app restarted".to_string()
+        }
+        RuntimeSessionStatus::Failed => {
+            "Runtime session failed without a recorded error".to_string()
+        }
+        _ => "Runtime session has no recorded error".to_string(),
+    })
+}
+
+fn verification_blocker_message(session: Option<&ProjectRuntimeSession>) -> String {
+    match session {
+        None => "No runtime session exists for this project".to_string(),
+        Some(session) => match session.status {
+            RuntimeSessionStatus::Starting => {
+                "Runtime is still starting; wait until it is running before verification".to_string()
+            }
+            RuntimeSessionStatus::Running => {
+                "Runtime must be running under the current app session before verification".to_string()
+            }
+            RuntimeSessionStatus::Stopping => {
+                "Runtime is stopping; start it again before verification".to_string()
+            }
+            RuntimeSessionStatus::Stopped => {
+                "Runtime is stopped; start it before verification".to_string()
+            }
+            RuntimeSessionStatus::Failed => {
+                format!(
+                    "Runtime failed before verification: {}",
+                    runtime_session_detail(session)
+                )
+            }
+            RuntimeSessionStatus::Orphaned => {
+                format!(
+                    "Runtime session is orphaned and unmanaged: {}",
+                    runtime_session_detail(session)
+                )
+            }
+            RuntimeSessionStatus::Idle => {
+                "Runtime is idle; start it before verification".to_string()
+            }
+        },
+    }
+}
+
+async fn port_is_occupied(port: u16) -> Result<bool, String> {
+    match timeout(
+        Duration::from_secs(1),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(_)) => Ok(false),
+        Err(_) => Ok(true),
+    }
+}
+
+fn port_conflict_message(
+    port: u16,
+    latest_session: Option<&ProjectRuntimeSession>,
+) -> String {
+    match latest_session {
+        Some(session) if session.port_hint == Some(port) && is_managed_runtime_status(&session.status) => {
+            format!(
+                "Port {port} is already in use by runtime session {}. Stop the existing runtime or free the port before starting again.",
+                session.session_id
+            )
+        }
+        Some(session)
+            if session.port_hint == Some(port) && matches!(session.status, RuntimeSessionStatus::Orphaned) =>
+        {
+            format!(
+                "Port {port} is still held by orphaned runtime session {}. Stop or release the orphaned process before starting again.",
+                session.session_id
+            )
+        }
+        Some(session) if session.port_hint == Some(port) => {
+            format!(
+                "Port {port} is already in use and the latest runtime session {} is {:?}.",
+                session.session_id,
+                session.status
+            )
+        }
+        _ => format!(
+            "Port {port} is already in use. Free the port or change the runtime portHint before starting."
+        ),
+    }
+}
+
+async fn preflight_runtime_port(
+    state_db: &std::sync::Mutex<Database>,
+    project_id: &str,
+    port: u16,
+) -> Result<(), String> {
+    if !port_is_occupied(port).await? {
+        return Ok(());
+    }
+
+    let latest_session = {
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        db.latest_runtime_session(project_id)?
+            .map(|record| record.session)
+    };
+
+    Err(port_conflict_message(port, latest_session.as_ref()))
+}
+
+async fn normalize_orphaned_runtime_session(
+    state_db: &std::sync::Mutex<Database>,
+    project_id: &str,
+    mut session: ProjectRuntimeSession,
+) -> Result<ProjectRuntimeSession, String> {
+    if is_managed_runtime_status(&session.status) {
+        session.status = RuntimeSessionStatus::Orphaned;
+        session.updated_at = now();
+        if session.last_error.is_none() {
+            session.last_error = Some("Runtime session became orphaned when the app restarted".to_string());
+        }
+
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        let _ = db.upsert_runtime_session(project_id, None, &session)?;
+    }
+
+    Ok(session)
+}
+
 fn shell_command(shell_cmd: &str, working_dir: &Path) -> Command {
     let mut cmd = if cfg!(windows) {
         let mut command = Command::new("cmd");
@@ -876,8 +1014,23 @@ pub(crate) async fn current_runtime_status(
             Some(session)
         }
         None => {
-            let db = db.lock().map_err(|e| e.to_string())?;
-            db.latest_runtime_session(project_id)?.map(|record| record.session)
+            let record = {
+                let db = db.lock().map_err(|e| e.to_string())?;
+                db.latest_runtime_session(project_id)?
+            };
+
+            match record {
+                Some(record) => {
+                    let session = normalize_orphaned_runtime_session(
+                        db,
+                        project_id,
+                        record.session,
+                    )
+                    .await?;
+                    Some(session)
+                }
+                None => None,
+            }
         }
     };
 
@@ -889,6 +1042,7 @@ pub(crate) async fn current_runtime_status(
 }
 
 pub(crate) async fn start_runtime_session(
+    state_db: &std::sync::Mutex<Database>,
     project: &Project,
     spec: &ProjectRuntimeSpec,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
@@ -927,6 +1081,10 @@ pub(crate) async fn start_runtime_session(
                 session: Some(session),
             });
         }
+    }
+
+    if let Some(port) = spec.port_hint {
+        preflight_runtime_port(state_db, &project.id, port).await?;
     }
 
     let handle = create_runtime_handle(&project.id, spec).await?;
@@ -1293,7 +1451,7 @@ pub(crate) async fn start_runtime_impl(
         .ok_or_else(|| "Project runtime is not configured".to_string())?;
 
     debug!(project_id = %project_id, "Starting runtime session");
-    let status = start_runtime_session(&project, &spec, runtime_sessions).await?;
+    let status = start_runtime_session(state_db, &project, &spec, runtime_sessions).await?;
     if let Some(ref session) = status.session {
         let db = state_db.lock().map_err(|e| e.to_string())?;
         let _ = db.upsert_runtime_session(&project.id, None, session);
@@ -1439,11 +1597,12 @@ pub(crate) async fn verify_runtime_impl(
     let working_directory = PathBuf::from(working_directory);
 
     let status = current_runtime_status(state_db, runtime_sessions, &project_id).await?;
-    if !matches!(
-        status.session.as_ref().map(|session| &session.status),
-        Some(RuntimeSessionStatus::Running)
-    ) {
-        return Err("Runtime must be running before verification".to_string());
+    if let Some(session) = status.session.as_ref() {
+        if !matches!(session.status, RuntimeSessionStatus::Running) {
+            return Err(verification_blocker_message(Some(session)));
+        }
+    } else {
+        return Err(verification_blocker_message(None));
     }
 
     let suite = spec
@@ -1994,7 +2153,7 @@ async fn run_log_scan_check(
             expected,
             actual: Some(format!("0 matches over {} lines", lines.len())),
         },
-        (LogScanMode::MustNotMatch, Some((idx, pattern, line))) => {
+        (LogScanMode::MustNotMatch, Some((idx, pattern, _line))) => {
             let start = idx.saturating_sub(3);
             let excerpt = lines[start..=idx].join("\n");
             VerificationCheck {
@@ -2634,7 +2793,20 @@ mod tests {
             .expect("load runtime status");
         let status_session = status.session.expect("runtime status session");
         assert_eq!(status_session.session_id, session_id);
-        assert_eq!(status_session.status, RuntimeSessionStatus::Running);
+        assert_eq!(status_session.status, RuntimeSessionStatus::Orphaned);
+        assert!(status_session
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("orphaned"));
+
+        let persisted_after = {
+            let db = state_db.lock().expect("lock db");
+            db.latest_runtime_session(&project.id)
+                .expect("load persisted session")
+                .expect("persisted runtime session")
+        };
+        assert_eq!(persisted_after.session.status, RuntimeSessionStatus::Orphaned);
 
         if let Some(mut child) = detached_handle.child.lock().await.take() {
             let _ = child.start_kill();
@@ -2642,6 +2814,57 @@ mod tests {
         }
 
         cleanup(&db_path);
+    }
+
+    #[test]
+    fn verification_blocker_messages_distinguish_runtime_states() {
+        assert_eq!(
+            verification_blocker_message(None),
+            "No runtime session exists for this project"
+        );
+
+        let stopped = ProjectRuntimeSession {
+            session_id: "stopped".to_string(),
+            status: RuntimeSessionStatus::Stopped,
+            started_at: None,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            ended_at: Some("2024-01-01T00:01:00Z".to_string()),
+            url: None,
+            port_hint: None,
+            log_path: None,
+            recent_logs: vec![],
+            last_error: None,
+            exit_code: None,
+            pid: None,
+        };
+        let failed = ProjectRuntimeSession { last_error: Some("boom".to_string()), status: RuntimeSessionStatus::Failed, ..stopped.clone() };
+        let orphaned = ProjectRuntimeSession { last_error: Some("lost handle".to_string()), status: RuntimeSessionStatus::Orphaned, ..stopped };
+
+        assert!(verification_blocker_message(Some(&failed)).contains("failed before verification"));
+        assert!(verification_blocker_message(Some(&orphaned)).contains("orphaned and unmanaged"));
+        assert!(verification_blocker_message(Some(&orphaned)).contains("lost handle"));
+    }
+
+    #[test]
+    fn port_conflict_message_distinguishes_orphaned_runtime_sessions() {
+        let session = ProjectRuntimeSession {
+            session_id: "sess-1".to_string(),
+            status: RuntimeSessionStatus::Orphaned,
+            started_at: None,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            url: Some("http://127.0.0.1:3000".to_string()),
+            port_hint: Some(3000),
+            log_path: None,
+            recent_logs: vec![],
+            last_error: Some("stale process".to_string()),
+            exit_code: None,
+            pid: None,
+        };
+
+        let message = port_conflict_message(3000, Some(&session));
+        assert!(message.contains("orphaned runtime session"));
+        assert!(message.contains("sess-1"));
     }
 
     fn write_file(dir: &Path, name: &str, content: &str) {

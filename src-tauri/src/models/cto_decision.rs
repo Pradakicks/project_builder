@@ -1,4 +1,4 @@
-use crate::models::{Connection, Piece, PlanStatus};
+use crate::models::{Connection, GoalRunPhase, Piece, PlanStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,6 +18,28 @@ pub struct CtoDecisionReview {
     pub cleaned_content: String,
     pub actions: Vec<Value>,
     pub validation_errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_context: Option<CtoRepairContext>,
+}
+
+/// Sanitized evidence describing an autonomous CTO repair attempt.
+/// Stored inside `review_json` for CTO decisions so a repair attempt can be
+/// reconstructed without exposing secrets or full raw prompts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CtoRepairContext {
+    pub goal_run_id: String,
+    pub phase: GoalRunPhase,
+    pub retry_count: i64,
+    pub provider_name: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    pub failure_summary: String,
+    pub failed_check_count: usize,
+    pub passed_check_count: usize,
+    pub prompt_preview: String,
+    pub prompt_length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

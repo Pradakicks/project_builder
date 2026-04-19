@@ -286,6 +286,10 @@ export type GoalRunEventKind =
   | "phase-completed"
   | "retry-scheduled"
   | "retry-resumed"
+  | "repair-started"
+  | "repair-skipped"
+  | "repair-executed"
+  | "repair-failed"
   | "blocked"
   | "failed"
   | "stopped"
@@ -471,6 +475,21 @@ export interface CtoDecisionReview {
   cleanedContent: string;
   actions: CtoAction[];
   validationErrors: string[];
+  repairContext?: CtoRepairContext | null;
+}
+
+export interface CtoRepairContext {
+  goalRunId: string;
+  phase: GoalRunPhase;
+  retryCount: number;
+  providerName: string;
+  model: string;
+  baseUrl?: string | null;
+  failureSummary: string;
+  failedCheckCount: number;
+  passedCheckCount: number;
+  promptPreview: string;
+  promptLength: number;
 }
 
 export interface CtoDecisionExecution {
@@ -730,6 +749,8 @@ export interface DebugReport {
   runtime: DebugReportRuntime | null;
   /** Null when no active goal run. */
   goalRun: DebugReportGoalRun | null;
+  /** Recent CTO decisions for the active project, including autonomous repairs. */
+  ctoDecisions: CtoDecision[] | null;
   /** Last 50 toast messages (both auto-expired and manually dismissed). */
   toasts: DebugReportToast[];
   lastScenario: CapturedScenario | null;

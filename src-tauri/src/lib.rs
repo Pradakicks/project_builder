@@ -54,9 +54,9 @@ pub fn run() {
         if count > 0 {
             info!(count, "Marked stale goal runs as interrupted on startup");
         }
-        let runtime_count = database.mark_runtime_sessions_interrupted().unwrap_or(0);
+        let runtime_count = database.mark_runtime_sessions_orphaned().unwrap_or(0);
         if runtime_count > 0 {
-            info!(runtime_count, "Marked stale runtime sessions on startup");
+            info!(runtime_count, "Marked stale runtime sessions as orphaned on startup");
         }
     }
 

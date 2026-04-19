@@ -8,6 +8,7 @@ import type {
 import * as runtimeApi from "../api/runtimeApi";
 import * as goalRunApi from "../api/goalRunApi";
 import * as debugApi from "../api/debugApi";
+import * as ctoApi from "../api/ctoApi";
 import { useToastStore } from "./useToastStore";
 import { useGoalRunStore } from "./useGoalRunStore";
 
@@ -122,17 +123,22 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
     const backendTailPromise = debugApi.readDebugLogTail(200).catch(() => null);
     const scenariosPromise = debugApi.listDebugScenarios().catch(() => []);
+    const ctoDecisionsPromise = activeProjectId
+      ? ctoApi.listCtoDecisions(activeProjectId).catch(() => null)
+      : Promise.resolve(null);
 
     const [
       [runtimeStatus, runtimeLogTail],
       deliverySnapshot,
       backendLogTail,
       scenarios,
+      ctoDecisions,
     ] = await Promise.all([
       runtimePromise,
       snapshotPromise,
       backendTailPromise,
       scenariosPromise,
+      ctoDecisionsPromise,
     ]);
 
     const toastHistory = useToastStore.getState().getHistory();
@@ -152,6 +158,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
             ? { status: runtimeStatus, logTail: { path: null, lines: [] } }
             : null,
       goalRun: deliverySnapshot ? { deliverySnapshot } : null,
+      ctoDecisions,
       toasts: toastHistory,
       lastScenario: get().lastScenario,
       scenarios,
