@@ -88,9 +88,9 @@ The control layer shapes the project, the execution layer can mix models and cod
 
 - [x] Persistent agent processes with pause, resume, and crash recovery
 - [x] Better acceptance verification for generated apps (pluggable suite: HTTP probes, shell, log scans, TCP port; per-check expected/actual feeds repair)
+- [x] Richer live agent status and project-wide monitoring (phase-progress events for every phase, cross-run ActivityFeed, sticky ProjectStatusBar)
 - [ ] Specialized implementation, testing, and review agents per piece
 - [ ] Agent-to-agent coordination across teams
-- [ ] Richer live agent status and project-wide monitoring
 
 ## Feedback
 
