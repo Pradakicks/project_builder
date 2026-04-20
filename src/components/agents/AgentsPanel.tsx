@@ -32,6 +32,7 @@ interface PieceRowProps {
   pieceId: string;
   name: string;
   activeAgents?: string[];
+  team?: string | null;
   onSelect: (id: string) => void;
 }
 
@@ -55,7 +56,7 @@ function RoleBadges({ activeAgents }: { activeAgents: string[] }) {
   );
 }
 
-function PieceRow({ pieceId, name, activeAgents, onSelect }: PieceRowProps) {
+function PieceRow({ pieceId, name, activeAgents, team, onSelect }: PieceRowProps) {
   const run = useAgentStore((s) => s.runs[pieceId]);
 
   return (
@@ -66,6 +67,14 @@ function PieceRow({ pieceId, name, activeAgents, onSelect }: PieceRowProps) {
       <div className="flex items-center justify-between gap-2">
         <span className="text-[11px] text-gray-200 truncate">{name}</span>
         <div className="flex items-center gap-1.5 shrink-0">
+          {team && (
+            <span
+              className="rounded bg-gray-800 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-gray-400"
+              title={`team: ${team}`}
+            >
+              {team}
+            </span>
+          )}
           <RoleBadges activeAgents={activeAgents ?? []} />
           {run && <StatusPill running={run.running} success={run.success} />}
         </div>
@@ -96,7 +105,7 @@ function PieceRow({ pieceId, name, activeAgents, onSelect }: PieceRowProps) {
 
 interface SectionProps {
   title: string;
-  pieces: { id: string; name: string; activeAgents?: string[] }[];
+  pieces: { id: string; name: string; activeAgents?: string[]; team?: string | null }[];
   onSelect: (id: string) => void;
   defaultCollapsed?: boolean;
 }
@@ -126,6 +135,7 @@ function Section({ title, pieces, onSelect, defaultCollapsed = false }: SectionP
               pieceId={p.id}
               name={p.name}
               activeAgents={p.activeAgents}
+              team={p.team}
               onSelect={onSelect}
             />
           ))}
@@ -229,6 +239,7 @@ export function AgentsPanel() {
               id: p.id,
               name: p.name,
               activeAgents: "agentConfig" in p ? p.agentConfig.activeAgents : undefined,
+              team: "agentConfig" in p ? p.agentConfig.team ?? null : null,
             }))}
             onSelect={handleSelect}
           />
@@ -238,6 +249,7 @@ export function AgentsPanel() {
               id: p.id,
               name: p.name,
               activeAgents: p.agentConfig.activeAgents,
+              team: p.agentConfig.team ?? null,
             }))}
             onSelect={handleSelect}
           />
@@ -247,6 +259,7 @@ export function AgentsPanel() {
               id: p.id,
               name: p.name,
               activeAgents: p.agentConfig.activeAgents,
+              team: p.agentConfig.team ?? null,
             }))}
             onSelect={handleSelect}
           />

@@ -5,6 +5,7 @@ mod goal_run_queries;
 mod plan_queries;
 mod queries;
 mod runtime_session_queries;
+mod team_brief_queries;
 
 pub use agent_queries::*;
 #[allow(unused_imports)]
@@ -114,6 +115,7 @@ impl Database {
         // re-run, so without this tail pass the ALTER TABLE never fires.
         ensure_goal_runs_schema(&self.conn)?;
         ensure_agents_role_columns(&self.conn)?;
+        ensure_team_briefs_schema(&self.conn)?;
         Ok(())
     }
 
@@ -420,6 +422,27 @@ fn ensure_agents_role_columns(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
+    Ok(())
+}
+
+/// Create the `team_briefs` table on first open. Idempotent — safe every
+/// startup. Ships without a version bump; a DB at head version that predates
+/// the team-briefs feature still gets the table via this tail pass.
+fn ensure_team_briefs_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS team_briefs (
+            team TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            member_piece_ids_json TEXT NOT NULL DEFAULT '[]',
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, team),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_team_briefs_updated ON team_briefs(updated_at DESC);",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

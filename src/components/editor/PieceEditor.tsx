@@ -622,6 +622,111 @@ function ActiveAgentsEditor({
   );
 }
 
+/// Canonicalise to kebab-case to match the Rust `normalize_team_name`
+/// helper, so what the user types and what the backend stores are always
+/// the same. Kept small and dependency-free; mirror the Rust rules.
+function normalizeTeamName(raw: string): string | null {
+  const lowered = raw.trim().toLowerCase();
+  if (!lowered) return null;
+  let out = "";
+  let prevDash = false;
+  for (const ch of lowered) {
+    if (/[a-z0-9]/.test(ch)) {
+      out += ch;
+      prevDash = false;
+    } else if (ch === "-" || /\s/.test(ch)) {
+      if (!prevDash && out.length > 0) {
+        out += "-";
+        prevDash = true;
+      }
+    }
+  }
+  while (out.endsWith("-")) out = out.slice(0, -1);
+  if (!out) return null;
+  if (out.length > 40) {
+    out = out.slice(0, 40);
+    while (out.endsWith("-")) out = out.slice(0, -1);
+  }
+  return out;
+}
+
+function TeamEditor({
+  piece,
+  onUpdate,
+}: {
+  piece: Piece;
+  onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
+}) {
+  const projectId = useProjectStore((s) => s.project?.id);
+  const [teams, setTeams] = useState<string[]>([]);
+  const [draft, setDraft] = useState(piece.agentConfig.team ?? "");
+
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listTeamsForProject } = await import("../../api/projectApi");
+        const list = await listTeamsForProject(projectId);
+        if (!cancelled) setTeams(list);
+      } catch {
+        // Best-effort. The field still works as a free-text input.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    setDraft(piece.agentConfig.team ?? "");
+  }, [piece.agentConfig.team]);
+
+  const commit = async (raw: string) => {
+    const normalized = normalizeTeamName(raw);
+    setDraft(normalized ?? "");
+    if ((normalized ?? null) !== (piece.agentConfig.team ?? null)) {
+      await onUpdate(piece.id, {
+        agentConfig: { ...piece.agentConfig, team: normalized },
+      });
+    }
+  };
+
+  const datalistId = `team-options-${piece.id}`;
+
+  return (
+    <div className="space-y-1.5 border-t border-gray-800 pt-3">
+      <FieldLabel>Team</FieldLabel>
+      <p className="text-[10px] text-gray-500">
+        Optional. Pieces sharing a team contribute to a team brief that every
+        OTHER team's pieces read when they run. Leave blank to opt out.
+      </p>
+      <input
+        list={datalistId}
+        type="text"
+        value={draft}
+        placeholder="e.g. payments, auth, ingest"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={(e) => void commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void commit((e.target as HTMLInputElement).value);
+          }
+        }}
+        className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+      />
+      {teams.length > 0 && (
+        <datalist id={datalistId}>
+          {teams.map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
+      )}
+    </div>
+  );
+}
+
 function AgentTab({
   piece,
   onUpdate,
@@ -941,6 +1046,8 @@ function AgentTab({
       )}
 
       <ActiveAgentsEditor piece={piece} onUpdate={onUpdate} />
+
+      <TeamEditor piece={piece} onUpdate={onUpdate} />
 
       <div className="border-t border-gray-800 pt-3">
         <button

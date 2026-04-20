@@ -75,6 +75,19 @@ export interface AgentConfig {
   activeAgents: string[];
   executionEngine: string | null;
   timeout: number | null;
+  /** Team tag (lowercase kebab-case). Pieces sharing a team get cross-team
+   *  briefs consumed by pieces in OTHER teams. Null = not in a team
+   *  (legacy behaviour, zero overhead). */
+  team?: string | null;
+}
+
+export interface TeamBrief {
+  team: string;
+  projectId: string;
+  content: string;
+  memberPieceIds: string[];
+  tokensUsed: number;
+  updatedAt: string;
 }
 
 export type OutputMode = "docs-only" | "code-only" | "both";
@@ -784,6 +797,8 @@ export interface DebugReport {
   lastScenario: CapturedScenario | null;
   /** Append-only history of captured failure scenarios (up to 10). */
   scenarios: CapturedScenario[];
+  /** Team briefs in this project. Empty when no pieces are team-tagged. */
+  teamBriefs: TeamBrief[];
   /** Full ring buffer of frontend / IPC events — expanded from 50 to 250. */
   recentEvents: DebugEvent[];
   /** Tail of the Rust-side tracing log file when dev session is enabled. */

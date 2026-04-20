@@ -3,6 +3,7 @@ pub mod external;
 pub mod git_ops;
 pub mod merge;
 pub mod runner;
+pub mod team_brief;
 
 use crate::db::Database;
 use crate::llm::Message;
@@ -16,6 +17,17 @@ pub struct PieceContext {
     pub parent: Option<Piece>,
     /// (piece_name, summary_content) from context_summary artifacts of connected pieces
     pub connected_summaries: Vec<(String, String)>,
+    /// Briefs produced by OTHER teams in this project. Empty when the piece
+    /// has no team tag or when no other teams have briefs yet. Capped and
+    /// staleness-filtered by `load_piece_context`.
+    pub cross_team_briefs: Vec<CrossTeamBrief>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrossTeamBrief {
+    pub team: String,
+    pub content: String,
+    pub updated_at: String,
 }
 
 /// Build the LLM messages from a piece's configuration
@@ -86,6 +98,22 @@ pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message>
             "Context from connected pieces (use this to understand what they built):\n\n{}",
             summary_parts.join("\n\n")
         ));
+    }
+
+    if !context.cross_team_briefs.is_empty() {
+        let mut section = String::from(
+            "Cross-team context (what other teams in this project are working on). \
+             Use this to stay consistent with their contracts. Flag cross-team concerns explicitly if the diff would break them.\n",
+        );
+        for brief in &context.cross_team_briefs {
+            section.push_str(&format!(
+                "\n### team: {} — updated {}\n{}\n",
+                brief.team,
+                brief.updated_at,
+                snip_cross_team_brief(&brief.content, 1500),
+            ));
+        }
+        system_parts.push(section);
     }
 
     system_parts.push(format!(
@@ -576,6 +604,11 @@ fn snip_role_output(s: &str, max: usize) -> String {
     format!("{kept}…[truncated {} more chars]", total - max)
 }
 
+/// Same shape, explicit name so grep finds both call sites separately.
+fn snip_cross_team_brief(s: &str, max: usize) -> String {
+    snip_role_output(s, max)
+}
+
 /// Outputs from earlier role(s) in the same piece run that later roles should
 /// see. Empty on the first role (Implementation).
 #[derive(Debug, Default, Clone)]
@@ -859,6 +892,7 @@ mod role_prompt_tests {
             connected_pieces: vec![],
             parent: None,
             connected_summaries: vec![],
+            cross_team_briefs: vec![],
         }
     }
 
@@ -950,6 +984,84 @@ mod role_prompt_tests {
         let (ok, reason) = parse_review_verdict("I think it's probably fine?");
         assert!(!ok);
         assert!(reason.contains("did not produce a clear"));
+    }
+
+    #[test]
+    fn cross_team_briefs_appear_in_system_prompt_when_present() {
+        let piece = sample_piece();
+        let ctx = PieceContext {
+            connected_pieces: vec![],
+            parent: None,
+            connected_summaries: vec![],
+            cross_team_briefs: vec![
+                super::CrossTeamBrief {
+                    team: "payments".to_string(),
+                    content: "## Owned surface\nCharge + refund API".to_string(),
+                    updated_at: "2026-04-20T01:23:45Z".to_string(),
+                },
+                super::CrossTeamBrief {
+                    team: "auth".to_string(),
+                    content: "## Owned surface\nLogin + session tokens".to_string(),
+                    updated_at: "2026-04-20T00:10:00Z".to_string(),
+                },
+            ],
+        };
+        let messages = build_agent_prompt(&piece, &ctx);
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("system msg")
+            .content
+            .clone();
+        assert!(
+            system.contains("Cross-team context"),
+            "system prompt must include the cross-team section"
+        );
+        assert!(system.contains("team: payments"));
+        assert!(system.contains("Charge + refund API"));
+        assert!(system.contains("team: auth"));
+        assert!(system.contains("Login + session tokens"));
+    }
+
+    #[test]
+    fn cross_team_briefs_section_is_omitted_when_empty() {
+        let piece = sample_piece();
+        let ctx = sample_context();
+        let messages = build_agent_prompt(&piece, &ctx);
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("system msg")
+            .content
+            .clone();
+        assert!(
+            !system.contains("Cross-team context"),
+            "no cross-team section when briefs empty"
+        );
+    }
+
+    #[test]
+    fn cross_team_briefs_snip_to_cap() {
+        let piece = sample_piece();
+        let huge = "x".repeat(5_000);
+        let ctx = PieceContext {
+            connected_pieces: vec![],
+            parent: None,
+            connected_summaries: vec![],
+            cross_team_briefs: vec![super::CrossTeamBrief {
+                team: "payments".to_string(),
+                content: huge,
+                updated_at: "2026-04-20T01:00:00Z".to_string(),
+            }],
+        };
+        let messages = build_agent_prompt(&piece, &ctx);
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .unwrap()
+            .content
+            .clone();
+        assert!(system.contains("…[truncated"));
     }
 
     #[test]

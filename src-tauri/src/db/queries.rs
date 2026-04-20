@@ -290,6 +290,37 @@ impl Database {
         ids.iter().map(|id| self.get_piece(id)).collect()
     }
 
+    /// Distinct normalized team names across all pieces in a project.
+    /// Powers the PieceEditor team autocomplete and the ProjectStatusBar
+    /// team chip. Pulled via SQLite `json_extract` so we don't have to
+    /// deserialize every agent_config row just to gather team tags.
+    pub fn list_teams_for_project(&self, project_id: &str) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT json_extract(agent_config_json, '$.team') AS team \
+                 FROM pieces \
+                 WHERE project_id = ?1 \
+                   AND team IS NOT NULL \
+                   AND team != '' \
+                 ORDER BY team ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![project_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut teams = Vec::new();
+        for row in rows {
+            match row {
+                Ok(team) => teams.push(team),
+                // Skip rows where json_extract returned NULL (already filtered)
+                // or non-string values; don't fail the whole call.
+                Err(_) => continue,
+            }
+        }
+        Ok(teams)
+    }
+
     pub fn list_children(&self, piece_id: &str) -> Result<Vec<Piece>, String> {
         let mut stmt = self.conn
             .prepare("SELECT id FROM pieces WHERE parent_id = ?1")

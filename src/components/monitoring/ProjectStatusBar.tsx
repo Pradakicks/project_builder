@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useAgentStore } from "../../store/useAgentStore";
+import type { TeamBrief } from "../../types";
 
 /// Compact sticky status strip for the editor view. Pure aggregation of
 /// state already in the app — no new backend calls. Hides when there's no
@@ -83,6 +84,30 @@ export function ProjectStatusBar({
     return goalRuns.filter((r) => r.attentionRequired).length;
   }, [goalRuns]);
 
+  const [teamBriefs, setTeamBriefs] = useState<TeamBrief[]>([]);
+  const [teamsOpen, setTeamsOpen] = useState(false);
+  useEffect(() => {
+    if (!project) {
+      setTeamBriefs([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listTeamBriefs } = await import("../../api/projectApi");
+        const briefs = await listTeamBriefs(project.id);
+        if (!cancelled) setTeamBriefs(briefs);
+      } catch {
+        // Best-effort — teams chip just won't render.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Refresh whenever the project changes or a run finishes (goalRuns
+    // updates as runs complete), so the chip reflects fresh briefs.
+  }, [project, goalRuns.length, phaseActivity?.updatedAt]);
+
   if (!project) return null;
 
   const runtimeLabel = runtimeStatus?.session?.status ?? "idle";
@@ -141,6 +166,39 @@ export function ProjectStatusBar({
       >
         pieces · {counts.running} running · {counts.success} ok · {counts.failed} failed
       </button>
+
+      {teamBriefs.length > 0 && (
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setTeamsOpen((v) => !v)}
+            className={`rounded border px-2 py-0.5 ${chipClass("neutral")} hover:brightness-125`}
+            title="Cross-team briefs — click to inspect"
+          >
+            teams · {teamBriefs.length}
+          </button>
+          {teamsOpen && (
+            <div className="absolute left-0 top-full z-50 mt-1 max-h-96 w-80 overflow-y-auto rounded border border-gray-700 bg-gray-950 p-2 text-[11px] shadow-lg">
+              {teamBriefs.map((brief) => (
+                <div
+                  key={brief.team}
+                  className="mb-2 rounded border border-gray-800 bg-gray-900/60 p-2 last:mb-0"
+                >
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="font-medium text-gray-200">{brief.team}</span>
+                    <span className="text-[9px] text-gray-500">
+                      updated {new Date(brief.updatedAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] text-gray-400">
+                    {brief.content}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <button
         type="button"

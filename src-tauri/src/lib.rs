@@ -92,6 +92,8 @@ pub fn run() {
             commands::piece_commands::delete_piece,
             commands::piece_commands::list_pieces,
             commands::piece_commands::list_children,
+            commands::piece_commands::list_teams_for_project,
+            commands::piece_commands::list_team_briefs,
             commands::connection_commands::create_connection,
             commands::connection_commands::get_connection,
             commands::connection_commands::update_connection,

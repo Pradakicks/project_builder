@@ -70,10 +70,39 @@ fn load_piece_context(
     let project = db.get_project(&piece.project_id).ok();
     let settings = project.map(|p| p.settings).unwrap_or_default();
 
+    // Cross-team briefs: only load when this piece is tagged with a team.
+    // Excludes the piece's own team, caps at 5, drops briefs older than 24h.
+    const CROSS_TEAM_CAP: usize = 5;
+    const CROSS_TEAM_STALENESS_HOURS: i64 = 24;
+    let cross_team_briefs: Vec<crate::agent::CrossTeamBrief> = if let Some(ref my_team) =
+        piece.agent_config.team
+    {
+        let staleness_cutoff = chrono::Utc::now()
+            - chrono::Duration::hours(CROSS_TEAM_STALENESS_HOURS);
+        db.list_team_briefs_for_project(&piece.project_id, Some(my_team.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|brief| {
+                chrono::DateTime::parse_from_rfc3339(&brief.updated_at)
+                    .map(|ts| ts.with_timezone(&chrono::Utc) >= staleness_cutoff)
+                    .unwrap_or(false)
+            })
+            .take(CROSS_TEAM_CAP)
+            .map(|brief| crate::agent::CrossTeamBrief {
+                team: brief.team,
+                content: brief.content,
+                updated_at: brief.updated_at,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let context = PieceContext {
         connected_pieces,
         parent,
         connected_summaries,
+        cross_team_briefs,
     };
 
     Ok((piece, context, settings))
@@ -465,6 +494,26 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
                     warn!(piece_id, error = %e, "Review role failed");
                 }
             }
+        }
+
+        // Team-brief regeneration (fire-and-forget). If this piece belongs to
+        // a team, refresh the team's brief so pieces in OTHER teams see the
+        // latest team state on their next run. Debounced internally to 5min.
+        if let Some(ref team) = piece.agent_config.team {
+            let team_owned = team.clone();
+            let project_id_owned = piece.project_id.clone();
+            let app_for_brief = app_handle.clone();
+            tokio::spawn(async move {
+                if let Err(e) = super::team_brief::generate_team_brief(
+                    team_owned,
+                    project_id_owned,
+                    app_for_brief,
+                )
+                .await
+                {
+                    warn!(error = %e, "Team brief generation failed");
+                }
+            });
         }
 
         let piece_phase = piece.phase.clone();
@@ -2091,6 +2140,127 @@ mod tests {
                 "ambiguous review output must flip impl to Rejected"
             );
         }
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Phase C regression: a piece tagged with `team = foo` loading its
+    /// context sees briefs for OTHER teams (not its own), capped at 5, with
+    /// stale rows filtered out. Empty team = no cross-team briefs loaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_piece_context_pulls_cross_team_briefs() {
+        let workspace = temp_workspace("cross-team-briefs");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+
+        let project = create_project_impl(
+            &state,
+            "Cross-team".to_string(),
+            "Phase C regression".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock");
+            let piece = db
+                .create_piece(&project.id, None, "AuthPiece", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        team: Some("auth".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("tag piece with team");
+            piece
+        };
+
+        // Seed briefs: one for auth (caller's team — must be excluded),
+        // one for payments (should show), one stale for legacy (dropped).
+        {
+            let db = state.lock().expect("lock");
+            db.upsert_team_brief(&project.id, "auth", "own brief", &[], 0)
+                .expect("upsert auth brief");
+            db.upsert_team_brief(&project.id, "payments", "charge + refund", &[], 0)
+                .expect("upsert payments brief");
+            // Stale row — manually write with an old timestamp.
+            db.upsert_team_brief(&project.id, "legacy", "stale", &[], 0)
+                .expect("upsert legacy brief");
+            db.conn
+                .execute(
+                    "UPDATE team_briefs SET updated_at = '2000-01-01T00:00:00Z' \
+                     WHERE project_id = ?1 AND team = 'legacy'",
+                    [&project.id],
+                )
+                .expect("stale timestamp");
+        }
+
+        let (_piece, context, _settings) =
+            load_piece_context(&piece.id, &state).expect("load context");
+        let teams: Vec<&str> = context
+            .cross_team_briefs
+            .iter()
+            .map(|b| b.team.as_str())
+            .collect();
+        assert!(
+            teams.contains(&"payments"),
+            "payments brief must appear: {:?}",
+            teams
+        );
+        assert!(
+            !teams.contains(&"auth"),
+            "caller's own team must NOT appear: {:?}",
+            teams
+        );
+        assert!(
+            !teams.contains(&"legacy"),
+            "stale (>24h) briefs must be dropped: {:?}",
+            teams
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Pieces without a team tag receive no cross-team briefs — zero
+    /// overhead for legacy pieces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_piece_context_with_no_team_loads_no_briefs() {
+        let workspace = temp_workspace("no-team");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+
+        let project = create_project_impl(
+            &state,
+            "No team".to_string(),
+            "legacy piece".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock");
+            let piece = db
+                .create_piece(&project.id, None, "Legacy", 0.0, 0.0)
+                .expect("create piece");
+            // No team tag; leave agent_config default.
+            db.upsert_team_brief(&project.id, "payments", "hi", &[], 0)
+                .expect("seed a brief");
+            piece
+        };
+
+        let (_piece, context, _settings) =
+            load_piece_context(&piece.id, &state).expect("load");
+        assert!(
+            context.cross_team_briefs.is_empty(),
+            "no team → no cross-team briefs"
+        );
 
         let _ = fs::remove_dir_all(&workspace);
     }

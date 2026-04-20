@@ -8,6 +8,7 @@ pub mod piece;
 pub mod project;
 pub mod runtime;
 pub mod signoff;
+pub mod team_brief;
 pub mod work_plan;
 
 pub use agent::*;
@@ -20,4 +21,5 @@ pub use piece::*;
 pub use project::*;
 pub use runtime::*;
 pub use signoff::*;
+pub use team_brief::*;
 pub use work_plan::*;

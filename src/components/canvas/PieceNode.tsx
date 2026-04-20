@@ -9,6 +9,7 @@ interface PieceNodeData {
   color: string | null;
   interfaces: PieceInterface[];
   activeAgents?: string[];
+  team?: string | null;
   [key: string]: unknown;
 }
 
@@ -17,6 +18,27 @@ const ROLE_LABELS: Record<string, string> = {
   testing: "test",
   review: "rev",
 };
+
+/// Stable color per team name. Deterministic hash so the same team always
+/// gets the same hue across sessions. Tailwind-compatible.
+const TEAM_PALETTE: Array<{ bg: string; text: string; border: string }> = [
+  { bg: "bg-sky-900/40", text: "text-sky-300", border: "border-sky-800/60" },
+  { bg: "bg-emerald-900/40", text: "text-emerald-300", border: "border-emerald-800/60" },
+  { bg: "bg-amber-900/40", text: "text-amber-300", border: "border-amber-800/60" },
+  { bg: "bg-violet-900/40", text: "text-violet-300", border: "border-violet-800/60" },
+  { bg: "bg-rose-900/40", text: "text-rose-300", border: "border-rose-800/60" },
+  { bg: "bg-teal-900/40", text: "text-teal-300", border: "border-teal-800/60" },
+  { bg: "bg-pink-900/40", text: "text-pink-300", border: "border-pink-800/60" },
+  { bg: "bg-lime-900/40", text: "text-lime-300", border: "border-lime-800/60" },
+];
+
+function teamColor(team: string): { bg: string; text: string; border: string } {
+  let hash = 0;
+  for (let i = 0; i < team.length; i += 1) {
+    hash = (hash * 31 + team.charCodeAt(i)) >>> 0;
+  }
+  return TEAM_PALETTE[hash % TEAM_PALETTE.length]!;
+}
 
 const phaseColors: Record<string, string> = {
   design: "bg-yellow-500/20 text-yellow-400",
@@ -113,6 +135,21 @@ export function PieceNode({ id, data, selected }: NodeProps) {
             </div>
           )}
         </div>
+
+        {/* Team badge, visible only when the piece is tagged with a team. */}
+        {nodeData.team && (
+          (() => {
+            const colors = teamColor(nodeData.team);
+            return (
+              <div
+                className={`inline-flex w-fit rounded border px-1.5 py-0.5 text-[9px] font-medium ${colors.bg} ${colors.text} ${colors.border}`}
+                title={`team: ${nodeData.team}`}
+              >
+                {nodeData.team}
+              </div>
+            );
+          })()
+        )}
 
         {/* Per-role dots, visible only when the piece has extra roles configured. */}
         {nodeData.activeAgents && nodeData.activeAgents.length > 1 && (

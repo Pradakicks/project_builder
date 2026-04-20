@@ -5,6 +5,7 @@ import type {
   PieceUpdate,
   Project,
   ProjectSettings,
+  TeamBrief,
 } from "../types";
 import { loggedInvoke, listenToEvent } from "./runtime";
 
@@ -94,6 +95,18 @@ export async function listPieces(projectId: string): Promise<Piece[]> {
 
 export async function listChildren(pieceId: string): Promise<Piece[]> {
   return loggedInvoke("list_children", { pieceId });
+}
+
+/// Distinct team tags across a project's pieces. Powers the PieceEditor
+/// team datalist and the ProjectStatusBar teams chip.
+export async function listTeamsForProject(projectId: string): Promise<string[]> {
+  return loggedInvoke("list_teams_for_project", { projectId });
+}
+
+/// Every team brief for the project, newest first. Used by the debug report
+/// and the ProjectStatusBar popover.
+export async function listTeamBriefs(projectId: string): Promise<TeamBrief[]> {
+  return loggedInvoke("list_team_briefs", { projectId });
 }
 
 // ── Connections ───────────────────────────────────────────
