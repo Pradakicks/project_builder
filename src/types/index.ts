@@ -429,6 +429,30 @@ export interface GoalRunDeliverySnapshot {
   verificationResult: VerificationResult | null;
 }
 
+export type GoalRunActionKind =
+  | "start-runtime"
+  | "stop-runtime"
+  | "resume"
+  | "resume-with-repair"
+  | "pause-goal"
+  | "stop-goal"
+  | "cancel-goal"
+  | "rerun-verification";
+
+export type GoalRunActionReceiptStatus = "pending" | "succeeded" | "failed";
+
+export interface GoalRunActionReceipt {
+  id: string;
+  action: GoalRunActionKind;
+  status: GoalRunActionReceiptStatus;
+  goalRunId: string | null;
+  projectId: string | null;
+  summary: string;
+  detail: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
 export type GoalRunTimelineEntryKind =
   | "phase"
   | "runtime"

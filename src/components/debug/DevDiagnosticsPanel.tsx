@@ -99,13 +99,17 @@ export function DevDiagnosticsPanel() {
     <>
       <button
         onClick={() => setDiagnosticsOpen(!diagnosticsOpen)}
+        data-testid="dev-diagnostics-toggle"
         className="fixed bottom-4 right-4 z-50 rounded-full border border-amber-600 bg-amber-950/90 px-3 py-2 text-[11px] font-semibold text-amber-100 shadow-lg hover:bg-amber-900"
         title="Open development diagnostics"
       >
         Dev Diagnostics
       </button>
       {diagnosticsOpen ? (
-        <div className="fixed bottom-16 right-4 z-50 flex h-[70vh] w-[28rem] flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-950 text-gray-100 shadow-2xl">
+        <div
+          data-testid="dev-diagnostics-panel"
+          className="fixed bottom-16 right-4 z-50 flex h-[70vh] w-[28rem] flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-950 text-gray-100 shadow-2xl"
+        >
           <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
             <div>
               <p className="text-sm font-semibold">Developer Diagnostics</p>
@@ -116,6 +120,7 @@ export function DevDiagnosticsPanel() {
             </div>
             <button
               onClick={() => setDiagnosticsOpen(false)}
+              data-testid="dev-diagnostics-close"
               className="text-xs text-gray-500 hover:text-gray-200"
             >
               Close
@@ -126,12 +131,14 @@ export function DevDiagnosticsPanel() {
             <button
               onClick={() => void copyReport()}
               disabled={copying}
+              data-testid="dev-diagnostics-copy-report"
               className="rounded border border-gray-700 px-2 py-1 hover:bg-gray-900 disabled:opacity-50"
             >
               {copying ? "Collecting…" : "Copy Debug Report"}
             </button>
             <button
               onClick={() => void replayLastScenario()}
+              data-testid="dev-diagnostics-replay-last-scenario"
               className="rounded border border-gray-700 px-2 py-1 hover:bg-gray-900"
             >
               Replay Last Scenario
@@ -139,7 +146,7 @@ export function DevDiagnosticsPanel() {
           </div>
 
           <div className="overflow-y-auto px-4 py-3 text-[11px]">
-            <section className="mb-4 space-y-1">
+            <section data-testid="dev-diagnostics-session" className="mb-4 space-y-1">
               <p className="font-semibold text-gray-200">Session</p>
               <p className="text-gray-400">
                 {session?.enabled
@@ -150,7 +157,7 @@ export function DevDiagnosticsPanel() {
               {session?.logPath ? <p className="break-all text-gray-500">Log: {session.logPath}</p> : null}
             </section>
 
-            <section className="mb-4 space-y-2">
+            <section data-testid="dev-diagnostics-captured-scenario" className="mb-4 space-y-2">
               <div className="flex items-center justify-between">
                 <p className="font-semibold text-gray-200">Captured Scenario</p>
                 {lastScenario?.status ? (
@@ -172,7 +179,7 @@ export function DevDiagnosticsPanel() {
               )}
             </section>
 
-            <section className="mb-4 space-y-2">
+            <section data-testid="dev-diagnostics-recent-events" className="mb-4 space-y-2">
               <p className="font-semibold text-gray-200">Recent Events</p>
               <div className="space-y-1">
                 {visibleEvents.map((event) => (
@@ -191,7 +198,7 @@ export function DevDiagnosticsPanel() {
               </div>
             </section>
 
-            <section className="space-y-2">
+            <section data-testid="dev-diagnostics-log-tail" className="space-y-2">
               <p className="font-semibold text-gray-200">Debug Log Tail</p>
               {loadingLog ? (
                 <p className="text-gray-500">Loading log tail…</p>

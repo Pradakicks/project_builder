@@ -5,6 +5,7 @@ import { useToastStore } from "../../store/useToastStore";
 import { openRuntimeInBrowser } from "../../api/runtimeApi";
 import type {
   CheckKind,
+  GoalRunActionReceipt,
   GoalRun,
   GoalRunEvent,
   GoalRunRetryState,
@@ -21,6 +22,7 @@ function formatTime(value: string | null) {
 export interface RuntimeLogView {
   lines: string[];
   source: "live" | "snapshot" | "empty";
+  sourceLabel: string;
   updatedAt: string | null;
 }
 
@@ -34,6 +36,7 @@ export function selectRuntimeLogView(
     return {
       lines: liveLogs,
       source: "live",
+      sourceLabel: "live tail",
       updatedAt: liveUpdatedAt,
     };
   }
@@ -42,6 +45,7 @@ export function selectRuntimeLogView(
     return {
       lines: snapshotLogs,
       source: "snapshot",
+      sourceLabel: "snapshot fallback",
       updatedAt: snapshotUpdatedAt,
     };
   }
@@ -49,24 +53,33 @@ export function selectRuntimeLogView(
   return {
     lines: [],
     source: "empty",
+    sourceLabel: "empty",
     updatedAt: liveUpdatedAt ?? snapshotUpdatedAt,
   };
 }
 
+export interface FailureViewEntry {
+  label: string;
+  text: string;
+  updatedAt: string | null;
+  freshnessLabel: "current" | "historical";
+}
+
 export interface FailureView {
-  currentBlocker: { text: string; updatedAt: string | null } | null;
-  previousFailures: Array<{ label: string; text: string; updatedAt: string | null }>;
+  currentBlocker: FailureViewEntry | null;
+  previousFailures: FailureViewEntry[];
 }
 
 function pushFailure(
-  list: Array<{ label: string; text: string; updatedAt: string | null }>,
+  list: FailureViewEntry[],
   label: string,
   text: string | null | undefined,
   updatedAt: string | null,
+  freshnessLabel: FailureViewEntry["freshnessLabel"],
 ) {
   if (!text) return;
   if (list.some((item) => item.text === text)) return;
-  list.push({ label, text, updatedAt });
+  list.push({ label, text, updatedAt, freshnessLabel });
 }
 
 export function buildFailureView(
@@ -77,29 +90,34 @@ export function buildFailureView(
   const currentBlocker =
     currentRun?.status === "blocked"
       ? {
+          label: "Current blocker",
           text: currentRun.blockerReason ?? currentRun.lastFailureSummary ?? "Blocked",
           updatedAt: currentRun.updatedAt,
+          freshnessLabel: "current" as const,
         }
       : null;
-  const previousFailures: Array<{ label: string; text: string; updatedAt: string | null }> = [];
+  const previousFailures: FailureViewEntry[] = [];
 
   pushFailure(
     previousFailures,
     "Last failure",
     currentRun?.lastFailureSummary,
     currentRun?.updatedAt ?? null,
+    "historical",
   );
   pushFailure(
     previousFailures,
     "Retry failure",
     retryState?.lastFailureSummary,
     currentRun?.updatedAt ?? null,
+    "historical",
   );
   pushFailure(
     previousFailures,
     "Verification",
     verificationResult?.message,
     verificationResult?.finishedAt ?? null,
+    "historical",
   );
 
   if (currentBlocker && previousFailures.some((item) => item.text === currentBlocker.text)) {
@@ -426,6 +444,42 @@ function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): Pha
   return arcs;
 }
 
+const ACTION_LABELS: Record<GoalRunActionReceipt["action"], string> = {
+  "start-runtime": "Start app",
+  "stop-runtime": "Stop app",
+  resume: "Resume",
+  "resume-with-repair": "Resume with repair",
+  "pause-goal": "Pause goal",
+  "stop-goal": "Stop goal",
+  "cancel-goal": "Cancel goal",
+  "rerun-verification": "Rerun checks only",
+};
+
+const ACTION_STATUS_LABELS: Record<GoalRunActionReceipt["status"], string> = {
+  pending: "pending",
+  succeeded: "succeeded",
+  failed: "failed",
+};
+
+function formatActionReceiptLabel(receipt: GoalRunActionReceipt) {
+  return ACTION_LABELS[receipt.action] ?? receipt.action;
+}
+
+function selectVisibleActionReceipts(
+  receipts: GoalRunActionReceipt[],
+  currentRunId: string | null,
+  projectId: string,
+) {
+  const scoped = receipts.filter((receipt) => {
+    if (receipt.goalRunId && currentRunId) {
+      return receipt.goalRunId === currentRunId;
+    }
+    return receipt.projectId === projectId;
+  });
+
+  return [...scoped].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 3);
+}
+
 export function DeliveryPanel() {
   const project = useProjectStore((s) => s.project);
   const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
@@ -435,6 +489,7 @@ export function DeliveryPanel() {
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
   const runtimeLogs = useGoalRunStore((s) => s.runtimeLogs);
   const runtimeLogsUpdatedAt = useGoalRunStore((s) => s.runtimeLogsUpdatedAt);
+  const actionReceipts = useGoalRunStore((s) => s.actionReceipts);
   const loading = useGoalRunStore((s) => s.loading);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const lastError = useGoalRunStore((s) => s.lastError);
@@ -472,6 +527,12 @@ export function DeliveryPanel() {
     () => [...goalRuns].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     [goalRuns],
   );
+
+  const visibleActionReceipts = useMemo(
+    () => selectVisibleActionReceipts(actionReceipts, currentRun?.id ?? null, project?.id ?? ""),
+    [actionReceipts, currentRun?.id, project?.id],
+  );
+  const latestActionReceipt = visibleActionReceipts[0] ?? null;
 
   const runtimeLogView = useMemo(
     () =>
@@ -568,7 +629,7 @@ export function DeliveryPanel() {
   const runtimeUrl = runtimeSnapshot?.session?.url ?? null;
 
   return (
-    <div className="flex h-full flex-col bg-gradient-to-b from-slate-950 to-gray-950 text-gray-100">
+    <div data-testid="delivery-panel" className="flex h-full flex-col bg-gradient-to-b from-slate-950 to-gray-950 text-gray-100">
       <div className="border-b border-gray-800 px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -646,7 +707,10 @@ export function DeliveryPanel() {
         )}
 
         {currentRun ? (
-          <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+          <section
+            data-testid="delivery-current-run"
+            className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+          >
             <div className="grid gap-3 text-[11px] md:grid-cols-2">
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                 <p className="text-gray-500">Prompt</p>
@@ -686,7 +750,7 @@ export function DeliveryPanel() {
                   {retryState?.stopRequested ? " · stop requested" : ""}
                 </p>
                 {repairEvents.length > 0 && (
-                  <p className="mt-1 text-amber-300/80">
+                  <p data-testid="delivery-repair-status" className="mt-1 text-amber-300/80">
                     Repair status: {repairEvents[0]?.summary}
                   </p>
                 )}
@@ -710,9 +774,17 @@ export function DeliveryPanel() {
               {failureView.currentBlocker || failureView.previousFailures.length > 0 ? (
                 <div className="grid gap-2 md:grid-cols-2">
                   {failureView.currentBlocker ? (
-                    <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
+                    <div
+                      data-testid="delivery-current-blocker"
+                      className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100"
+                    >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-amber-300">Current blocker</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-amber-300">Current blocker</p>
+                          <span className="rounded bg-amber-900/50 px-1.5 py-0.5 text-[10px] text-amber-200">
+                            {failureView.currentBlocker.freshnessLabel}
+                          </span>
+                        </div>
                         <span className="text-[10px] text-amber-300/70">
                           {formatTime(failureView.currentBlocker.updatedAt)}
                         </span>
@@ -721,9 +793,17 @@ export function DeliveryPanel() {
                     </div>
                   ) : null}
                   {failureView.previousFailures.length > 0 ? (
-                    <div className="rounded border border-gray-800 bg-gray-950/60 p-2 text-gray-100">
+                    <div
+                      data-testid="delivery-previous-failures"
+                      className="rounded border border-gray-800 bg-gray-950/60 p-2 text-gray-100"
+                    >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-gray-300">Previous failures</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-gray-300">Historical failures</p>
+                          <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">
+                            historical
+                          </span>
+                        </div>
                         <span className="text-[10px] text-gray-500">
                           {failureView.previousFailures.length} item
                           {failureView.previousFailures.length === 1 ? "" : "s"}
@@ -733,7 +813,12 @@ export function DeliveryPanel() {
                         {failureView.previousFailures.map((failure) => (
                           <li key={`${failure.label}:${failure.text}`} className="space-y-0.5">
                             <div className="flex items-center justify-between gap-2">
-                              <p className="text-gray-400">{failure.label}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-gray-400">{failure.label}</p>
+                                <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">
+                                  {failure.freshnessLabel}
+                                </span>
+                              </div>
                               <span className="text-[10px] text-gray-600">
                                 {formatTime(failure.updatedAt)}
                               </span>
@@ -814,21 +899,24 @@ export function DeliveryPanel() {
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div data-testid="delivery-actions" className="flex flex-wrap gap-2">
               <button
                 onClick={() => void refreshRuntimeStatus(activeProjectId ?? undefined)}
+                data-testid="delivery-refresh-logs-button"
                 className="rounded border border-gray-700 px-3 py-1 text-[11px] text-gray-300 hover:bg-gray-800"
               >
                 Refresh logs
               </button>
               <button
                 onClick={() => void handleStartRuntime()}
+                data-testid="delivery-start-runtime-button"
                 className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40"
               >
                 Start app
               </button>
               <button
                 onClick={() => void handleStopRuntime()}
+                data-testid="delivery-stop-runtime-button"
                 className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
               >
                 Stop app
@@ -840,6 +928,7 @@ export function DeliveryPanel() {
                 <button
                   onClick={() => void handleResumeGoal()}
                   disabled={orchestrating}
+                  data-testid="delivery-resume-with-repair-button"
                   className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
                 >
                   {orchestrating ? "Running…" : "Resume with repair"}
@@ -852,6 +941,7 @@ export function DeliveryPanel() {
                 <button
                   onClick={() => void handleRerunVerification()}
                   disabled={orchestrating}
+                  data-testid="delivery-rerun-verification-button"
                   className="rounded border border-sky-700 px-3 py-1 text-[11px] text-sky-300 hover:bg-sky-950/40 disabled:opacity-50"
                   title="Rerun the acceptance suite without invoking repair agent"
                 >
@@ -862,17 +952,75 @@ export function DeliveryPanel() {
                 <>
                   <button
                     onClick={() => void handlePauseGoal()}
+                    data-testid="delivery-pause-goal-button"
                     className="rounded border border-yellow-700 px-3 py-1 text-[11px] text-yellow-300 hover:bg-yellow-950/40"
                   >
                     Pause goal
                   </button>
                   <button
                     onClick={() => void handleStopGoal()}
+                    data-testid="delivery-stop-goal-button"
                     className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
                   >
                     Stop goal
                   </button>
                 </>
+              ) : null}
+            </div>
+            <div data-testid="delivery-action-receipts" className="border-t border-gray-800 pt-2 text-[11px]">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-gray-500">Action receipt</p>
+                {latestActionReceipt ? (
+                  <span
+                    data-testid="delivery-action-receipt-status"
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                      latestActionReceipt.status === "succeeded"
+                        ? "bg-emerald-900/50 text-emerald-200"
+                        : latestActionReceipt.status === "failed"
+                          ? "bg-red-900/50 text-red-200"
+                          : "bg-gray-800 text-gray-200"
+                    }`}
+                  >
+                    {ACTION_STATUS_LABELS[latestActionReceipt.status]}
+                  </span>
+                ) : null}
+              </div>
+              {latestActionReceipt ? (
+                <div data-testid="delivery-action-receipt" className="mt-1 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <p className="text-gray-200">{formatActionReceiptLabel(latestActionReceipt)}</p>
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">
+                        {latestActionReceipt.status}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-gray-500">
+                      {formatTime(latestActionReceipt.finishedAt ?? latestActionReceipt.startedAt)}
+                    </span>
+                  </div>
+                  <p className="text-gray-400">{latestActionReceipt.summary}</p>
+                  {latestActionReceipt.detail ? (
+                    <p className="whitespace-pre-wrap text-gray-500">{latestActionReceipt.detail}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="mt-1 text-gray-500">No delivery actions recorded yet.</p>
+              )}
+              {visibleActionReceipts.length > 1 ? (
+                <ul className="mt-2 space-y-1">
+                  {visibleActionReceipts.slice(1).map((receipt) => (
+                    <li
+                      key={receipt.id}
+                      data-testid="delivery-action-receipt-history-item"
+                      className="flex items-center justify-between gap-2 text-gray-500"
+                    >
+                      <span>
+                        {formatActionReceiptLabel(receipt)} · {receipt.status}
+                      </span>
+                      <span>{formatTime(receipt.finishedAt ?? receipt.startedAt)}</span>
+                    </li>
+                  ))}
+                </ul>
               ) : null}
             </div>
           </section>
@@ -882,7 +1030,10 @@ export function DeliveryPanel() {
           </section>
         )}
 
-        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+        <section
+          data-testid="delivery-code-evidence"
+          className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
@@ -931,7 +1082,10 @@ export function DeliveryPanel() {
           )}
         </section>
 
-        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+        <section
+          data-testid="delivery-runtime-evidence"
+          className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
@@ -979,15 +1133,14 @@ export function DeliveryPanel() {
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-gray-500">Recent runtime logs</p>
-                    <span className="text-[10px] text-gray-500">
-                      {runtimeLogView.source === "live"
-                        ? "live store"
-                        : runtimeLogView.source === "snapshot"
-                          ? "snapshot fallback"
-                          : "empty"}
+                    <span data-testid="delivery-runtime-log-source" className="text-[10px] text-gray-500">
+                      {runtimeLogView.sourceLabel}
                     </span>
                   </div>
-                  <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300">
+                  <pre
+                    data-testid="delivery-runtime-log-tail"
+                    className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300"
+                  >
                     {runtimeLogView.lines.join("\n")}
                   </pre>
                 </div>
@@ -1000,7 +1153,10 @@ export function DeliveryPanel() {
           )}
         </section>
 
-        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+        <section
+          data-testid="delivery-timeline"
+          className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
@@ -1021,6 +1177,7 @@ export function DeliveryPanel() {
                 return (
                   <div
                     key={arc.phase}
+                    data-testid="delivery-timeline-entry"
                     className={`rounded border px-3 py-2 text-[11px] ${
                       isActive
                         ? "border-cyan-700 bg-cyan-950/25"

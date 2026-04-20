@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type {
+  GoalRunActionKind,
+  GoalRunActionReceipt,
   GoalRun,
   GoalRunDeliverySnapshot,
   GoalRunEvent,
@@ -22,6 +24,7 @@ interface GoalRunStore {
   runtimeStatus: ProjectRuntimeStatus | null;
   runtimeLogs: string[];
   runtimeLogsUpdatedAt: string | null;
+  actionReceipts: GoalRunActionReceipt[];
   loading: boolean;
   orchestrating: boolean;
   lastError: string | null;
@@ -61,6 +64,80 @@ let pollSession = 0;
 
 function toast(message: string, kind: "info" | "warning" = "warning") {
   useToastStore.getState().addToast(message, kind);
+}
+
+const ACTION_RECEIPT_CAP = 20;
+
+interface ActionReceiptStart {
+  action: GoalRunActionKind;
+  goalRunId: string | null;
+  projectId: string | null;
+  summary: string;
+  failureSummary: string;
+  detail?: string | null;
+}
+
+interface ActionReceiptFinish {
+  status: GoalRunActionReceipt["status"];
+  summary: string;
+  detail?: string | null;
+}
+
+function recordActionReceipt(start: ActionReceiptStart): string {
+  const id = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
+  const receipt: GoalRunActionReceipt = {
+    id,
+    action: start.action,
+    status: "pending",
+    goalRunId: start.goalRunId,
+    projectId: start.projectId,
+    summary: start.summary,
+    detail: start.detail ?? null,
+    startedAt,
+    finishedAt: null,
+  };
+  useGoalRunStore.setState((state) => ({
+    actionReceipts: [receipt, ...state.actionReceipts].slice(0, ACTION_RECEIPT_CAP),
+  }));
+  return id;
+}
+
+function settleActionReceipt(receiptId: string, finish: ActionReceiptFinish) {
+  const finishedAt = new Date().toISOString();
+  useGoalRunStore.setState((state) => ({
+    actionReceipts: state.actionReceipts.map((receipt) =>
+      receipt.id === receiptId
+        ? {
+            ...receipt,
+            status: finish.status,
+            summary: finish.summary,
+            detail: finish.detail ?? null,
+            finishedAt,
+          }
+        : receipt,
+    ),
+  }));
+}
+
+async function performTrackedAction<T>(
+  start: ActionReceiptStart,
+  execute: () => Promise<T>,
+  finish: (result: T) => ActionReceiptFinish,
+): Promise<T> {
+  const receiptId = recordActionReceipt(start);
+  try {
+    const result = await execute();
+    settleActionReceipt(receiptId, finish(result));
+    return result;
+  } catch (error) {
+    settleActionReceipt(receiptId, {
+      status: "failed",
+      summary: start.failureSummary,
+      detail: String(error),
+    });
+    throw error;
+  }
 }
 
 function syncGoalRunState(goalRun: GoalRun) {
@@ -136,6 +213,7 @@ function cancelRuntimeLogRefreshBurst() {
 }
 
 function scheduleRuntimeLogRefreshBurst(activeProjectId: string) {
+  if (typeof window === "undefined") return;
   cancelRuntimeLogRefreshBurst();
   const token = runtimeLogRefreshBurstToken;
   for (const delay of [700, 1600, 2800]) {
@@ -301,6 +379,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   runtimeStatus: null,
   runtimeLogs: [],
   runtimeLogsUpdatedAt: null,
+  actionReceipts: [],
   loading: false,
   orchestrating: false,
   lastError: null,
@@ -433,7 +512,21 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
     }
 
     set({ lastError: null });
-    const resumed = await goalRunApi.resumeGoalRunWithRepair(goalRunId);
+    const resumed = await performTrackedAction(
+      {
+        action: "resume-with-repair",
+        goalRunId,
+        projectId: get().projectId,
+        summary: "Requesting repair",
+        failureSummary: "Failed to request repair",
+      },
+      () => goalRunApi.resumeGoalRunWithRepair(goalRunId),
+      () => ({
+        status: "succeeded",
+        summary: "Repair requested",
+        detail: "Operator repair request submitted.",
+      }),
+    );
     syncGoalRunState(resumed);
     ensurePolling(goalRunId);
     toast("Repair requested", "info");
@@ -458,31 +551,93 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   },
 
   stopGoalRun: async (goalRunId) => {
-    const stopped = await goalRunApi.stopGoalRun(goalRunId);
+    const stopped = await performTrackedAction(
+      {
+        action: "stop-goal",
+        goalRunId,
+        projectId: get().projectId,
+        summary: "Stopping goal run",
+        failureSummary: "Failed to stop goal run",
+      },
+      () => goalRunApi.stopGoalRun(goalRunId),
+      () => ({
+        status: "succeeded",
+        summary: "Goal run stopped",
+        detail: "Autopilot stopped for the active run.",
+      }),
+    );
     syncGoalRunState(stopped);
-    await get().refreshDeliverySnapshot(goalRunId);
+    await get().refreshDeliverySnapshot(goalRunId).catch((error) => {
+      devLog("warn", "Store:GoalRun", "Failed to refresh after stopping goal run", error);
+    });
     stopPolling();
     toast("Autopilot stopped", "info");
   },
 
   pauseGoalRun: async (goalRunId) => {
-    const paused = await goalRunApi.pauseGoalRun(goalRunId);
+    const paused = await performTrackedAction(
+      {
+        action: "pause-goal",
+        goalRunId,
+        projectId: get().projectId,
+        summary: "Pausing goal run",
+        failureSummary: "Failed to pause goal run",
+      },
+      () => goalRunApi.pauseGoalRun(goalRunId),
+      () => ({
+        status: "succeeded",
+        summary: "Goal run paused",
+        detail: "Autopilot paused for the active run.",
+      }),
+    );
     syncGoalRunState(paused);
-    await get().refreshDeliverySnapshot(goalRunId);
+    await get().refreshDeliverySnapshot(goalRunId).catch((error) => {
+      devLog("warn", "Store:GoalRun", "Failed to refresh after pausing goal run", error);
+    });
     stopPolling();
     toast("Autopilot paused — resume when ready", "info");
   },
 
   cancelGoalRun: async (goalRunId) => {
-    const cancelled = await goalRunApi.cancelGoalRun(goalRunId);
+    const cancelled = await performTrackedAction(
+      {
+        action: "cancel-goal",
+        goalRunId,
+        projectId: get().projectId,
+        summary: "Cancelling goal run",
+        failureSummary: "Failed to cancel goal run",
+      },
+      () => goalRunApi.cancelGoalRun(goalRunId),
+      () => ({
+        status: "succeeded",
+        summary: "Goal run cancelled",
+        detail: "Autopilot cancelled for the active run.",
+      }),
+    );
     syncGoalRunState(cancelled);
-    await get().refreshDeliverySnapshot(goalRunId);
+    await get().refreshDeliverySnapshot(goalRunId).catch((error) => {
+      devLog("warn", "Store:GoalRun", "Failed to refresh after cancelling goal run", error);
+    });
     stopPolling();
     toast("Autopilot cancelled", "info");
   },
 
   rerunVerification: async (goalRunId) => {
-    const run = await goalRunApi.rerunVerification(goalRunId);
+    const run = await performTrackedAction(
+      {
+        action: "rerun-verification",
+        goalRunId,
+        projectId: get().projectId,
+        summary: "Rerunning verification",
+        failureSummary: "Failed to rerun verification",
+      },
+      () => goalRunApi.rerunVerification(goalRunId),
+      () => ({
+        status: "succeeded",
+        summary: "Verification rerun",
+        detail: "Acceptance checks queued again for the active run.",
+      }),
+    );
     syncGoalRunState(run);
     ensurePolling(goalRunId);
     toast("Rerunning verification", "info");
@@ -501,54 +656,114 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
   startRuntime: async (projectId) => {
     const activeProjectId = projectId ?? get().projectId;
     if (!activeProjectId) return;
-    const runtimeStatus = await runtimeApi.startRuntime(activeProjectId);
-    const logs = await runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
-      path: null,
-      lines: [],
-    }));
-    if (projectMismatch(activeProjectId)) return;
-    const refreshedAt = new Date().toISOString();
-    useGoalRunStore.setState((state) => {
-      const merged = mergeRuntimeLogs(
-        state.runtimeLogs,
-        state.runtimeLogsUpdatedAt,
-        runtimeStatus,
-        logs,
-        refreshedAt,
-      );
-      return {
-        runtimeStatus,
-        runtimeLogs: merged.runtimeLogs,
-        runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
-      };
+    const receiptId = recordActionReceipt({
+      action: "start-runtime",
+      goalRunId: get().currentGoalRun?.id ?? null,
+      projectId: activeProjectId,
+      summary: "Starting app",
+      failureSummary: "Failed to start app",
     });
+    try {
+      const runtimeStatus = await runtimeApi.startRuntime(activeProjectId);
+      const logs = await runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
+        path: null,
+        lines: [],
+      }));
+      if (projectMismatch(activeProjectId)) {
+        settleActionReceipt(receiptId, {
+          status: "failed",
+          summary: "Runtime action ignored",
+          detail: "The active project changed before the runtime state was applied.",
+        });
+        return;
+      }
+      const refreshedAt = new Date().toISOString();
+      useGoalRunStore.setState((state) => {
+        const merged = mergeRuntimeLogs(
+          state.runtimeLogs,
+          state.runtimeLogsUpdatedAt,
+          runtimeStatus,
+          logs,
+          refreshedAt,
+        );
+        return {
+          runtimeStatus,
+          runtimeLogs: merged.runtimeLogs,
+          runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
+        };
+      });
+      settleActionReceipt(receiptId, {
+        status: "succeeded",
+        summary: "App started",
+        detail: runtimeStatus.session?.url
+          ? `Runtime session ${runtimeStatus.session.sessionId} at ${runtimeStatus.session.url}`
+          : `Runtime session ${runtimeStatus.session?.sessionId ?? "unknown"} is running.`,
+      });
+    } catch (error) {
+      settleActionReceipt(receiptId, {
+        status: "failed",
+        summary: "Failed to start app",
+        detail: String(error),
+      });
+      throw error;
+    }
     scheduleRuntimeLogRefreshBurst(activeProjectId);
   },
 
   stopRuntime: async (projectId) => {
     const activeProjectId = projectId ?? get().projectId;
     if (!activeProjectId) return;
-    const runtimeStatus = await runtimeApi.stopRuntime(activeProjectId);
-    const logs = await runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
-      path: null,
-      lines: [],
-    }));
-    if (projectMismatch(activeProjectId)) return;
-    const refreshedAt = new Date().toISOString();
-    useGoalRunStore.setState((state) => {
-      const merged = mergeRuntimeLogs(
-        state.runtimeLogs,
-        state.runtimeLogsUpdatedAt,
-        runtimeStatus,
-        logs,
-        refreshedAt,
-      );
-      return {
-        runtimeStatus,
-        runtimeLogs: merged.runtimeLogs,
-        runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
-      };
+    const receiptId = recordActionReceipt({
+      action: "stop-runtime",
+      goalRunId: get().currentGoalRun?.id ?? null,
+      projectId: activeProjectId,
+      summary: "Stopping app",
+      failureSummary: "Failed to stop app",
     });
+    try {
+      const runtimeStatus = await runtimeApi.stopRuntime(activeProjectId);
+      const logs = await runtimeApi.tailRuntimeLogs(activeProjectId, 120).catch(() => ({
+        path: null,
+        lines: [],
+      }));
+      if (projectMismatch(activeProjectId)) {
+        settleActionReceipt(receiptId, {
+          status: "failed",
+          summary: "Runtime action ignored",
+          detail: "The active project changed before the runtime state was applied.",
+        });
+        return;
+      }
+      const refreshedAt = new Date().toISOString();
+      useGoalRunStore.setState((state) => {
+        const merged = mergeRuntimeLogs(
+          state.runtimeLogs,
+          state.runtimeLogsUpdatedAt,
+          runtimeStatus,
+          logs,
+          refreshedAt,
+        );
+        return {
+          runtimeStatus,
+          runtimeLogs: merged.runtimeLogs,
+          runtimeLogsUpdatedAt: merged.runtimeLogsUpdatedAt,
+        };
+      });
+      settleActionReceipt(receiptId, {
+        status: "succeeded",
+        summary: "App stopped",
+        detail: runtimeStatus.session?.sessionId
+          ? `Runtime session ${runtimeStatus.session.sessionId} stopped.`
+          : "Runtime stopped.",
+      });
+    } catch (error) {
+      settleActionReceipt(receiptId, {
+        status: "failed",
+        summary: "Failed to stop app",
+        detail: String(error),
+      });
+      throw error;
+    }
   },
 
   reset: () => {
@@ -562,6 +777,7 @@ export const useGoalRunStore = create<GoalRunStore>((set, get) => ({
       runtimeStatus: null,
       runtimeLogs: [],
       runtimeLogsUpdatedAt: null,
+      actionReceipts: [],
       loading: false,
       orchestrating: false,
       lastError: null,
