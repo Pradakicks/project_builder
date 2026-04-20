@@ -205,6 +205,18 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         .or(settings.default_execution_engine.as_deref())
         .unwrap_or("built-in");
 
+    // Transition the implementation-agent row to Working. Phase 1 only tracks
+    // one role; the orchestrator in Phase 3 will drive Testing / Review too.
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.upsert_agent(piece_id, crate::models::AgentRole::Implementation);
+        let _ = db_lock.set_agent_state(
+            piece_id,
+            crate::models::AgentRole::Implementation,
+            crate::models::AgentState::Working,
+        );
+    }
+
     let result = match engine {
         "built-in" | "" => {
             run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle, cancel.clone()).await
@@ -220,6 +232,20 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         Ok(AgentResult::External { success, .. }) => *success,
         Err(_) => false,
     };
+
+    // Flip the agent row back to Idle on success, or Error on failure.
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.set_agent_state(
+            piece_id,
+            crate::models::AgentRole::Implementation,
+            if success {
+                crate::models::AgentState::Idle
+            } else {
+                crate::models::AgentState::Error
+            },
+        );
+    }
 
     // Compute phase transition based on policy (only on success)
     let mut phase_proposal: Option<String> = None;
@@ -722,6 +748,7 @@ async fn run_builtin_agent<R: tauri::Runtime>(
         };
         if let Err(e) = db.insert_agent_history(
             piece_id,
+            crate::models::AgentRole::Implementation,
             "run",
             &piece.agent_prompt,
             &output_text,
@@ -947,6 +974,7 @@ async fn run_external_agent<R: tauri::Runtime>(
                 let db = db.lock().map_err(|e| e.to_string())?;
                 if let Err(e) = db.insert_agent_history(
                     piece_id,
+                    crate::models::AgentRole::Implementation,
                     "external-run",
                     &user_prompt,
                     &run_result.output,

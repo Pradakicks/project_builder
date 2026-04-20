@@ -793,6 +793,7 @@ mod tests {
 
                 db.insert_agent_history(
                     &piece.id,
+                    crate::models::AgentRole::Implementation,
                     "run",
                     "build",
                     "ok",
