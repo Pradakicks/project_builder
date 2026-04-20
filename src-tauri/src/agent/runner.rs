@@ -354,14 +354,50 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         warn!(error = %e, "Failed to emit agent-output-chunk event");
     }
 
-    // Phase 3 — Specialized agent chain. If the piece's agent_config opts in to
-    // Testing and/or Review (non-empty active_agents containing those roles),
-    // run them sequentially after a successful Implementation pass. Fails in
-    // Testing/Review never abort the pipeline — they record structured
-    // outcomes the operator + repair agent can act on. Piece agent_config
-    // with an empty active_agents list (legacy default) stays on the
-    // single-role flow for backward compat and token-cost safety.
+    // Fire-and-forget context summarization on success
     if success {
+        let agent_output = match &result {
+            Ok(AgentResult::Builtin { output, .. }) => output.clone(),
+            Ok(AgentResult::External { .. }) => {
+                // External output is in agent_history; load it
+                db.lock()
+                    .ok()
+                    .and_then(|db| db.list_agent_history(piece_id).ok())
+                    .and_then(|history| history.into_iter().next().map(|h| h.output_text))
+                    .unwrap_or_default()
+            }
+            Err(_) => String::new(),
+        };
+
+        let git_info: Option<(String, String)> = match &result {
+            Ok(AgentResult::External { git_branch: Some(branch), .. }) => {
+                settings.working_directory.clone().map(|wd| (wd, branch.clone()))
+            }
+            _ => None,
+        };
+
+        let piece_id_owned = piece_id.to_string();
+        let piece_name = piece.name.clone();
+        let settings_clone = settings.clone();
+        let app = app_handle.clone();
+
+        if let Some((working_dir, branch)) = git_info.as_ref().map(|(wd, b)| (wd.as_str(), b.as_str()))
+        {
+            if let Err(e) =
+                store_generated_files_artifact(&piece_id_owned, working_dir, branch, db, &app).await
+            {
+                warn!(
+                    piece_id = %piece_id_owned,
+                    error = %e,
+                    "Generated files artifact update failed"
+                );
+            }
+        }
+
+        // Phase 3 — Specialized agent chain. Must run AFTER the impl's
+        // generated_files artifact exists so the Review agent can flip its
+        // reviewStatus. Pieces with an empty active_agents list (legacy
+        // default) stay on the single-role flow.
         let run_testing = piece
             .agent_config
             .active_agents
@@ -374,19 +410,6 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
             .any(|r| r.eq_ignore_ascii_case("review"));
 
         if run_testing || run_review {
-            let impl_output = match &result {
-                Ok(AgentResult::Builtin { output, .. }) => output.clone(),
-                Ok(AgentResult::External { .. }) => db
-                    .lock()
-                    .ok()
-                    .and_then(|d| {
-                        d.list_agent_history_by_role(piece_id, AgentRole::Implementation)
-                            .ok()
-                    })
-                    .and_then(|h| h.into_iter().next().map(|e| e.output_text))
-                    .unwrap_or_default(),
-                Err(_) => String::new(),
-            };
             let impl_diff = match &result {
                 Ok(AgentResult::External {
                     git_diff_stat: Some(stat),
@@ -396,8 +419,8 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
             };
 
             let mut chain_prior = RolePriorOutputs {
-                implementation_summary: Some(impl_output.clone()),
-                implementation_diff: impl_diff.clone(),
+                implementation_summary: Some(agent_output.clone()),
+                implementation_diff: impl_diff,
                 ..Default::default()
             };
 
@@ -441,47 +464,6 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
                 {
                     warn!(piece_id, error = %e, "Review role failed");
                 }
-            }
-        }
-    }
-
-    // Fire-and-forget context summarization on success
-    if success {
-        let agent_output = match &result {
-            Ok(AgentResult::Builtin { output, .. }) => output.clone(),
-            Ok(AgentResult::External { .. }) => {
-                // External output is in agent_history; load it
-                db.lock()
-                    .ok()
-                    .and_then(|db| db.list_agent_history(piece_id).ok())
-                    .and_then(|history| history.into_iter().next().map(|h| h.output_text))
-                    .unwrap_or_default()
-            }
-            Err(_) => String::new(),
-        };
-
-        let git_info: Option<(String, String)> = match &result {
-            Ok(AgentResult::External { git_branch: Some(branch), .. }) => {
-                settings.working_directory.clone().map(|wd| (wd, branch.clone()))
-            }
-            _ => None,
-        };
-
-        let piece_id_owned = piece_id.to_string();
-        let piece_name = piece.name.clone();
-        let settings_clone = settings.clone();
-        let app = app_handle.clone();
-
-        if let Some((working_dir, branch)) = git_info.as_ref().map(|(wd, b)| (wd.as_str(), b.as_str()))
-        {
-            if let Err(e) =
-                store_generated_files_artifact(&piece_id_owned, working_dir, branch, db, &app).await
-            {
-                warn!(
-                    piece_id = %piece_id_owned,
-                    error = %e,
-                    "Generated files artifact update failed"
-                );
             }
         }
 
@@ -1917,6 +1899,198 @@ mod tests {
         let generated = fs::read_to_string(std::path::Path::new(&working_dir).join("generated-from-codex.txt"))
             .expect("read fake codex output");
         assert!(generated.contains("fake codex run"));
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Regression: a piece configured with only the Implementation role
+    /// produces exactly the same shape as pre-Phase-3 behavior — one history
+    /// row, one generated_files artifact, no tests or review artifacts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_role_piece_runs_only_implementation() {
+        ensure_test_tools();
+
+        let workspace = temp_workspace("single-role");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Single-role".to_string(),
+            "legacy behavior".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "Solo", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        active_agents: vec!["implementation".to_string()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("configure single-role piece");
+            piece
+        };
+
+        run_piece_agent(&piece.id, None, &state, &app_handle, None)
+            .await
+            .expect("run single-role piece");
+
+        {
+            let db = state.lock().expect("lock db");
+            let history = db.list_agent_history(&piece.id).expect("list history");
+            assert_eq!(
+                history.len(),
+                1,
+                "single-role piece must produce exactly one history row"
+            );
+            assert_eq!(history[0].role, AgentRole::Implementation);
+
+            let impl_agents = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Implementation)
+                .expect("list by role");
+            assert_eq!(impl_agents.len(), 1);
+            let testing_agents = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Testing)
+                .expect("list by role");
+            assert!(
+                testing_agents.is_empty(),
+                "no Testing history for single-role piece"
+            );
+            let review_agents = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Review)
+                .expect("list by role");
+            assert!(
+                review_agents.is_empty(),
+                "no Review history for single-role piece"
+            );
+
+            // Only the impl artifact gets created. No 'tests' or 'review'.
+            let artifacts = db.list_artifacts(&piece.id).expect("list artifacts");
+            let types: Vec<&str> = artifacts.iter().map(|a| a.artifact_type.as_str()).collect();
+            assert!(types.contains(&"generated_files"));
+            assert!(!types.contains(&"tests"));
+            assert!(!types.contains(&"review"));
+        }
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Three-agent orchestration path: a piece with all three roles active
+    /// produces one history row per role, a `tests` artifact for Testing,
+    /// and a `review` artifact for Review. Because the fake codex stub
+    /// produces ambiguous output (no APPROVED / REJECTED line), the review
+    /// verdict defaults to Rejected — which also exercises the
+    /// reviewStatus flip on the impl artifact.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn three_role_piece_runs_testing_and_review_and_records_rejection() {
+        ensure_test_tools();
+
+        let workspace = temp_workspace("three-role");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Three-role".to_string(),
+            "impl + test + review".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "TrioPiece", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        active_agents: vec![
+                            "implementation".to_string(),
+                            "testing".to_string(),
+                            "review".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("configure three-role piece");
+            piece
+        };
+
+        run_piece_agent(&piece.id, None, &state, &app_handle, None)
+            .await
+            .expect("three-role run");
+
+        {
+            let db = state.lock().expect("lock db");
+
+            // One history row per role.
+            let impl_h = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Implementation)
+                .expect("list impl");
+            let test_h = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Testing)
+                .expect("list test");
+            let review_h = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Review)
+                .expect("list review");
+            assert_eq!(impl_h.len(), 1, "one Implementation history row");
+            assert_eq!(test_h.len(), 1, "one Testing history row");
+            assert_eq!(review_h.len(), 1, "one Review history row");
+
+            // Three distinct agents.id rows in the agents table, one per role.
+            let agents = db
+                .list_agents_for_piece(&piece.id)
+                .expect("list agents for piece");
+            let roles: std::collections::HashSet<_> = agents.iter().map(|a| a.role).collect();
+            assert!(roles.contains(&AgentRole::Implementation));
+            assert!(roles.contains(&AgentRole::Testing));
+            assert!(roles.contains(&AgentRole::Review));
+
+            // Artifact shape: generated_files + tests + review.
+            let artifacts = db.list_artifacts(&piece.id).expect("list artifacts");
+            let types: Vec<&str> = artifacts.iter().map(|a| a.artifact_type.as_str()).collect();
+            assert!(
+                types.contains(&"generated_files"),
+                "impl artifact present: {types:?}"
+            );
+            assert!(types.contains(&"tests"), "tests artifact present");
+            assert!(types.contains(&"review"), "review artifact present");
+
+            // Review defaults to Rejected because the fake codex output
+            // contains no APPROVED / REJECTED verdict line — the lenient
+            // parser treats "no clear verdict" as rejection.
+            let impl_artifact = db
+                .get_artifact_by_type(&piece.id, "generated_files")
+                .expect("read impl artifact")
+                .expect("impl artifact exists");
+            assert_eq!(
+                impl_artifact.review_status,
+                crate::models::artifact::ReviewStatus::Rejected,
+                "ambiguous review output must flip impl to Rejected"
+            );
+        }
 
         let _ = fs::remove_dir_all(&workspace);
     }

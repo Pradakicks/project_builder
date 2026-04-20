@@ -52,13 +52,21 @@ flowchart TB
   end
 
   subgraph Execution["Execution Layer"]
-    PieceA[Piece agent A]
-    PieceB[Piece agent B]
+    PieceA[Piece A orchestrator]
+    PieceB[Piece B orchestrator]
+    ImplA[Implementation agent]
+    TestA[Testing agent]
+    ReviewA[Review agent]
     Models[Built-in models]
     Coders[Claude Code / Codex]
     Leader --> PieceA
     Leader --> PieceB
-    PieceA --> Models
+    PieceA --> ImplA
+    PieceA --> TestA
+    PieceA --> ReviewA
+    ImplA --> Models
+    TestA --> Coders
+    ReviewA --> Models
     PieceB --> Coders
   end
 
