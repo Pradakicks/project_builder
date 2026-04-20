@@ -26,6 +26,10 @@ pub fn build_repair_prompt(phase: GoalRunPhase, ctx: &PhaseFailureContext) -> St
     ));
     out.push_str(&format!("Summary: {}\n", ctx.summary.trim()));
 
+    if let Some(role) = ctx.failing_role {
+        out.push_str(&format!("Failing role: {}\n", role.as_str()));
+    }
+
     if !ctx.failed_checks.is_empty() {
         out.push_str(&format!(
             "\nFailed checks ({}):\n",
@@ -159,7 +163,7 @@ fn snip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CheckKind, GoalRunPhase, VerificationCheck, VerificationResult};
+    use crate::models::{AgentRole, CheckKind, GoalRunPhase, VerificationCheck, VerificationResult};
 
     fn check(
         name: &str,
@@ -248,6 +252,7 @@ do NOT use runPiece, runAllTasks, or retryGoalStep, as the system retries the ph
             passed_checks: vec![],
             started_at: None,
             finished_at: None,
+            failing_role: None,
         };
         let got = build_repair_prompt(GoalRunPhase::Verification, &ctx);
         assert!(!got.contains("Passed checks"));
@@ -286,6 +291,7 @@ do NOT use runPiece, runAllTasks, or retryGoalStep, as the system retries the ph
             passed_checks: vec![],
             started_at: None,
             finished_at: None,
+            failing_role: None,
         };
         let got = build_repair_prompt(GoalRunPhase::Verification, &ctx);
         assert!(got.contains("   Actual:\n"));
@@ -310,6 +316,7 @@ do NOT use runPiece, runAllTasks, or retryGoalStep, as the system retries the ph
             passed_checks: vec![],
             started_at: None,
             finished_at: None,
+            failing_role: None,
         };
         let got = build_repair_prompt(GoalRunPhase::Verification, &ctx);
         assert!(got.contains("…[truncated"));
@@ -337,11 +344,22 @@ do NOT use runPiece, runAllTasks, or retryGoalStep, as the system retries the ph
             passed_checks: vec![],
             started_at: None,
             finished_at: None,
+            failing_role: None,
         };
         let got = build_repair_prompt(GoalRunPhase::Verification, &ctx);
         assert!(got.contains("   Detail: exited 2 via `npm run check`"));
         assert!(!got.contains("Expected:"));
         assert!(!got.contains("Actual:"));
+    }
+
+    #[test]
+    fn renders_failing_role_line_when_set() {
+        let ctx = PhaseFailureContext::from_summary("x").with_failing_role(AgentRole::Review);
+        let got = build_repair_prompt(GoalRunPhase::Implementation, &ctx);
+        assert!(
+            got.contains("Failing role: review"),
+            "expected prompt to contain 'Failing role: review', got:\n{got}"
+        );
     }
 
     #[test]
@@ -372,6 +390,7 @@ do NOT use runPiece, runAllTasks, or retryGoalStep, as the system retries the ph
             passed_checks: passed,
             started_at: None,
             finished_at: None,
+            failing_role: None,
         };
         let got = build_repair_prompt(GoalRunPhase::Verification, &ctx);
         assert!(got.contains("Passed checks (9): check 0 (shell)"));

@@ -1,4 +1,9 @@
-use crate::agent::{build_agent_prompt, build_external_prompt, build_leader_prompt, next_phase, PieceContext};
+use crate::agent::{
+    build_agent_prompt, build_external_prompt, build_implementation_prompt, build_leader_prompt,
+    build_review_prompt, build_role_external_prompt, build_testing_prompt, next_phase,
+    parse_review_verdict, PieceContext, RolePriorOutputs,
+};
+use crate::models::{AgentRole, AgentState};
 use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, Message, TokenUsage};
 use crate::models::*;
@@ -217,12 +222,38 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         );
     }
 
+    let impl_prior = RolePriorOutputs::default();
     let result = match engine {
         "built-in" | "" => {
-            run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle, cancel.clone()).await
+            run_builtin_agent(
+                &piece,
+                &context,
+                &settings,
+                piece_id,
+                feedback,
+                db,
+                app_handle,
+                cancel.clone(),
+                AgentRole::Implementation,
+                &impl_prior,
+            )
+            .await
         }
         name => {
-            run_external_agent(&piece, &context, &settings, name, piece_id, feedback, db, app_handle, cancel.clone()).await
+            run_external_agent(
+                &piece,
+                &context,
+                &settings,
+                name,
+                piece_id,
+                feedback,
+                db,
+                app_handle,
+                cancel.clone(),
+                AgentRole::Implementation,
+                &impl_prior,
+            )
+            .await
         }
     };
 
@@ -321,6 +352,97 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
     }
     if let Err(e) = app_handle.emit("agent-output-chunk", done_payload) {
         warn!(error = %e, "Failed to emit agent-output-chunk event");
+    }
+
+    // Phase 3 — Specialized agent chain. If the piece's agent_config opts in to
+    // Testing and/or Review (non-empty active_agents containing those roles),
+    // run them sequentially after a successful Implementation pass. Fails in
+    // Testing/Review never abort the pipeline — they record structured
+    // outcomes the operator + repair agent can act on. Piece agent_config
+    // with an empty active_agents list (legacy default) stays on the
+    // single-role flow for backward compat and token-cost safety.
+    if success {
+        let run_testing = piece
+            .agent_config
+            .active_agents
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case("testing"));
+        let run_review = piece
+            .agent_config
+            .active_agents
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case("review"));
+
+        if run_testing || run_review {
+            let impl_output = match &result {
+                Ok(AgentResult::Builtin { output, .. }) => output.clone(),
+                Ok(AgentResult::External { .. }) => db
+                    .lock()
+                    .ok()
+                    .and_then(|d| {
+                        d.list_agent_history_by_role(piece_id, AgentRole::Implementation)
+                            .ok()
+                    })
+                    .and_then(|h| h.into_iter().next().map(|e| e.output_text))
+                    .unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            let impl_diff = match &result {
+                Ok(AgentResult::External {
+                    git_diff_stat: Some(stat),
+                    ..
+                }) => Some(stat.clone()),
+                _ => None,
+            };
+
+            let mut chain_prior = RolePriorOutputs {
+                implementation_summary: Some(impl_output.clone()),
+                implementation_diff: impl_diff.clone(),
+                ..Default::default()
+            };
+
+            if run_testing {
+                let prior_snapshot = chain_prior.clone();
+                if let Err(e) = run_extra_role(
+                    &piece,
+                    &context,
+                    &settings,
+                    piece_id,
+                    engine,
+                    db,
+                    app_handle,
+                    cancel.clone(),
+                    AgentRole::Testing,
+                    &prior_snapshot,
+                    &mut chain_prior,
+                )
+                .await
+                {
+                    warn!(piece_id, error = %e, "Testing role failed; continuing to Review if active");
+                }
+            }
+
+            if run_review {
+                let prior_snapshot = chain_prior.clone();
+                if let Err(e) = run_extra_role(
+                    &piece,
+                    &context,
+                    &settings,
+                    piece_id,
+                    engine,
+                    db,
+                    app_handle,
+                    cancel.clone(),
+                    AgentRole::Review,
+                    &prior_snapshot,
+                    &mut chain_prior,
+                )
+                .await
+                {
+                    warn!(piece_id, error = %e, "Review role failed");
+                }
+            }
+        }
     }
 
     // Fire-and-forget context summarization on success
@@ -429,6 +551,168 @@ fn update_plan_task_status_in_db(
         },
     )?;
     Ok(())
+}
+
+/// Run one of the follow-on roles (Testing or Review) after Implementation has
+/// succeeded. Handles: upsert_agent + state transitions, dispatch to built-in
+/// or external engine with the role-specific prompt, and role-specific
+/// post-processing (tests artifact for Testing; review artifact + verdict +
+/// reviewStatus flip for Review). Returns Err if the LLM/CLI call itself
+/// errors; tests-failing or review-rejecting do NOT produce Err — they record
+/// their outcome so the operator / repair agent can act.
+async fn run_extra_role<R: tauri::Runtime>(
+    piece: &Piece,
+    context: &PieceContext,
+    settings: &ProjectSettings,
+    piece_id: &str,
+    engine: &str,
+    db: &Mutex<Database>,
+    app_handle: &AppHandle<R>,
+    cancel: Option<CancellationToken>,
+    role: AgentRole,
+    prior_in: &RolePriorOutputs,
+    prior_out: &mut RolePriorOutputs,
+) -> Result<(), String> {
+    info!(piece_id, role = role.as_str(), engine, "Starting extra role");
+
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.upsert_agent(piece_id, role);
+        let _ = db_lock.set_agent_state(piece_id, role, AgentState::Working);
+    }
+
+    let role_result = match engine {
+        "built-in" | "" => {
+            run_builtin_agent(
+                piece, context, settings, piece_id, None, db, app_handle, cancel, role, prior_in,
+            )
+            .await
+        }
+        name => {
+            run_external_agent(
+                piece, context, settings, name, piece_id, None, db, app_handle, cancel, role,
+                prior_in,
+            )
+            .await
+        }
+    };
+
+    let role_succeeded = matches!(
+        &role_result,
+        Ok(AgentResult::Builtin { .. }) | Ok(AgentResult::External { success: true, .. })
+    );
+
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.set_agent_state(
+            piece_id,
+            role,
+            if role_succeeded {
+                AgentState::Idle
+            } else {
+                AgentState::Error
+            },
+        );
+    }
+
+    // Extract role output from the result or from history.
+    let role_output = match &role_result {
+        Ok(AgentResult::Builtin { output, .. }) => output.clone(),
+        Ok(AgentResult::External { .. }) => db
+            .lock()
+            .ok()
+            .and_then(|d| d.list_agent_history_by_role(piece_id, role).ok())
+            .and_then(|h| h.into_iter().next().map(|e| e.output_text))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+
+    // Role-specific post-processing.
+    match role {
+        AgentRole::Testing => {
+            // Capture the test output for Review's prompt; flag pass/fail if
+            // the validation command ran.
+            prior_out.tests_summary = Some(role_output.clone());
+            prior_out.tests_output_tail = if role_output.chars().count() > 800 {
+                Some(
+                    role_output
+                        .chars()
+                        .skip(role_output.chars().count().saturating_sub(800))
+                        .collect(),
+                )
+            } else {
+                Some(role_output.clone())
+            };
+            if let Ok(AgentResult::External {
+                validation: Some(v),
+                ..
+            }) = &role_result
+            {
+                prior_out.tests_passed = Some(v.passed);
+            }
+            // Record a lightweight "tests" artifact for the UI timeline.
+            if role_succeeded {
+                if let Ok(db_lock) = db.lock() {
+                    let _ = db_lock.upsert_artifact(
+                        piece_id,
+                        "tests",
+                        "Tests written",
+                        &role_output,
+                    );
+                }
+            }
+        }
+        AgentRole::Review => {
+            let (approved, reason) = parse_review_verdict(&role_output);
+
+            // Store the full review prose so operators can read it inline.
+            if let Ok(db_lock) = db.lock() {
+                let _ = db_lock.upsert_artifact(
+                    piece_id,
+                    "review",
+                    if approved { "Review: APPROVED" } else { "Review: REJECTED" },
+                    &role_output,
+                );
+
+                // Flip the implementation's generated_files artifact's
+                // reviewStatus. Legacy pieces without such an artifact get a
+                // silent no-op via the helper.
+                let new_status = if approved {
+                    crate::models::artifact::ReviewStatus::Approved
+                } else {
+                    crate::models::artifact::ReviewStatus::Rejected
+                };
+                let _ = db_lock.set_artifact_review_status(
+                    piece_id,
+                    "generated_files",
+                    new_status,
+                );
+            }
+
+            if !approved {
+                warn!(
+                    piece_id,
+                    reason = %reason,
+                    "Review agent rejected the implementation"
+                );
+                // Surface via the running event channel so the UI's ActivityFeed
+                // / ProjectStatusBar pick it up immediately without a poll.
+                let _ = app_handle.emit(
+                    "agent-output-chunk",
+                    json!({
+                        "pieceId": piece_id,
+                        "chunk": "",
+                        "done": true,
+                        "reviewRejected": true,
+                        "reviewReason": reason,
+                    }),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    role_result.map(|_| ())
 }
 
 pub async fn run_all_plan_tasks<R: tauri::Runtime>(
@@ -640,6 +924,8 @@ async fn run_builtin_agent<R: tauri::Runtime>(
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
     cancel: Option<CancellationToken>,
+    role: AgentRole,
+    prior: &RolePriorOutputs,
 ) -> Result<AgentResult, String> {
     let max_tokens = piece.agent_config.token_budget.unwrap_or(4096) as u32;
 
@@ -673,7 +959,13 @@ async fn run_builtin_agent<R: tauri::Runtime>(
         ));
     }
 
-    let mut messages = build_agent_prompt(piece, context);
+    // Role-aware prompt: Implementation keeps today's exact shape; Testing and
+    // Review layer role-specific directives + prior-role context on top.
+    let mut messages = match role {
+        AgentRole::Testing => build_testing_prompt(piece, context, prior),
+        AgentRole::Review => build_review_prompt(piece, context, prior),
+        _ => build_implementation_prompt(piece, context),
+    };
 
     // Iterative mode: inject previous output + feedback as conversation context
     if let Some(fb) = feedback {
@@ -748,7 +1040,7 @@ async fn run_builtin_agent<R: tauri::Runtime>(
         };
         if let Err(e) = db.insert_agent_history(
             piece_id,
-            crate::models::AgentRole::Implementation,
+            role,
             "run",
             &piece.agent_prompt,
             &output_text,
@@ -786,6 +1078,8 @@ async fn run_external_agent<R: tauri::Runtime>(
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
     cancel: Option<CancellationToken>,
+    role: AgentRole,
+    prior: &RolePriorOutputs,
 ) -> Result<AgentResult, String> {
     use super::git_ops;
 
@@ -799,7 +1093,11 @@ async fn run_external_agent<R: tauri::Runtime>(
 
     info!(piece_id, engine = engine_name, working_dir, timeout = piece.agent_config.timeout.unwrap_or(300), "Starting external agent run");
 
-    let (system_prompt, user_prompt_base) = build_external_prompt(piece, context);
+    // Role-aware external prompt.
+    let (system_prompt, user_prompt_base) = match role {
+        AgentRole::Implementation => build_external_prompt(piece, context),
+        _ => build_role_external_prompt(piece, context, role, prior),
+    };
     let mut user_prompt = user_prompt_base;
 
     // Iterative mode: append previous output + feedback to the prompt
@@ -974,7 +1272,7 @@ async fn run_external_agent<R: tauri::Runtime>(
                 let db = db.lock().map_err(|e| e.to_string())?;
                 if let Err(e) = db.insert_agent_history(
                     piece_id,
-                    crate::models::AgentRole::Implementation,
+                    role,
                     "external-run",
                     &user_prompt,
                     &run_result.output,
