@@ -639,6 +639,7 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use crate::models::{GoalRunPhase, GoalRunStatus, GoalRunUpdate};
+    use crate::test_support::GoalRunScenarioFixture;
     use std::sync::Mutex;
 
     #[test]
@@ -878,5 +879,91 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&db_path);
+    }
+
+    #[test]
+    fn repair_requested_fixture_records_operator_repair_event() {
+        let fixture = GoalRunScenarioFixture::repair_requested();
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+
+        runtime.block_on(async {
+            let snapshot = build_goal_run_delivery_snapshot_impl(
+                &fixture.db,
+                &fixture.runtime_sessions,
+                &fixture.goal_run.id,
+            )
+            .await
+            .expect("build delivery snapshot");
+
+            assert_eq!(snapshot.goal_run.status, GoalRunStatus::Running);
+            assert!(snapshot.retry_state.operator_repair_requested);
+            assert_eq!(
+                snapshot.recent_events.last().map(|event| event.kind.clone()),
+                Some(crate::models::GoalRunEventKind::RepairRequested)
+            );
+            assert!(
+                snapshot
+                    .recent_events
+                    .last()
+                    .and_then(|event| event.payload_json.as_deref())
+                    .unwrap_or("")
+                    .contains("operator-forced")
+            );
+            assert!(
+                !snapshot
+                    .verification_result
+                    .as_ref()
+                    .expect("verification result")
+                    .passed
+            );
+        });
+
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn repair_skipped_fixture_records_blocked_state_and_skip_event() {
+        let fixture = GoalRunScenarioFixture::repair_skipped();
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+
+        runtime.block_on(async {
+            let snapshot = build_goal_run_delivery_snapshot_impl(
+                &fixture.db,
+                &fixture.runtime_sessions,
+                &fixture.goal_run.id,
+            )
+            .await
+            .expect("build delivery snapshot");
+
+            assert_eq!(snapshot.goal_run.status, GoalRunStatus::Blocked);
+            assert_eq!(
+                snapshot.goal_run.blocker_reason.as_deref(),
+                Some("CTO repair skipped: retry budget exhausted")
+            );
+            assert_eq!(snapshot.retry_state.retry_count, 3);
+            assert!(snapshot.retry_state.attention_required);
+            assert!(!snapshot.retry_state.operator_repair_requested);
+            assert_eq!(
+                snapshot.recent_events.last().map(|event| event.kind.clone()),
+                Some(crate::models::GoalRunEventKind::RepairSkipped)
+            );
+            assert!(
+                snapshot
+                    .recent_events
+                    .last()
+                    .and_then(|event| event.payload_json.as_deref())
+                    .unwrap_or("")
+                    .contains("retry-budget-exhausted")
+            );
+            assert!(
+                !snapshot
+                    .verification_result
+                    .as_ref()
+                    .expect("verification result")
+                    .passed
+            );
+        });
+
+        fixture.cleanup();
     }
 }

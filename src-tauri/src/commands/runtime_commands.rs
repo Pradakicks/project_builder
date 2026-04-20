@@ -2580,11 +2580,13 @@ pub async fn get_runtime_detection_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::goal_run_commands::build_goal_run_delivery_snapshot_impl;
     use crate::db::Database;
     use crate::models::{
-        AutonomyMode, ConflictResolutionPolicy, PhaseControlPolicy, ProjectSettings,
-        RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
+        AutonomyMode, CheckKind, ConflictResolutionPolicy, GoalRunStatus, PhaseControlPolicy,
+        ProjectSettings, RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
     };
+    use crate::test_support::GoalRunScenarioFixture;
     use std::sync::Mutex;
 
     fn temp_dir(case: &str) -> PathBuf {
@@ -2604,6 +2606,31 @@ mod tests {
         if let Some(parent) = path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    async fn insert_live_runtime_handle(
+        sessions: &Mutex<RuntimeSessions>,
+        project_id: &str,
+        session: &ProjectRuntimeSession,
+        log_path: &Path,
+    ) -> std::sync::Arc<RuntimeSessionHandle> {
+        let log_file = tokio::fs::File::open(log_path)
+            .await
+            .expect("open scenario runtime log");
+        let handle = std::sync::Arc::new(RuntimeSessionHandle {
+            session: AsyncMutex::new(session.clone()),
+            child: AsyncMutex::new(None),
+            log_path: log_path.to_path_buf(),
+            log_file: AsyncMutex::new(log_file),
+            recent_logs: AsyncMutex::new(session.recent_logs.clone().into_iter().collect()),
+        });
+
+        sessions
+            .lock()
+            .expect("lock runtime sessions")
+            .insert(project_id.to_string(), handle.clone());
+
+        handle
     }
 
     fn create_project_settings(working_dir: &Path, runtime_spec: ProjectRuntimeSpec) -> ProjectSettings {
@@ -2866,6 +2893,191 @@ mod tests {
         }
 
         cleanup(&db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_fatal_retry_exhausted_fixture_reports_log_scan_failure_and_snapshot_contract() {
+        let fixture = GoalRunScenarioFixture::forced_fatal_retry_exhausted();
+        let live_handle = insert_live_runtime_handle(
+            &fixture.runtime_sessions,
+            &fixture.project.id,
+            &fixture.runtime_session,
+            &fixture.runtime_log_path,
+        )
+        .await;
+
+        let verification = verify_runtime_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("verify runtime");
+
+        assert!(!verification.passed);
+        assert_eq!(verification.checks.len(), 1);
+        assert_eq!(verification.checks[0].kind, CheckKind::LogScan);
+        assert!(verification.message.contains("log scan — fatal patterns"));
+        assert!(verification.checks[0].detail.contains("line 16"));
+
+        let tail = tail_runtime_logs_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            Some(20),
+        )
+        .await
+        .expect("tail runtime logs");
+        assert!(tail
+            .lines
+            .last()
+            .expect("tail line")
+            .contains("FATAL: forced for test"));
+
+        let snapshot = build_goal_run_delivery_snapshot_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            &fixture.goal_run.id,
+        )
+        .await
+        .expect("build delivery snapshot");
+        assert_eq!(snapshot.retry_state.retry_count, 3);
+        assert_eq!(
+            snapshot
+                .verification_result
+                .as_ref()
+                .expect("verification result")
+                .passed,
+            false
+        );
+        assert_eq!(
+            snapshot.recent_events.last().map(|event| event.kind.clone()),
+            Some(crate::models::GoalRunEventKind::Blocked)
+        );
+
+        drop(live_handle);
+        fixture.cleanup();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_logs_vs_live_logs_fixture_prefers_live_snapshot_but_persisted_tail_keeps_stale_warning() {
+        let fixture = GoalRunScenarioFixture::stale_logs_vs_live_logs();
+        let live_handle = insert_live_runtime_handle(
+            &fixture.runtime_sessions,
+            &fixture.project.id,
+            &fixture.runtime_session,
+            &fixture.runtime_log_path,
+        )
+        .await;
+
+        let snapshot = build_goal_run_delivery_snapshot_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            &fixture.goal_run.id,
+        )
+        .await
+        .expect("build delivery snapshot");
+        let live_logs = &snapshot
+            .runtime_status
+            .as_ref()
+            .expect("runtime status")
+            .session
+            .as_ref()
+            .expect("runtime session")
+            .recent_logs;
+        assert!(live_logs.iter().any(|line| line.contains("fresh status ok")));
+        assert!(
+            !live_logs
+                .iter()
+                .any(|line| line.contains("stale blocker from a prior run"))
+        );
+
+        {
+            let mut sessions = fixture.runtime_sessions.lock().expect("lock runtime sessions");
+            sessions.remove(&fixture.project.id);
+        }
+        drop(live_handle);
+
+        let tail = tail_runtime_logs_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            Some(20),
+        )
+        .await
+        .expect("tail runtime logs");
+        assert!(tail
+            .lines
+            .iter()
+            .any(|line| line.contains("WARNING: stale blocker from a prior run")));
+
+        fixture.cleanup();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clean_runtime_pass_fixture_verifies_without_external_server() {
+        let fixture = GoalRunScenarioFixture::clean_runtime_pass();
+        let live_handle = insert_live_runtime_handle(
+            &fixture.runtime_sessions,
+            &fixture.project.id,
+            &fixture.runtime_session,
+            &fixture.runtime_log_path,
+        )
+        .await;
+
+        let verification = verify_runtime_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("verify runtime");
+
+        assert!(verification.passed);
+        assert_eq!(verification.checks.len(), 1);
+        assert_eq!(verification.checks[0].kind, CheckKind::LogScan);
+        assert!(verification.message.contains("1/1 checks passed"));
+
+        let snapshot = build_goal_run_delivery_snapshot_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            &fixture.goal_run.id,
+        )
+        .await
+        .expect("build delivery snapshot");
+        assert!(
+            snapshot
+                .verification_result
+                .as_ref()
+                .expect("verification result")
+                .passed
+        );
+        assert_eq!(snapshot.goal_run.status, GoalRunStatus::Completed);
+        assert!(snapshot
+            .verification_result
+            .as_ref()
+            .expect("verification result")
+            .checks
+            .iter()
+            .any(|check| check.passed));
+
+        let tail = tail_runtime_logs_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            Some(20),
+        )
+        .await
+        .expect("tail runtime logs");
+        assert!(tail
+            .lines
+            .iter()
+            .any(|line| line.contains("runtime: server ready")));
+
+        drop(live_handle);
+        fixture.cleanup();
     }
 
     #[test]
