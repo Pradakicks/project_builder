@@ -200,6 +200,63 @@ function CheckDetailRow({ check }: { check: VerificationCheck }) {
   );
 }
 
+/// When the Review agent rejects the implementation of the blocking piece,
+/// show its prose inline so operators can read the rejection reason without
+/// hunting through artifacts. Fetches lazily so pieces without a Review step
+/// (legacy single-role runs) cost nothing.
+function ReviewRejectionSurface({ pieceId }: { pieceId: string }) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "none" }
+    | { kind: "review"; status: string; title: string; content: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listArtifacts } = await import("../../api/leaderApi");
+        const artifacts = await listArtifacts(pieceId);
+        if (cancelled) return;
+        const review = artifacts.find((a) => a.artifactType === "review");
+        const impl = artifacts.find((a) => a.artifactType === "generated_files");
+        const implRejected = impl?.reviewStatus === "rejected";
+        if (review && implRejected) {
+          setState({
+            kind: "review",
+            status: impl?.reviewStatus ?? "rejected",
+            title: review.title,
+            content: review.content,
+          });
+        } else {
+          setState({ kind: "none" });
+        }
+      } catch {
+        if (!cancelled) setState({ kind: "none" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pieceId]);
+
+  if (state.kind !== "review") return null;
+
+  return (
+    <div className="rounded border border-red-900/50 bg-red-950/20 p-2 text-[11px] text-red-100">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="rounded bg-red-900/60 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-red-200">
+          Review rejected
+        </span>
+        <span className="text-red-200/80">{state.title}</span>
+      </div>
+      <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] text-red-100">
+        {state.content}
+      </pre>
+    </div>
+  );
+}
+
 function VerificationResultBlock({ result }: { result: VerificationResult }) {
   const passed = result.passed;
   const totalMs = result.checks.reduce((sum, c) => sum + c.durationMs, 0);
@@ -726,6 +783,10 @@ export function DeliveryPanel() {
                 </button>
               ) : null}
             </div>
+
+            {blockingPiece && (
+              <ReviewRejectionSurface pieceId={blockingPiece.id} />
+            )}
 
             <div className="grid gap-3 text-[11px] md:grid-cols-2">
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">

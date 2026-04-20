@@ -130,7 +130,13 @@ impl Database {
         debug!(project_id, name, "Creating piece");
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
-        let agent_config = AgentConfig::default();
+        // New pieces default to the single-role flow (implementation only).
+        // Users opt in to Testing / Review per piece via the PieceEditor UI.
+        // This keeps token costs predictable for users who don't want the
+        // three-agent pass. A future migration or project-level default can
+        // flip this later.
+        let mut agent_config = AgentConfig::default();
+        agent_config.active_agents = vec!["implementation".to_string()];
         let agent_config_json = serde_json::to_string(&agent_config).map_err(|e| e.to_string())?;
 
         self.conn

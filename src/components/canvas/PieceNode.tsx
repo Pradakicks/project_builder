@@ -8,8 +8,15 @@ interface PieceNodeData {
   phase: Phase;
   color: string | null;
   interfaces: PieceInterface[];
+  activeAgents?: string[];
   [key: string]: unknown;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  implementation: "impl",
+  testing: "test",
+  review: "rev",
+};
 
 const phaseColors: Record<string, string> = {
   design: "bg-yellow-500/20 text-yellow-400",
@@ -106,6 +113,33 @@ export function PieceNode({ id, data, selected }: NodeProps) {
             </div>
           )}
         </div>
+
+        {/* Per-role dots, visible only when the piece has extra roles configured. */}
+        {nodeData.activeAgents && nodeData.activeAgents.length > 1 && (
+          <div className="flex items-center gap-1 text-[9px] text-gray-500">
+            {["implementation", "testing", "review"].map((role) => {
+              const active = nodeData.activeAgents!.some(
+                (r) => r.toLowerCase() === role,
+              );
+              return (
+                <span
+                  key={role}
+                  className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 ${
+                    active
+                      ? "bg-gray-800 text-gray-300"
+                      : "bg-gray-900 text-gray-700 opacity-40"
+                  }`}
+                  title={`${ROLE_LABELS[role] ?? role} ${active ? "enabled" : "disabled"}`}
+                >
+                  <span
+                    className={`inline-block h-1 w-1 rounded-full ${active ? "bg-emerald-400" : "bg-gray-700"}`}
+                  />
+                  {ROLE_LABELS[role] ?? role}
+                </span>
+              );
+            })}
+          </div>
+        )}
 
         {/* Interface port indicators */}
         {hasCustomPorts && (

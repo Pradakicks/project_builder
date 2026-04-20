@@ -51,6 +51,7 @@ export function DiagramCanvas() {
           phase: p.phase,
           color: p.color,
           interfaces: p.interfaces,
+          activeAgents: p.agentConfig.activeAgents ?? [],
         },
       })),
     [pieces],

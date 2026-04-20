@@ -518,6 +518,110 @@ const engineOptions = [
   { value: "codex", label: "Codex" },
 ];
 
+const PIECE_ROLES = [
+  {
+    id: "implementation",
+    label: "Implementation",
+    description: "Writes the code. Always runs.",
+    required: true,
+  },
+  {
+    id: "testing",
+    label: "Testing",
+    description:
+      "Writes tests against the implementation and runs them via the validation command.",
+    required: false,
+  },
+  {
+    id: "review",
+    label: "Review",
+    description:
+      "Reads the diff + test output and produces APPROVED / REJECTED. Sets review status on the implementation artifact.",
+    required: false,
+  },
+] as const;
+
+function ActiveAgentsEditor({
+  piece,
+  onUpdate,
+}: {
+  piece: Piece;
+  onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
+}) {
+  const current = piece.agentConfig.activeAgents ?? [];
+  // Empty list = legacy single-role (implementation only). Treat it as such
+  // for checkbox display — the UI never claims testing/review are on unless
+  // they're explicitly in the list.
+  const has = (role: string) => current.some((r) => r.toLowerCase() === role);
+
+  const toggle = async (role: string, on: boolean) => {
+    // Treat empty current as ["implementation"] so toggles start from a sane
+    // baseline rather than silently flipping the whole piece to three-role.
+    const base = current.length > 0 ? current : ["implementation"];
+    let next: string[];
+    if (on) {
+      next = base.includes(role) ? base : [...base, role];
+    } else {
+      next = base.filter((r) => r.toLowerCase() !== role);
+    }
+    // Keep canonical order (implementation → testing → review) so the list is
+    // deterministic and the orchestrator can trust it.
+    const order = ["implementation", "testing", "review"];
+    next.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    await onUpdate(piece.id, {
+      agentConfig: { ...piece.agentConfig, activeAgents: next },
+    });
+  };
+
+  return (
+    <div className="space-y-1.5 border-t border-gray-800 pt-3">
+      <FieldLabel>Active agents</FieldLabel>
+      <p className="text-[10px] text-gray-500">
+        Sequential — each sees the previous output. Extra roles triple the
+        token cost of a run; opt in per piece. Empty means legacy single-role
+        (Implementation only).
+      </p>
+      <div className="mt-1.5 space-y-1.5">
+        {PIECE_ROLES.map((role) => {
+          const checked = has(role.id);
+          return (
+            <label
+              key={role.id}
+              className={`flex items-start gap-2 rounded border px-2 py-1.5 text-xs ${
+                checked
+                  ? "border-emerald-900/60 bg-emerald-950/20"
+                  : "border-gray-800 bg-gray-900"
+              } ${role.required ? "cursor-default opacity-80" : "cursor-pointer hover:bg-gray-900/70"}`}
+            >
+              <input
+                type="checkbox"
+                checked={role.required ? true : checked}
+                disabled={role.required}
+                onChange={(e) => {
+                  if (role.required) return;
+                  void toggle(role.id, e.target.checked);
+                }}
+                className="mt-0.5"
+              />
+              <div className="flex-1">
+                <div className="font-medium text-gray-200">
+                  {role.label}
+                  {role.required && (
+                    <span className="ml-2 text-[10px] text-gray-500">
+                      (always on)
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-gray-500">{role.description}</div>
+              </div>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AgentTab({
   piece,
   onUpdate,
@@ -835,6 +939,8 @@ function AgentTab({
           </div>
         </>
       )}
+
+      <ActiveAgentsEditor piece={piece} onUpdate={onUpdate} />
 
       <div className="border-t border-gray-800 pt-3">
         <button
