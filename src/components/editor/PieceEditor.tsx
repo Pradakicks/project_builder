@@ -680,7 +680,7 @@ function TeamEditor({
 
   useEffect(() => {
     setDraft(piece.agentConfig.team ?? "");
-  }, [piece.agentConfig.team]);
+  }, [piece.id, piece.agentConfig.team]);
 
   const commit = async (raw: string) => {
     const normalized = normalizeTeamName(raw);
