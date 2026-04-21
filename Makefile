@@ -4,7 +4,7 @@
 SHELL := /bin/zsh
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: dev build check clean setup icons container-up container-shell container-frontend check-container host-tauri-dev dev-session dev-session-host dev-session-tail
+.PHONY: dev build check verify verify-feature clean setup icons container-up container-shell container-frontend check-container host-tauri-dev dev-session dev-session-host dev-session-tail
 
 # ── Primary commands ──────────────────────────────────────
 
@@ -32,6 +32,21 @@ build:
 check:
 	npx tsc --noEmit
 	cd src-tauri && cargo check
+
+## Run the full local verification gate
+verify:
+	npm run test
+	npx tsc --noEmit
+	cd src-tauri && cargo test
+	npm run test:e2e
+
+## Run the agent verification loop for a specific feature brief
+verify-feature:
+	@if [[ -z "$(FEATURE)" ]]; then \
+		echo "ERROR: set FEATURE, for example: make verify-feature FEATURE=forced-fail-repair"; \
+		exit 1; \
+	fi
+	FEATURE="$(FEATURE)" npm run verify:agent
 
 ## Clean all build artifacts
 clean:

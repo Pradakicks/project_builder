@@ -69,6 +69,7 @@ pub fn ensure_test_tools() -> &'static TestTools {
     })
 }
 
+#[allow(dead_code)]
 pub struct GoalRunScenarioFixture {
     pub db_path: PathBuf,
     pub working_dir: PathBuf,
@@ -474,7 +475,7 @@ fn seed_goal_run_state(
         ),
     };
 
-    let goal_run = db.update_goal_run(goal_run_id, &update)?;
+    db.update_goal_run(goal_run_id, &update)?;
     let _ = db.append_goal_run_event(
         goal_run_id,
         GoalRunPhase::Verification,
