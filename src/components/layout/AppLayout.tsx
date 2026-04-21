@@ -7,7 +7,7 @@ import { useToastStore } from "../../store/useToastStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { onPhaseWarning } from "../../api/projectApi";
 
-type LeftTab = "chat" | "plan" | "delivery" | "agents";
+type LeftTab = "chat" | "plan" | "delivery" | "agents" | "activity";
 
 const DiagramCanvas = lazy(() =>
   import("../canvas/DiagramCanvas").then((module) => ({
@@ -37,6 +37,16 @@ const LeaderPanel = lazy(() =>
 const DeliveryPanel = lazy(() =>
   import("../delivery/DeliveryPanel").then((module) => ({
     default: module.DeliveryPanel,
+  })),
+);
+const ActivityFeed = lazy(() =>
+  import("../monitoring/ActivityFeed").then((module) => ({
+    default: module.ActivityFeed,
+  })),
+);
+const ProjectStatusBar = lazy(() =>
+  import("../monitoring/ProjectStatusBar").then((module) => ({
+    default: module.ProjectStatusBar,
   })),
 );
 const AgentsPanel = lazy(() =>
@@ -284,6 +294,14 @@ export function AppLayout() {
     <div className="flex h-full flex-col bg-gray-950 text-gray-100">
       <Toolbar />
       <Breadcrumbs />
+      <Suspense fallback={null}>
+        <ProjectStatusBar
+          onOpenTab={(tab) => {
+            setLeftTab(tab);
+            setLeftOpen(true);
+          }}
+        />
+      </Suspense>
       <div className="relative flex flex-1 overflow-hidden">
         <div className="flex w-72 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
           <div className="flex border-b border-gray-800">
@@ -327,6 +345,16 @@ export function AppLayout() {
             >
               Agents
             </button>
+            <button
+              onClick={() => setLeftTab("activity")}
+              className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                leftTab === "activity"
+                  ? "border-b-2 border-amber-400 text-amber-400"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              Activity
+            </button>
           </div>
 
           <div className={leftTab === "chat" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
@@ -342,6 +370,11 @@ export function AppLayout() {
           </div>
           <div className={leftTab === "agents" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
             {renderAgentsPanel()}
+          </div>
+          <div className={leftTab === "activity" ? "flex flex-1 min-h-0 flex-col" : "hidden"}>
+            <Suspense fallback={<LoadingPane label="Loading activity..." />}>
+              <ActivityFeed />
+            </Suspense>
           </div>
         </div>
 

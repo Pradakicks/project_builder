@@ -1,17 +1,18 @@
-mod queries;
 mod agent_queries;
 mod artifact_queries;
-mod goal_run_queries;
-mod runtime_session_queries;
-mod plan_queries;
 mod cto_queries;
+mod goal_run_queries;
+mod plan_queries;
+mod queries;
+mod runtime_session_queries;
+mod team_brief_queries;
 
-pub use queries::*;
 pub use agent_queries::*;
 #[allow(unused_imports)]
-pub use plan_queries::*;
-#[allow(unused_imports)]
 pub use goal_run_queries::*;
+#[allow(unused_imports)]
+pub use plan_queries::*;
+pub use queries::*;
 #[allow(unused_imports)]
 pub use runtime_session_queries::*;
 
@@ -29,23 +30,28 @@ struct Migration {
     apply: MigrationFn,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "Bootstrap the core application schema",
-    apply: migrate_v1,
-}, Migration {
-    version: 2,
-    description: "Add structured CTO audit records",
-    apply: migrate_v2,
-}, Migration {
-    version: 3,
-    description: "Add goal run orchestration state",
-    apply: migrate_v3,
-}, Migration {
-    version: CURRENT_SCHEMA_VERSION,
-    description: "Persist goal run executor state, events, and runtime sessions",
-    apply: migrate_v4,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "Bootstrap the core application schema",
+        apply: migrate_v1,
+    },
+    Migration {
+        version: 2,
+        description: "Add structured CTO audit records",
+        apply: migrate_v2,
+    },
+    Migration {
+        version: 3,
+        description: "Add goal run orchestration state",
+        apply: migrate_v3,
+    },
+    Migration {
+        version: CURRENT_SCHEMA_VERSION,
+        description: "Persist goal run executor state, events, and runtime sessions",
+        apply: migrate_v4,
+    },
+];
 
 pub struct Database {
     pub conn: Connection,
@@ -108,6 +114,8 @@ impl Database {
         // a DB was already bumped to that version — the migration loop won't
         // re-run, so without this tail pass the ALTER TABLE never fires.
         ensure_goal_runs_schema(&self.conn)?;
+        ensure_agents_role_columns(&self.conn)?;
+        ensure_team_briefs_schema(&self.conn)?;
         Ok(())
     }
 
@@ -339,12 +347,18 @@ fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     if !has_execution_json {
-        conn.execute("ALTER TABLE cto_decisions ADD COLUMN execution_json TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN execution_json TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !has_rollback_json {
-        conn.execute("ALTER TABLE cto_decisions ADD COLUMN rollback_json TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE cto_decisions ADD COLUMN rollback_json TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !has_status {
         conn.execute(
@@ -362,6 +376,85 @@ fn ensure_cto_decisions_schema(conn: &Connection) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Additive schema guards for the `agents` and `agent_history` tables so we
+/// can ship role/state tracking without a new migration version. Idempotent —
+/// safe to run on every open. Adds an `agent_history.role` column (default
+/// 'implementation' so legacy rows back-fill cleanly) and a UNIQUE (piece_id,
+/// role) index on `agents` so `upsert_agent` has a real constraint to hit.
+/// Tolerates tests / partial schemas where either table may not yet exist.
+fn ensure_agents_role_columns(conn: &Connection) -> Result<(), String> {
+    if table_exists(conn, "agent_history")? {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(agent_history)")
+            .map_err(|e| e.to_string())?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?;
+
+        let mut has_role = false;
+        for column in columns {
+            if column.map_err(|e| e.to_string())? == "role" {
+                has_role = true;
+                break;
+            }
+        }
+
+        if !has_role {
+            conn.execute(
+                "ALTER TABLE agent_history ADD COLUMN role TEXT NOT NULL DEFAULT 'implementation'",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_agent_history_role ON agent_history(role);",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if table_exists(conn, "agents")? {
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_piece_role ON agents(piece_id, role);",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Create the `team_briefs` table on first open. Idempotent — safe every
+/// startup. Ships without a version bump; a DB at head version that predates
+/// the team-briefs feature still gets the table via this tail pass.
+fn ensure_team_briefs_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS team_briefs (
+            team TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            member_piece_ids_json TEXT NOT NULL DEFAULT '[]',
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, team),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_team_briefs_updated ON team_briefs(updated_at DESC);",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
+    let exists: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(exists.is_some())
 }
 
 fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
@@ -389,6 +482,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             last_failure_fingerprint TEXT,
             attention_required INTEGER NOT NULL DEFAULT 0,
             last_heartbeat_at TEXT,
+            operator_repair_requested INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -413,6 +507,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
     let mut has_last_failure_fingerprint = false;
     let mut has_attention_required = false;
     let mut has_last_heartbeat_at = false;
+    let mut has_operator_repair_requested = false;
 
     for column in columns {
         match column.map_err(|e| e.to_string())?.as_str() {
@@ -423,6 +518,7 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             "last_failure_fingerprint" => has_last_failure_fingerprint = true,
             "attention_required" => has_attention_required = true,
             "last_heartbeat_at" => has_last_heartbeat_at = true,
+            "operator_repair_requested" => has_operator_repair_requested = true,
             _ => {}
         }
     }
@@ -443,8 +539,11 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     if !has_retry_backoff_until {
-        conn.execute("ALTER TABLE goal_runs ADD COLUMN retry_backoff_until TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN retry_backoff_until TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !has_last_failure_fingerprint {
         conn.execute(
@@ -461,8 +560,18 @@ fn ensure_goal_runs_schema(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     if !has_last_heartbeat_at {
-        conn.execute("ALTER TABLE goal_runs ADD COLUMN last_heartbeat_at TEXT", [])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN last_heartbeat_at TEXT",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_operator_repair_requested {
+        conn.execute(
+            "ALTER TABLE goal_runs ADD COLUMN operator_repair_requested INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     // Indexes on ALTER-added columns must run after the columns exist.
@@ -604,7 +713,11 @@ mod tests {
 
         let reopened = Database::new_at_path(&db_path).expect("reopen database");
         assert_eq!(user_version(&reopened.conn), CURRENT_SCHEMA_VERSION);
-        assert!(table_has_column(&reopened.conn, "agent_history", "metadata_json"));
+        assert!(table_has_column(
+            &reopened.conn,
+            "agent_history",
+            "metadata_json"
+        ));
 
         let projects = reopened.list_projects().expect("list projects");
         assert_eq!(projects.len(), 1);
@@ -757,14 +870,190 @@ mod tests {
             "tail ensure_goal_runs_schema pass must backfill last_heartbeat_at",
         );
 
-        let project = db
-            .create_project("p1", "smoke")
-            .expect("create project");
+        let project = db.create_project("p1", "smoke").expect("create project");
         // create_goal_run -> get_goal_run reads the last_heartbeat_at column.
         let run = db
             .create_goal_run(&project.id, "build something")
             .expect("create_goal_run after backfill");
         assert!(run.last_heartbeat_at.is_none());
+
+        drop(db);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn agents_table_supports_per_role_upsert_and_history() {
+        // Phase 1 of specialized agents: upsert_agent / set_agent_state /
+        // insert_agent_history must keep one row per (piece, role) pair and tag
+        // history rows with the producing role. Covers the tail-migration
+        // role column and UNIQUE index.
+        use crate::models::{AgentRole, AgentState};
+
+        let db_path = temp_db_path("agents-roles");
+        let db = Database::new_at_path(&db_path).expect("open db");
+
+        let project = db.create_project("roles", "multi-role").expect("project");
+        let piece = db
+            .create_piece(&project.id, None, "Frontend", 0.0, 0.0)
+            .expect("piece");
+
+        // upsert twice for the same role → same id, no duplicate row.
+        let impl_id_1 = db
+            .upsert_agent(&piece.id, AgentRole::Implementation)
+            .expect("upsert impl 1");
+        let impl_id_2 = db
+            .upsert_agent(&piece.id, AgentRole::Implementation)
+            .expect("upsert impl 2");
+        assert_eq!(impl_id_1, impl_id_2, "upsert_agent must be idempotent");
+
+        // Different role → different row.
+        let test_id = db
+            .upsert_agent(&piece.id, AgentRole::Testing)
+            .expect("upsert test");
+        let review_id = db
+            .upsert_agent(&piece.id, AgentRole::Review)
+            .expect("upsert review");
+        assert_ne!(impl_id_1, test_id);
+        assert_ne!(impl_id_1, review_id);
+
+        let listed = db
+            .list_agents_for_piece(&piece.id)
+            .expect("list agents");
+        assert_eq!(listed.len(), 3, "three rows, one per role");
+        let roles: Vec<AgentRole> = listed.iter().map(|a| a.role).collect();
+        assert!(roles.contains(&AgentRole::Implementation));
+        assert!(roles.contains(&AgentRole::Testing));
+        assert!(roles.contains(&AgentRole::Review));
+
+        // State transitions persist per-role independently.
+        db.set_agent_state(&piece.id, AgentRole::Testing, AgentState::Working)
+            .expect("set testing state");
+        let after = db.list_agents_for_piece(&piece.id).expect("list after");
+        let test = after
+            .iter()
+            .find(|a| matches!(a.role, AgentRole::Testing))
+            .expect("testing row");
+        assert_eq!(test.state, AgentState::Working);
+        let impl_row = after
+            .iter()
+            .find(|a| matches!(a.role, AgentRole::Implementation))
+            .expect("impl row");
+        assert_eq!(
+            impl_row.state,
+            AgentState::Idle,
+            "impl state must not be affected by testing transition"
+        );
+
+        // History rows carry role. Tokens count against the per-role agent.
+        db.insert_agent_history(
+            &piece.id,
+            AgentRole::Implementation,
+            "run",
+            "impl prompt",
+            "impl output",
+            None,
+            100,
+        )
+        .expect("impl history");
+        db.insert_agent_history(
+            &piece.id,
+            AgentRole::Review,
+            "run",
+            "review prompt",
+            "APPROVED: lgtm",
+            None,
+            30,
+        )
+        .expect("review history");
+
+        let all = db.list_agent_history(&piece.id).expect("list all");
+        assert_eq!(all.len(), 2);
+
+        let only_impl = db
+            .list_agent_history_by_role(&piece.id, AgentRole::Implementation)
+            .expect("list impl");
+        assert_eq!(only_impl.len(), 1);
+        assert_eq!(only_impl[0].role, AgentRole::Implementation);
+        assert_eq!(only_impl[0].tokens_used, 100);
+
+        let only_review = db
+            .list_agent_history_by_role(&piece.id, AgentRole::Review)
+            .expect("list review");
+        assert_eq!(only_review.len(), 1);
+        assert_eq!(only_review[0].role, AgentRole::Review);
+
+        drop(db);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn legacy_agent_history_rows_backfill_implementation_role() {
+        // A DB at head version with agent_history rows missing the role column
+        // must get backfilled to 'implementation' via the tail migration.
+        let db_path = temp_db_path("agent-history-role-backfill");
+        let conn = Connection::open(&db_path).expect("open");
+        conn.execute_batch(
+            "
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                root_piece_id TEXT, settings_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE pieces (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+                name TEXT NOT NULL, piece_type TEXT NOT NULL DEFAULT '',
+                color TEXT, icon TEXT, responsibilities TEXT NOT NULL DEFAULT '',
+                interfaces_json TEXT NOT NULL DEFAULT '[]',
+                constraints_json TEXT NOT NULL DEFAULT '[]',
+                notes TEXT NOT NULL DEFAULT '', agent_prompt TEXT NOT NULL DEFAULT '',
+                agent_config_json TEXT NOT NULL DEFAULT '{}',
+                output_mode TEXT NOT NULL DEFAULT 'both',
+                phase TEXT NOT NULL DEFAULT 'design',
+                position_x REAL NOT NULL DEFAULT 0.0, position_y REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agents (
+                id TEXT PRIMARY KEY, piece_id TEXT NOT NULL, role TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'idle', token_budget INTEGER NOT NULL DEFAULT 0,
+                token_usage INTEGER NOT NULL DEFAULT 0, provider TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            -- agent_history as it existed before the 'role' column was added.
+            CREATE TABLE agent_history (
+                id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, action TEXT NOT NULL,
+                input_text TEXT NOT NULL DEFAULT '', output_text TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                tokens_used INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            );
+            INSERT INTO projects VALUES ('proj-1', 'P', '', NULL, '{}', '2024-01-01', '2024-01-01');
+            INSERT INTO pieces (id, project_id, name, created_at, updated_at)
+                VALUES ('piece-1', 'proj-1', 'Legacy', '2024-01-01', '2024-01-01');
+            -- Legacy insert pattern: the old insert_agent_history did this
+            -- INSERT OR IGNORE with id=piece_id and role='implementation'.
+            INSERT INTO agents (id, piece_id, role, state, token_budget, token_usage, created_at, updated_at)
+                VALUES ('piece-1', 'piece-1', 'implementation', 'idle', 0, 42, '2024-01-01', '2024-01-01');
+            INSERT INTO agent_history (
+                id, agent_id, action, input_text, output_text, tokens_used, created_at
+            ) VALUES ('h-1', 'piece-1', 'run', 'in', 'out', 42, '2024-01-01');
+            ",
+        )
+        .expect("seed");
+        conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION};"))
+            .expect("tag head");
+        drop(conn);
+
+        let db = Database::new_at_path(&db_path).expect("open after migration");
+        assert!(table_has_column(&db.conn, "agent_history", "role"));
+
+        let legacy = db
+            .list_agent_history("piece-1")
+            .expect("list legacy history");
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(
+            legacy[0].role,
+            crate::models::AgentRole::Implementation,
+            "legacy rows must default to Implementation"
+        );
 
         drop(db);
         cleanup(&db_path);

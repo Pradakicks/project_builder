@@ -52,14 +52,27 @@ flowchart TB
   end
 
   subgraph Execution["Execution Layer"]
-    PieceA[Piece agent A]
-    PieceB[Piece agent B]
+    PieceA[Piece A orchestrator]
+    PieceB[Piece B orchestrator]
+    ImplA[Implementation agent]
+    TestA[Testing agent]
+    ReviewA[Review agent]
     Models[Built-in models]
     Coders[Claude Code / Codex]
+    Briefs[(Team briefs — ambient context)]
     Leader --> PieceA
     Leader --> PieceB
-    PieceA --> Models
+    PieceA --> ImplA
+    PieceA --> TestA
+    PieceA --> ReviewA
+    ImplA --> Models
+    TestA --> Coders
+    ReviewA --> Models
     PieceB --> Coders
+    PieceA -. produces .-> Briefs
+    PieceB -. produces .-> Briefs
+    Briefs -. consumed by other teams .-> PieceA
+    Briefs -. consumed by other teams .-> PieceB
   end
 
   subgraph Delivery["Delivery Layer"]
@@ -88,9 +101,9 @@ The control layer shapes the project, the execution layer can mix models and cod
 
 - [x] Persistent agent processes with pause, resume, and crash recovery
 - [x] Better acceptance verification for generated apps (pluggable suite: HTTP probes, shell, log scans, TCP port; per-check expected/actual feeds repair)
-- [ ] Specialized implementation, testing, and review agents per piece
-- [ ] Agent-to-agent coordination across teams
-- [ ] Richer live agent status and project-wide monitoring
+- [x] Richer live agent status and project-wide monitoring (phase-progress events for every phase, cross-run ActivityFeed, sticky ProjectStatusBar)
+- [x] Specialized implementation, testing, and review agents per piece (opt-in per piece; Testing writes + runs tests, Review produces APPROVED / REJECTED verdict against the impl diff)
+- [x] Agent-to-agent coordination across teams (team-tagged pieces produce briefs; other teams' pieces read them as ambient context on every run)
 
 ## Feedback
 

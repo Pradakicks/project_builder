@@ -54,9 +54,12 @@ pub fn run() {
         if count > 0 {
             info!(count, "Marked stale goal runs as interrupted on startup");
         }
-        let runtime_count = database.mark_runtime_sessions_interrupted().unwrap_or(0);
+        let runtime_count = database.mark_runtime_sessions_orphaned().unwrap_or(0);
         if runtime_count > 0 {
-            info!(runtime_count, "Marked stale runtime sessions on startup");
+            info!(
+                runtime_count,
+                "Marked stale runtime sessions as orphaned on startup"
+            );
         }
     }
 
@@ -89,6 +92,8 @@ pub fn run() {
             commands::piece_commands::delete_piece,
             commands::piece_commands::list_pieces,
             commands::piece_commands::list_children,
+            commands::piece_commands::list_teams_for_project,
+            commands::piece_commands::list_team_briefs,
             commands::connection_commands::create_connection,
             commands::connection_commands::get_connection,
             commands::connection_commands::update_connection,
@@ -101,6 +106,7 @@ pub fn run() {
             commands::goal_run_commands::update_goal_run,
             commands::goal_run_commands::get_goal_run_delivery_snapshot,
             commands::goal_run_commands::resume_goal_run,
+            commands::goal_run_commands::resume_goal_run_with_repair,
             commands::goal_run_commands::stop_goal_run,
             commands::goal_run_commands::pause_goal_run,
             commands::goal_run_commands::cancel_goal_run,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Artifact, Piece, PlanTask, ProjectRuntimeStatus, WorkPlan};
+use super::{AgentRole, Artifact, Piece, PlanTask, ProjectRuntimeStatus, WorkPlan};
 
 /// Discriminates what kind of check produced a `VerificationCheck`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +63,7 @@ pub struct PhaseFailureContext {
     pub passed_checks: Vec<VerificationCheck>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    pub failing_role: Option<AgentRole>,
 }
 
 impl PhaseFailureContext {
@@ -73,6 +74,7 @@ impl PhaseFailureContext {
             passed_checks: vec![],
             started_at: None,
             finished_at: None,
+            failing_role: None,
         }
     }
 
@@ -88,7 +90,13 @@ impl PhaseFailureContext {
             passed_checks: passed,
             started_at: Some(result.started_at.clone()),
             finished_at: Some(result.finished_at.clone()),
+            failing_role: None,
         }
+    }
+
+    pub fn with_failing_role(mut self, role: AgentRole) -> Self {
+        self.failing_role = Some(role);
+        self
     }
 }
 
@@ -198,6 +206,13 @@ mod tests {
         assert!(ctx.passed_checks.is_empty());
         assert!(ctx.started_at.is_none());
         assert!(ctx.finished_at.is_none());
+        assert!(ctx.failing_role.is_none());
+    }
+
+    #[test]
+    fn phase_failure_context_records_failing_role() {
+        let ctx = PhaseFailureContext::from_summary("x").with_failing_role(AgentRole::Testing);
+        assert_eq!(ctx.failing_role, Some(AgentRole::Testing));
     }
 
     #[test]
@@ -237,6 +252,7 @@ mod tests {
         assert_eq!(ctx.passed_checks[0].name, "verify command");
         assert_eq!(ctx.started_at.as_deref(), Some("2024-01-01T00:00:00Z"));
         assert_eq!(ctx.finished_at.as_deref(), Some("2024-01-01T00:01:00Z"));
+        assert!(ctx.failing_role.is_none());
     }
 
     #[test]
@@ -310,6 +326,11 @@ pub enum GoalRunEventKind {
     PhaseCompleted,
     RetryScheduled,
     RetryResumed,
+    RepairRequested,
+    RepairStarted,
+    RepairSkipped,
+    RepairExecuted,
+    RepairFailed,
     Blocked,
     Failed,
     Stopped,
@@ -344,6 +365,8 @@ pub struct GoalRun {
     pub attention_required: bool,
     #[serde(default)]
     pub last_heartbeat_at: Option<String>,
+    #[serde(default)]
+    pub operator_repair_requested: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -369,6 +392,8 @@ pub struct GoalRunRetryState {
     pub last_failure_summary: Option<String>,
     pub last_failure_fingerprint: Option<String>,
     pub attention_required: bool,
+    #[serde(default)]
+    pub operator_repair_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,4 +454,5 @@ pub struct GoalRunUpdate {
     pub last_failure_fingerprint: Option<Option<String>>,
     pub attention_required: Option<bool>,
     pub last_heartbeat_at: Option<Option<String>>,
+    pub operator_repair_requested: Option<bool>,
 }

@@ -75,6 +75,19 @@ export interface AgentConfig {
   activeAgents: string[];
   executionEngine: string | null;
   timeout: number | null;
+  /** Team tag (lowercase kebab-case). Pieces sharing a team get cross-team
+   *  briefs consumed by pieces in OTHER teams. Null = not in a team
+   *  (legacy behaviour, zero overhead). */
+  team?: string | null;
+}
+
+export interface TeamBrief {
+  team: string;
+  projectId: string;
+  content: string;
+  memberPieceIds: string[];
+  tokensUsed: number;
+  updatedAt: string;
 }
 
 export type OutputMode = "docs-only" | "code-only" | "both";
@@ -155,7 +168,14 @@ export interface ValidationResult {
   output: string;
 }
 
-export type RuntimeSessionStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "failed";
+export type RuntimeSessionStatus =
+  | "idle"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "orphaned";
 
 export type RuntimeReadinessCheck =
   | { kind: "none" }
@@ -279,6 +299,11 @@ export type GoalRunEventKind =
   | "phase-completed"
   | "retry-scheduled"
   | "retry-resumed"
+  | "repair-requested"
+  | "repair-started"
+  | "repair-skipped"
+  | "repair-executed"
+  | "repair-failed"
   | "blocked"
   | "failed"
   | "stopped"
@@ -307,6 +332,7 @@ export interface GoalRun {
   lastFailureFingerprint: string | null;
   attentionRequired: boolean;
   lastHeartbeatAt: string | null;
+  operatorRepairRequested: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -327,6 +353,7 @@ export interface GoalRunUpdate {
   retryBackoffUntil?: string | null;
   lastFailureFingerprint?: string | null;
   attentionRequired?: boolean;
+  operatorRepairRequested?: boolean;
 }
 
 export interface GoalRunEvent {
@@ -346,6 +373,7 @@ export interface GoalRunRetryState {
   lastFailureSummary: string | null;
   lastFailureFingerprint: string | null;
   attentionRequired: boolean;
+  operatorRepairRequested: boolean;
 }
 
 export interface GoalRunCodeEvidence {
@@ -365,6 +393,20 @@ export interface LiveActivity {
   engine: string | null;
   currentIndex: number;
   total: number;
+}
+
+/// Active-phase breadcrumb produced from `phase-progress` events. Superset of
+/// `LiveActivity` (which is Implementation-only). Populated for any phase.
+export interface PhaseActivity {
+  phase: string;
+  status: "started" | "step" | "completed" | "failed";
+  message: string;
+  pieceId: string | null;
+  pieceName: string | null;
+  stepIndex: number | null;
+  stepTotal: number | null;
+  /** ISO timestamp of the most recent event that produced this activity. */
+  updatedAt: string;
 }
 
 export type CheckKind = "shell" | "http" | "tcpPort" | "logScan" | "skipped";
@@ -398,6 +440,30 @@ export interface GoalRunDeliverySnapshot {
   recentEvents: GoalRunEvent[];
   liveActivity: LiveActivity | null;
   verificationResult: VerificationResult | null;
+}
+
+export type GoalRunActionKind =
+  | "start-runtime"
+  | "stop-runtime"
+  | "resume"
+  | "resume-with-repair"
+  | "pause-goal"
+  | "stop-goal"
+  | "cancel-goal"
+  | "rerun-verification";
+
+export type GoalRunActionReceiptStatus = "pending" | "succeeded" | "failed";
+
+export interface GoalRunActionReceipt {
+  id: string;
+  action: GoalRunActionKind;
+  status: GoalRunActionReceiptStatus;
+  goalRunId: string | null;
+  projectId: string | null;
+  summary: string;
+  detail: string | null;
+  startedAt: string;
+  finishedAt: string | null;
 }
 
 export type GoalRunTimelineEntryKind =
@@ -450,6 +516,21 @@ export interface CtoDecisionReview {
   cleanedContent: string;
   actions: CtoAction[];
   validationErrors: string[];
+  repairContext?: CtoRepairContext | null;
+}
+
+export interface CtoRepairContext {
+  goalRunId: string;
+  phase: GoalRunPhase;
+  retryCount: number;
+  providerName: string;
+  model: string;
+  baseUrl?: string | null;
+  failureSummary: string;
+  failedCheckCount: number;
+  passedCheckCount: number;
+  promptPreview: string;
+  promptLength: number;
 }
 
 export interface CtoDecisionExecution {
@@ -709,11 +790,15 @@ export interface DebugReport {
   runtime: DebugReportRuntime | null;
   /** Null when no active goal run. */
   goalRun: DebugReportGoalRun | null;
+  /** Recent CTO decisions for the active project, including autonomous repairs. */
+  ctoDecisions: CtoDecision[] | null;
   /** Last 50 toast messages (both auto-expired and manually dismissed). */
   toasts: DebugReportToast[];
   lastScenario: CapturedScenario | null;
   /** Append-only history of captured failure scenarios (up to 10). */
   scenarios: CapturedScenario[];
+  /** Team briefs in this project. Empty when no pieces are team-tagged. */
+  teamBriefs: TeamBrief[];
   /** Full ring buffer of frontend / IPC events — expanded from 50 to 250. */
   recentEvents: DebugEvent[];
   /** Tail of the Rust-side tracing log file when dev session is enabled. */

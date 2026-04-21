@@ -31,10 +31,32 @@ function StatusPill({ running, success }: { running: boolean; success?: boolean 
 interface PieceRowProps {
   pieceId: string;
   name: string;
+  activeAgents?: string[];
+  team?: string | null;
   onSelect: (id: string) => void;
 }
 
-function PieceRow({ pieceId, name, onSelect }: PieceRowProps) {
+function RoleBadges({ activeAgents }: { activeAgents: string[] }) {
+  if (activeAgents.length <= 1) return null;
+  const order = ["implementation", "testing", "review"];
+  const shown = order.filter((r) => activeAgents.some((a) => a.toLowerCase() === r));
+  if (shown.length <= 1) return null;
+  return (
+    <span className="flex items-center gap-0.5 text-[9px] text-gray-500">
+      {shown.map((role) => (
+        <span
+          key={role}
+          className="rounded bg-gray-800 px-1 py-0.5 uppercase tracking-wide text-gray-400"
+          title={`${role} role enabled`}
+        >
+          {role === "implementation" ? "impl" : role === "testing" ? "test" : "rev"}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function PieceRow({ pieceId, name, activeAgents, team, onSelect }: PieceRowProps) {
   const run = useAgentStore((s) => s.runs[pieceId]);
 
   return (
@@ -44,9 +66,18 @@ function PieceRow({ pieceId, name, onSelect }: PieceRowProps) {
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-[11px] text-gray-200 truncate">{name}</span>
-        {run && (
-          <StatusPill running={run.running} success={run.success} />
-        )}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {team && (
+            <span
+              className="rounded bg-gray-800 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-gray-400"
+              title={`team: ${team}`}
+            >
+              {team}
+            </span>
+          )}
+          <RoleBadges activeAgents={activeAgents ?? []} />
+          {run && <StatusPill running={run.running} success={run.success} />}
+        </div>
       </div>
       {run && !run.running && (
         <div className="flex flex-wrap gap-x-2 mt-0.5">
@@ -74,7 +105,7 @@ function PieceRow({ pieceId, name, onSelect }: PieceRowProps) {
 
 interface SectionProps {
   title: string;
-  pieces: { id: string; name: string }[];
+  pieces: { id: string; name: string; activeAgents?: string[]; team?: string | null }[];
   onSelect: (id: string) => void;
   defaultCollapsed?: boolean;
 }
@@ -99,7 +130,14 @@ function Section({ title, pieces, onSelect, defaultCollapsed = false }: SectionP
       {!collapsed && (
         <div>
           {pieces.map((p) => (
-            <PieceRow key={p.id} pieceId={p.id} name={p.name} onSelect={onSelect} />
+            <PieceRow
+              key={p.id}
+              pieceId={p.id}
+              name={p.name}
+              activeAgents={p.activeAgents}
+              team={p.team}
+              onSelect={onSelect}
+            />
           ))}
         </div>
       )}
@@ -195,9 +233,36 @@ export function AgentsPanel() {
         </div>
       ) : (
         <div className="flex flex-col">
-          <Section title="Running now" pieces={effectiveRunning} onSelect={handleSelect} />
-          <Section title="Recently failed" pieces={failed} onSelect={handleSelect} />
-          <Section title="Recently completed" pieces={completed} onSelect={handleSelect} />
+          <Section
+            title="Running now"
+            pieces={effectiveRunning.map((p) => ({
+              id: p.id,
+              name: p.name,
+              activeAgents: "agentConfig" in p ? p.agentConfig.activeAgents : undefined,
+              team: "agentConfig" in p ? p.agentConfig.team ?? null : null,
+            }))}
+            onSelect={handleSelect}
+          />
+          <Section
+            title="Recently failed"
+            pieces={failed.map((p) => ({
+              id: p.id,
+              name: p.name,
+              activeAgents: p.agentConfig.activeAgents,
+              team: p.agentConfig.team ?? null,
+            }))}
+            onSelect={handleSelect}
+          />
+          <Section
+            title="Recently completed"
+            pieces={completed.map((p) => ({
+              id: p.id,
+              name: p.name,
+              activeAgents: p.agentConfig.activeAgents,
+              team: p.agentConfig.team ?? null,
+            }))}
+            onSelect={handleSelect}
+          />
         </div>
       )}
     </div>

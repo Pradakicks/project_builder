@@ -53,6 +53,7 @@ pub enum RuntimeSessionStatus {
     Stopping,
     Stopped,
     Failed,
+    Orphaned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +294,14 @@ mod tests {
             _ => panic!("expected LogScan"),
         }
         assert!(!suite.stop_on_first_failure);
+    }
+
+    #[test]
+    fn runtime_session_status_roundtrips_orphaned() {
+        let status: RuntimeSessionStatus = serde_json::from_str("\"orphaned\"").expect("deserialize");
+        assert_eq!(status, RuntimeSessionStatus::Orphaned);
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert_eq!(json, "\"orphaned\"");
     }
 
     #[test]

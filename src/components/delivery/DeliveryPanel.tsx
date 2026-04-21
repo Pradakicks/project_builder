@@ -3,12 +3,131 @@ import { useProjectStore } from "../../store/useProjectStore";
 import { useGoalRunStore } from "../../store/useGoalRunStore";
 import { useToastStore } from "../../store/useToastStore";
 import { openRuntimeInBrowser } from "../../api/runtimeApi";
-import type { CheckKind, GoalRun, GoalRunEvent, VerificationCheck, VerificationResult } from "../../types";
+import type {
+  CheckKind,
+  GoalRunActionReceipt,
+  GoalRun,
+  GoalRunEvent,
+  GoalRunRetryState,
+  VerificationCheck,
+  VerificationResult,
+} from "../../types";
 import { QuickRuntimeSetup } from "./QuickRuntimeSetup";
 
 function formatTime(value: string | null) {
   if (!value) return "unknown";
   return new Date(value).toLocaleString();
+}
+
+export interface RuntimeLogView {
+  lines: string[];
+  source: "live" | "snapshot" | "empty";
+  sourceLabel: string;
+  updatedAt: string | null;
+}
+
+export function selectRuntimeLogView(
+  liveLogs: string[],
+  liveUpdatedAt: string | null,
+  snapshotLogs: string[],
+  snapshotUpdatedAt: string | null,
+): RuntimeLogView {
+  if (liveLogs.length > 0) {
+    return {
+      lines: liveLogs,
+      source: "live",
+      sourceLabel: "live tail",
+      updatedAt: liveUpdatedAt,
+    };
+  }
+
+  if (snapshotLogs.length > 0) {
+    return {
+      lines: snapshotLogs,
+      source: "snapshot",
+      sourceLabel: "snapshot fallback",
+      updatedAt: snapshotUpdatedAt,
+    };
+  }
+
+  return {
+    lines: [],
+    source: "empty",
+    sourceLabel: "empty",
+    updatedAt: liveUpdatedAt ?? snapshotUpdatedAt,
+  };
+}
+
+export interface FailureViewEntry {
+  label: string;
+  text: string;
+  updatedAt: string | null;
+  freshnessLabel: "current" | "historical";
+}
+
+export interface FailureView {
+  currentBlocker: FailureViewEntry | null;
+  previousFailures: FailureViewEntry[];
+}
+
+function pushFailure(
+  list: FailureViewEntry[],
+  label: string,
+  text: string | null | undefined,
+  updatedAt: string | null,
+  freshnessLabel: FailureViewEntry["freshnessLabel"],
+) {
+  if (!text) return;
+  if (list.some((item) => item.text === text)) return;
+  list.push({ label, text, updatedAt, freshnessLabel });
+}
+
+export function buildFailureView(
+  currentRun: GoalRun | null,
+  retryState: GoalRunRetryState | null,
+  verificationResult: VerificationResult | null,
+): FailureView {
+  const currentBlocker =
+    currentRun?.status === "blocked"
+      ? {
+          label: "Current blocker",
+          text: currentRun.blockerReason ?? currentRun.lastFailureSummary ?? "Blocked",
+          updatedAt: currentRun.updatedAt,
+          freshnessLabel: "current" as const,
+        }
+      : null;
+  const previousFailures: FailureViewEntry[] = [];
+
+  pushFailure(
+    previousFailures,
+    "Last failure",
+    currentRun?.lastFailureSummary,
+    currentRun?.updatedAt ?? null,
+    "historical",
+  );
+  pushFailure(
+    previousFailures,
+    "Retry failure",
+    retryState?.lastFailureSummary,
+    currentRun?.updatedAt ?? null,
+    "historical",
+  );
+  pushFailure(
+    previousFailures,
+    "Verification",
+    verificationResult?.message,
+    verificationResult?.finishedAt ?? null,
+    "historical",
+  );
+
+  if (currentBlocker && previousFailures.some((item) => item.text === currentBlocker.text)) {
+    return {
+      currentBlocker,
+      previousFailures: previousFailures.filter((item) => item.text !== currentBlocker.text),
+    };
+  }
+
+  return { currentBlocker, previousFailures };
 }
 
 const KIND_LABEL: Record<CheckKind, string> = {
@@ -99,6 +218,63 @@ function CheckDetailRow({ check }: { check: VerificationCheck }) {
   );
 }
 
+/// When the Review agent rejects the implementation of the blocking piece,
+/// show its prose inline so operators can read the rejection reason without
+/// hunting through artifacts. Fetches lazily so pieces without a Review step
+/// (legacy single-role runs) cost nothing.
+function ReviewRejectionSurface({ pieceId }: { pieceId: string }) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "none" }
+    | { kind: "review"; status: string; title: string; content: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listArtifacts } = await import("../../api/leaderApi");
+        const artifacts = await listArtifacts(pieceId);
+        if (cancelled) return;
+        const review = artifacts.find((a) => a.artifactType === "review");
+        const impl = artifacts.find((a) => a.artifactType === "generated_files");
+        const implRejected = impl?.reviewStatus === "rejected";
+        if (review && implRejected) {
+          setState({
+            kind: "review",
+            status: impl?.reviewStatus ?? "rejected",
+            title: review.title,
+            content: review.content,
+          });
+        } else {
+          setState({ kind: "none" });
+        }
+      } catch {
+        if (!cancelled) setState({ kind: "none" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pieceId]);
+
+  if (state.kind !== "review") return null;
+
+  return (
+    <div className="rounded border border-red-900/50 bg-red-950/20 p-2 text-[11px] text-red-100">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="rounded bg-red-900/60 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-red-200">
+          Review rejected
+        </span>
+        <span className="text-red-200/80">{state.title}</span>
+      </div>
+      <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] text-red-100">
+        {state.content}
+      </pre>
+    </div>
+  );
+}
+
 function VerificationResultBlock({ result }: { result: VerificationResult }) {
   const passed = result.passed;
   const totalMs = result.checks.reduce((sum, c) => sum + c.durationMs, 0);
@@ -161,6 +337,24 @@ const PHASE_LABELS: Record<string, string> = {
   "verification": "Verification",
 };
 
+const REPAIR_EVENT_KINDS = new Set([
+  "retry-scheduled",
+  "retry-resumed",
+  "repair-requested",
+  "repair-started",
+  "repair-skipped",
+  "repair-executed",
+  "repair-failed",
+]);
+
+const REPAIR_OUTCOME_EVENT_KINDS = new Set([
+  "repair-requested",
+  "repair-started",
+  "repair-skipped",
+  "repair-executed",
+  "repair-failed",
+]);
+
 function formatDuration(startedAt: string, endedAt: string): string {
   const ms = Date.parse(endedAt) - Date.parse(startedAt);
   if (ms < 0) return "";
@@ -219,7 +413,7 @@ function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): Pha
       } else if (e.kind === "cancelled-mid-phase") {
         endedAt = e.createdAt;
         outcome = "failed";
-      } else if (e.kind === "retry-scheduled") {
+      } else if (REPAIR_EVENT_KINDS.has(e.kind)) {
         repairSummaries.push(e.summary);
       }
     }
@@ -250,6 +444,42 @@ function buildPhaseArcs(events: GoalRunEvent[], currentRun: GoalRun | null): Pha
   return arcs;
 }
 
+const ACTION_LABELS: Record<GoalRunActionReceipt["action"], string> = {
+  "start-runtime": "Start app",
+  "stop-runtime": "Stop app",
+  resume: "Resume",
+  "resume-with-repair": "Resume with repair",
+  "pause-goal": "Pause goal",
+  "stop-goal": "Stop goal",
+  "cancel-goal": "Cancel goal",
+  "rerun-verification": "Rerun checks only",
+};
+
+const ACTION_STATUS_LABELS: Record<GoalRunActionReceipt["status"], string> = {
+  pending: "pending",
+  succeeded: "succeeded",
+  failed: "failed",
+};
+
+function formatActionReceiptLabel(receipt: GoalRunActionReceipt) {
+  return ACTION_LABELS[receipt.action] ?? receipt.action;
+}
+
+function selectVisibleActionReceipts(
+  receipts: GoalRunActionReceipt[],
+  currentRunId: string | null,
+  projectId: string,
+) {
+  const scoped = receipts.filter((receipt) => {
+    if (receipt.goalRunId && currentRunId) {
+      return receipt.goalRunId === currentRunId;
+    }
+    return receipt.projectId === projectId;
+  });
+
+  return [...scoped].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 3);
+}
+
 export function DeliveryPanel() {
   const project = useProjectStore((s) => s.project);
   const currentGoalRun = useGoalRunStore((s) => s.currentGoalRun);
@@ -257,27 +487,30 @@ export function DeliveryPanel() {
   const goalRuns = useGoalRunStore((s) => s.goalRuns);
   const goalRunEvents = useGoalRunStore((s) => s.goalRunEvents);
   const runtimeStatus = useGoalRunStore((s) => s.runtimeStatus);
+  const runtimeLogs = useGoalRunStore((s) => s.runtimeLogs);
+  const runtimeLogsUpdatedAt = useGoalRunStore((s) => s.runtimeLogsUpdatedAt);
+  const actionReceipts = useGoalRunStore((s) => s.actionReceipts);
   const loading = useGoalRunStore((s) => s.loading);
   const orchestrating = useGoalRunStore((s) => s.orchestrating);
   const lastError = useGoalRunStore((s) => s.lastError);
   const refreshRuntimeStatus = useGoalRunStore((s) => s.refreshRuntimeStatus);
   const startRuntime = useGoalRunStore((s) => s.startRuntime);
   const stopRuntime = useGoalRunStore((s) => s.stopRuntime);
-  const continueAutopilot = useGoalRunStore((s) => s.continueAutopilot);
+  const continueAutopilotWithRepair = useGoalRunStore((s) => s.continueAutopilotWithRepair);
   const stopGoalRun = useGoalRunStore((s) => s.stopGoalRun);
   const pauseGoalRun = useGoalRunStore((s) => s.pauseGoalRun);
   const rerunVerification = useGoalRunStore((s) => s.rerunVerification);
   const selectGoalRun = useGoalRunStore((s) => s.selectGoalRun);
   const addToast = useToastStore((s) => s.addToast);
-  const runtimeSnapshot = deliverySnapshot?.runtimeStatus ?? runtimeStatus;
+  const runtimeSnapshot = runtimeStatus ?? deliverySnapshot?.runtimeStatus;
   const currentRun = deliverySnapshot?.goalRun ?? currentGoalRun;
   const retryState = deliverySnapshot?.retryState ?? null;
   const blockingPiece = deliverySnapshot?.blockingPiece ?? null;
   const blockingTask = deliverySnapshot?.blockingTask ?? null;
   const codeEvidence = deliverySnapshot?.codeEvidence ?? null;
   const verificationResult = deliverySnapshot?.verificationResult ?? null;
-  const runtimeLogs = runtimeSnapshot?.session?.recentLogs ?? [];
   const liveActivity = useGoalRunStore((s) => s.liveActivity);
+  const phaseActivity = useGoalRunStore((s) => s.phaseActivity);
 
   useEffect(() => {
     if (project?.id) {
@@ -295,6 +528,35 @@ export function DeliveryPanel() {
     [goalRuns],
   );
 
+  const visibleActionReceipts = useMemo(
+    () => selectVisibleActionReceipts(actionReceipts, currentRun?.id ?? null, project?.id ?? ""),
+    [actionReceipts, currentRun?.id, project?.id],
+  );
+  const latestActionReceipt = visibleActionReceipts[0] ?? null;
+
+  const runtimeLogView = useMemo(
+    () =>
+      selectRuntimeLogView(
+        runtimeLogs,
+        runtimeLogsUpdatedAt,
+        runtimeSnapshot?.session?.recentLogs ?? [],
+        runtimeSnapshot?.session?.updatedAt ?? null,
+      ),
+    [runtimeLogs, runtimeLogsUpdatedAt, runtimeSnapshot],
+  );
+
+  const failureView = useMemo(
+    () => buildFailureView(currentRun ?? null, retryState, verificationResult),
+    [currentRun, retryState, verificationResult],
+  );
+
+  const repairEvents = useMemo(() => {
+    const events = deliverySnapshot?.recentEvents ?? goalRunEvents;
+    return [...events]
+      .filter((event) => REPAIR_OUTCOME_EVENT_KINDS.has(event.kind))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [deliverySnapshot, goalRunEvents]);
+
   const activeProjectId = project?.id ?? null;
   const hasAttention = Boolean(retryState?.attentionRequired ?? currentRun?.attentionRequired);
 
@@ -302,7 +564,7 @@ export function DeliveryPanel() {
     if (!activeProjectId) return;
     try {
       await startRuntime(activeProjectId);
-      addToast("Started the configured runtime", "info");
+      addToast("Started app. Watch Recent runtime logs for fresh output.", "info");
     } catch (error) {
       addToast(`Failed to start runtime: ${error}`, "warning");
     }
@@ -349,9 +611,9 @@ export function DeliveryPanel() {
   const handleResumeGoal = async () => {
     if (!currentRun) return;
     try {
-      await continueAutopilot(currentRun.id);
+      await continueAutopilotWithRepair(currentRun.id);
     } catch (error) {
-      addToast(`Failed to resume goal run: ${error}`, "warning");
+      addToast(`Failed to resume with repair: ${error}`, "warning");
     }
   };
 
@@ -367,7 +629,7 @@ export function DeliveryPanel() {
   const runtimeUrl = runtimeSnapshot?.session?.url ?? null;
 
   return (
-    <div className="flex h-full flex-col bg-gradient-to-b from-slate-950 to-gray-950 text-gray-100">
+    <div data-testid="delivery-panel" className="flex h-full flex-col bg-gradient-to-b from-slate-950 to-gray-950 text-gray-100">
       <div className="border-b border-gray-800 px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -429,8 +691,26 @@ export function DeliveryPanel() {
           </section>
         )}
 
+        {phaseActivity && (
+          <section className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-[11px] text-cyan-100">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-medium">
+                {phaseActivity.phase}
+                {phaseActivity.stepIndex != null && phaseActivity.stepTotal != null
+                  ? ` (${phaseActivity.stepIndex}/${phaseActivity.stepTotal})`
+                  : ""}
+              </p>
+              <span className="text-cyan-300/70">{formatTime(phaseActivity.updatedAt)}</span>
+            </div>
+            <p className="mt-1 text-cyan-100/80">{phaseActivity.message}</p>
+          </section>
+        )}
+
         {currentRun ? (
-          <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+          <section
+            data-testid="delivery-current-run"
+            className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+          >
             <div className="grid gap-3 text-[11px] md:grid-cols-2">
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                 <p className="text-gray-500">Prompt</p>
@@ -465,6 +745,20 @@ export function DeliveryPanel() {
                     ? `Next retry after ${formatTime(retryState.retryBackoffUntil)}`
                     : "No backoff scheduled"}
                 </p>
+                <p className="mt-1 text-gray-400">
+                  Retry count {retryState?.retryCount ?? currentRun.retryCount}
+                  {retryState?.stopRequested ? " · stop requested" : ""}
+                </p>
+                {repairEvents.length > 0 && (
+                  <p data-testid="delivery-repair-status" className="mt-1 text-amber-300/80">
+                    Repair status: {repairEvents[0]?.summary}
+                  </p>
+                )}
+                {(retryState?.retryCount ?? currentRun.retryCount) >= 3 ? (
+                  <p className="mt-1 text-gray-500">
+                    Automatic repair budget is exhausted; Resume with repair requests one operator repair attempt.
+                  </p>
+                ) : null}
               </div>
               {currentRun.runtimeStatusSummary ? (
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
@@ -477,14 +771,63 @@ export function DeliveryPanel() {
               {verificationResult ? (
                 <VerificationResultBlock result={verificationResult} />
               ) : null}
-              {(currentRun.lastFailureSummary || currentRun.blockerReason) ? (
-                <div className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100">
-                  <p className="text-amber-300">Blocking truth</p>
-                  {currentRun.blockerReason ? (
-                    <p className="mt-1 whitespace-pre-wrap">{currentRun.blockerReason}</p>
+              {failureView.currentBlocker || failureView.previousFailures.length > 0 ? (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {failureView.currentBlocker ? (
+                    <div
+                      data-testid="delivery-current-blocker"
+                      className="rounded border border-amber-900/50 bg-amber-950/20 p-2 text-amber-100"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <p className="text-amber-300">Current blocker</p>
+                          <span className="rounded bg-amber-900/50 px-1.5 py-0.5 text-[10px] text-amber-200">
+                            {failureView.currentBlocker.freshnessLabel}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-amber-300/70">
+                          {formatTime(failureView.currentBlocker.updatedAt)}
+                        </span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap">{failureView.currentBlocker.text}</p>
+                    </div>
                   ) : null}
-                  {currentRun.lastFailureSummary ? (
-                    <p className="mt-1 whitespace-pre-wrap">{currentRun.lastFailureSummary}</p>
+                  {failureView.previousFailures.length > 0 ? (
+                    <div
+                      data-testid="delivery-previous-failures"
+                      className="rounded border border-gray-800 bg-gray-950/60 p-2 text-gray-100"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <p className="text-gray-300">Historical failures</p>
+                          <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">
+                            historical
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-gray-500">
+                          {failureView.previousFailures.length} item
+                          {failureView.previousFailures.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <ul className="mt-1.5 space-y-1">
+                        {failureView.previousFailures.map((failure) => (
+                          <li key={`${failure.label}:${failure.text}`} className="space-y-0.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <p className="text-gray-400">{failure.label}</p>
+                                <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">
+                                  {failure.freshnessLabel}
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-gray-600">
+                                {formatTime(failure.updatedAt)}
+                              </span>
+                            </div>
+                            <p className="whitespace-pre-wrap text-gray-200">{failure.text}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ) : null}
                 </div>
               ) : null}
@@ -526,6 +869,10 @@ export function DeliveryPanel() {
               ) : null}
             </div>
 
+            {blockingPiece && (
+              <ReviewRejectionSurface pieceId={blockingPiece.id} />
+            )}
+
             <div className="grid gap-3 text-[11px] md:grid-cols-2">
               <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                 <p className="text-gray-500">Blocking piece / task</p>
@@ -552,21 +899,24 @@ export function DeliveryPanel() {
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div data-testid="delivery-actions" className="flex flex-wrap gap-2">
               <button
                 onClick={() => void refreshRuntimeStatus(activeProjectId ?? undefined)}
+                data-testid="delivery-refresh-logs-button"
                 className="rounded border border-gray-700 px-3 py-1 text-[11px] text-gray-300 hover:bg-gray-800"
               >
-                Refresh runtime
+                Refresh logs
               </button>
               <button
                 onClick={() => void handleStartRuntime()}
+                data-testid="delivery-start-runtime-button"
                 className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40"
               >
-                Run app
+                Start app
               </button>
               <button
                 onClick={() => void handleStopRuntime()}
+                data-testid="delivery-stop-runtime-button"
                 className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
               >
                 Stop app
@@ -578,9 +928,10 @@ export function DeliveryPanel() {
                 <button
                   onClick={() => void handleResumeGoal()}
                   disabled={orchestrating}
+                  data-testid="delivery-resume-with-repair-button"
                   className="rounded border border-emerald-700 px-3 py-1 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
                 >
-                  {orchestrating ? "Running…" : "Resume goal"}
+                  {orchestrating ? "Running…" : "Resume with repair"}
                 </button>
               ) : null}
               {currentRun.phase === "verification" &&
@@ -590,27 +941,86 @@ export function DeliveryPanel() {
                 <button
                   onClick={() => void handleRerunVerification()}
                   disabled={orchestrating}
+                  data-testid="delivery-rerun-verification-button"
                   className="rounded border border-sky-700 px-3 py-1 text-[11px] text-sky-300 hover:bg-sky-950/40 disabled:opacity-50"
                   title="Rerun the acceptance suite without invoking repair agent"
                 >
-                  Rerun verification
+                  Rerun checks only
                 </button>
               ) : null}
               {currentRun.status === "running" || currentRun.status === "retrying" ? (
                 <>
                   <button
                     onClick={() => void handlePauseGoal()}
+                    data-testid="delivery-pause-goal-button"
                     className="rounded border border-yellow-700 px-3 py-1 text-[11px] text-yellow-300 hover:bg-yellow-950/40"
                   >
                     Pause goal
                   </button>
                   <button
                     onClick={() => void handleStopGoal()}
+                    data-testid="delivery-stop-goal-button"
                     className="rounded border border-red-700 px-3 py-1 text-[11px] text-red-300 hover:bg-red-950/40"
                   >
                     Stop goal
                   </button>
                 </>
+              ) : null}
+            </div>
+            <div data-testid="delivery-action-receipts" className="border-t border-gray-800 pt-2 text-[11px]">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-gray-500">Action receipt</p>
+                {latestActionReceipt ? (
+                  <span
+                    data-testid="delivery-action-receipt-status"
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                      latestActionReceipt.status === "succeeded"
+                        ? "bg-emerald-900/50 text-emerald-200"
+                        : latestActionReceipt.status === "failed"
+                          ? "bg-red-900/50 text-red-200"
+                          : "bg-gray-800 text-gray-200"
+                    }`}
+                  >
+                    {ACTION_STATUS_LABELS[latestActionReceipt.status]}
+                  </span>
+                ) : null}
+              </div>
+              {latestActionReceipt ? (
+                <div data-testid="delivery-action-receipt" className="mt-1 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <p className="text-gray-200">{formatActionReceiptLabel(latestActionReceipt)}</p>
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">
+                        {latestActionReceipt.status}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-gray-500">
+                      {formatTime(latestActionReceipt.finishedAt ?? latestActionReceipt.startedAt)}
+                    </span>
+                  </div>
+                  <p className="text-gray-400">{latestActionReceipt.summary}</p>
+                  {latestActionReceipt.detail ? (
+                    <p className="whitespace-pre-wrap text-gray-500">{latestActionReceipt.detail}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="mt-1 text-gray-500">No delivery actions recorded yet.</p>
+              )}
+              {visibleActionReceipts.length > 1 ? (
+                <ul className="mt-2 space-y-1">
+                  {visibleActionReceipts.slice(1).map((receipt) => (
+                    <li
+                      key={receipt.id}
+                      data-testid="delivery-action-receipt-history-item"
+                      className="flex items-center justify-between gap-2 text-gray-500"
+                    >
+                      <span>
+                        {formatActionReceiptLabel(receipt)} · {receipt.status}
+                      </span>
+                      <span>{formatTime(receipt.finishedAt ?? receipt.startedAt)}</span>
+                    </li>
+                  ))}
+                </ul>
               ) : null}
             </div>
           </section>
@@ -620,7 +1030,10 @@ export function DeliveryPanel() {
           </section>
         )}
 
-        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+        <section
+          data-testid="delivery-code-evidence"
+          className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
@@ -669,31 +1082,38 @@ export function DeliveryPanel() {
           )}
         </section>
 
-        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+        <section
+          data-testid="delivery-runtime-evidence"
+          className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
                 Runtime Evidence
               </p>
               <p className="text-[11px] text-gray-500">
-                Runtime status and tail from the persisted runtime session.
+                Live runtime status and the freshest tail the app has available.
               </p>
             </div>
           </div>
 
           {runtimeSnapshot ? (
             <div className="space-y-2 text-[11px]">
-              <div className="grid gap-2 md:grid-cols-2">
+              <div className="grid gap-2 md:grid-cols-3">
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <p className="text-gray-500">Runtime status</p>
                   <p className="mt-1 text-gray-200">{runtimeSnapshot.session?.status ?? "idle"}</p>
+                </div>
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <p className="text-gray-500">Runtime session</p>
+                  <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.sessionId ?? "none"}</p>
                 </div>
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <p className="text-gray-500">Runtime URL</p>
                   <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.url ?? runtimeSnapshot.spec?.appUrl ?? "none"}</p>
                 </div>
               </div>
-              <div className="grid gap-2 md:grid-cols-2">
+              <div className="grid gap-2 md:grid-cols-3">
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
                   <p className="text-gray-500">Log path</p>
                   <p className="mt-1 font-mono text-gray-200">{runtimeSnapshot.session?.logPath ?? "none"}</p>
@@ -702,12 +1122,26 @@ export function DeliveryPanel() {
                   <p className="text-gray-500">Last runtime error</p>
                   <p className="mt-1 whitespace-pre-wrap text-gray-200">{runtimeSnapshot.session?.lastError ?? "none"}</p>
                 </div>
-              </div>
-              {runtimeLogs.length > 0 ? (
                 <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
-                  <p className="text-gray-500">Recent runtime logs</p>
-                  <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300">
-                    {runtimeLogs.join("\n")}
+                  <p className="text-gray-500">Log tail updated</p>
+                  <p className="mt-1 text-gray-200">
+                    {runtimeLogView.updatedAt ? formatTime(runtimeLogView.updatedAt) : "unknown"}
+                  </p>
+                </div>
+              </div>
+              {runtimeLogView.lines.length > 0 ? (
+                <div className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-gray-500">Recent runtime logs</p>
+                    <span data-testid="delivery-runtime-log-source" className="text-[10px] text-gray-500">
+                      {runtimeLogView.sourceLabel}
+                    </span>
+                  </div>
+                  <pre
+                    data-testid="delivery-runtime-log-tail"
+                    className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/40 p-2 text-[10px] text-gray-300"
+                  >
+                    {runtimeLogView.lines.join("\n")}
                   </pre>
                 </div>
               ) : (
@@ -719,7 +1153,10 @@ export function DeliveryPanel() {
           )}
         </section>
 
-        <section className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20">
+        <section
+          data-testid="delivery-timeline"
+          className="space-y-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3 shadow-lg shadow-black/20"
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
@@ -740,6 +1177,7 @@ export function DeliveryPanel() {
                 return (
                   <div
                     key={arc.phase}
+                    data-testid="delivery-timeline-entry"
                     className={`rounded border px-3 py-2 text-[11px] ${
                       isActive
                         ? "border-cyan-700 bg-cyan-950/25"

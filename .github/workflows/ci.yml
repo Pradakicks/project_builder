@@ -37,11 +37,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run frontend tests
-        run: npm run test
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
 
-      - name: Run TypeScript checks
-        run: npx tsc --noEmit
+      - name: Run verification gate
+        run: make verify
 
-      - name: Run Rust checks
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-artifacts
+          if-no-files-found: ignore
+          path: |
+            .debug-sessions/**
+            playwright-report/**
+            test-results/**

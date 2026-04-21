@@ -77,6 +77,29 @@ pub fn list_children(state: State<AppState>, piece_id: String) -> Result<Vec<Pie
     db.list_children(&piece_id)
 }
 
+/// List distinct team names in a project. Empty result = no teams configured.
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn list_teams_for_project(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<Vec<String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_teams_for_project(&project_id)
+}
+
+/// List every team brief for a project, newest first. Powers the debug
+/// report and the ProjectStatusBar teams chip.
+#[tracing::instrument(skip(state))]
+#[tauri::command]
+pub fn list_team_briefs(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<Vec<crate::models::TeamBrief>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_team_briefs_for_project(&project_id, None)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::{Database, PieceUpdate};

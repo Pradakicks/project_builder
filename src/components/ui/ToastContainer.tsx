@@ -6,10 +6,12 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+    <div data-testid="toast-container" className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
       {toasts.map((toast) => (
         <div
           key={toast.id}
+          data-testid="toast-item"
+          data-toast-type={toast.type}
           className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-xs shadow-lg ${
             toast.type === "error"
               ? "bg-red-900/90 text-red-100 border border-red-700"
@@ -21,6 +23,7 @@ export function ToastContainer() {
           <span className="flex-1">{toast.message}</span>
           <button
             onClick={() => removeToast(toast.id)}
+            data-testid="toast-dismiss"
             className="text-gray-400 hover:text-gray-200 shrink-0"
           >
             &times;

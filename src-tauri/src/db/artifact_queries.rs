@@ -109,6 +109,48 @@ impl Database {
         }
     }
 
+    /// Set the review_status for an existing artifact identified by (piece_id, artifact_type).
+    /// If no such artifact exists, logs a debug message and returns Ok(()) silently.
+    pub fn set_artifact_review_status(
+        &self,
+        piece_id: &str,
+        artifact_type: &str,
+        status: crate::models::artifact::ReviewStatus,
+    ) -> Result<(), String> {
+        let existing_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM artifacts WHERE piece_id = ?1 AND artifact_type = ?2",
+                params![piece_id, artifact_type],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let Some(id) = existing_id else {
+            debug!(
+                piece_id,
+                artifact_type, "No artifact found for review status update; no-op"
+            );
+            return Ok(());
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let status_str = serde_json::to_string(&status)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+
+        self.conn
+            .execute(
+                "UPDATE artifacts SET review_status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status_str, now, id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        info!(piece_id, artifact_type, artifact_id = %id, status = %status_str, "Artifact review status updated");
+        Ok(())
+    }
+
     /// List all artifacts for a piece.
     pub fn list_artifacts(&self, piece_id: &str) -> Result<Vec<Artifact>, String> {
         let mut stmt = self
@@ -138,5 +180,72 @@ impl Database {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::artifact::ReviewStatus;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn temp_db_path(case: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "project-builder-artifact-{case}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create temp test directory");
+        dir.join("data.db")
+    }
+
+    fn cleanup(db_path: &Path) {
+        if let Some(parent) = db_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn set_artifact_review_status_updates_existing_row() {
+        let db_path = temp_db_path("set-review-status");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let project = db
+            .create_project("Artifact project", "Testing review status")
+            .expect("create project");
+        let piece = db
+            .create_piece(&project.id, None, "root", 0.0, 0.0)
+            .expect("create piece");
+
+        db.upsert_artifact(&piece.id, "generated_files", "Gen", "{}")
+            .expect("upsert artifact");
+
+        db.set_artifact_review_status(&piece.id, "generated_files", ReviewStatus::Approved)
+            .expect("set review status");
+
+        let fetched = db
+            .get_artifact_by_type(&piece.id, "generated_files")
+            .expect("get artifact")
+            .expect("artifact exists");
+        assert!(matches!(fetched.review_status, ReviewStatus::Approved));
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn set_artifact_review_status_on_missing_is_noop() {
+        let db_path = temp_db_path("set-review-status-missing");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let project = db
+            .create_project("Artifact project", "Testing review status missing")
+            .expect("create project");
+        let piece = db
+            .create_piece(&project.id, None, "root", 0.0, 0.0)
+            .expect("create piece");
+
+        let result =
+            db.set_artifact_review_status(&piece.id, "nonexistent", ReviewStatus::Rejected);
+        assert!(result.is_ok());
+
+        cleanup(&db_path);
     }
 }

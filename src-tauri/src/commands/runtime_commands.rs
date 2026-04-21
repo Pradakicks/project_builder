@@ -621,6 +621,144 @@ fn resolve_runtime_url(spec: &ProjectRuntimeSpec) -> Option<String> {
         .or_else(|| spec.port_hint.map(|port| format!("http://127.0.0.1:{port}")))
 }
 
+fn is_managed_runtime_status(status: &RuntimeSessionStatus) -> bool {
+    matches!(
+        status,
+        RuntimeSessionStatus::Starting
+            | RuntimeSessionStatus::Running
+            | RuntimeSessionStatus::Stopping
+    )
+}
+
+fn runtime_session_detail(session: &ProjectRuntimeSession) -> String {
+    session.last_error.clone().unwrap_or_else(|| match session.status {
+        RuntimeSessionStatus::Orphaned => {
+            "Runtime session is orphaned after the app restarted".to_string()
+        }
+        RuntimeSessionStatus::Failed => {
+            "Runtime session failed without a recorded error".to_string()
+        }
+        _ => "Runtime session has no recorded error".to_string(),
+    })
+}
+
+fn verification_blocker_message(session: Option<&ProjectRuntimeSession>) -> String {
+    match session {
+        None => "No runtime session exists for this project".to_string(),
+        Some(session) => match session.status {
+            RuntimeSessionStatus::Starting => {
+                "Runtime is still starting; wait until it is running before verification".to_string()
+            }
+            RuntimeSessionStatus::Running => {
+                "Runtime must be running under the current app session before verification".to_string()
+            }
+            RuntimeSessionStatus::Stopping => {
+                "Runtime is stopping; start it again before verification".to_string()
+            }
+            RuntimeSessionStatus::Stopped => {
+                "Runtime is stopped; start it before verification".to_string()
+            }
+            RuntimeSessionStatus::Failed => {
+                format!(
+                    "Runtime failed before verification: {}",
+                    runtime_session_detail(session)
+                )
+            }
+            RuntimeSessionStatus::Orphaned => {
+                format!(
+                    "Runtime session is orphaned and unmanaged: {}",
+                    runtime_session_detail(session)
+                )
+            }
+            RuntimeSessionStatus::Idle => {
+                "Runtime is idle; start it before verification".to_string()
+            }
+        },
+    }
+}
+
+async fn port_is_occupied(port: u16) -> Result<bool, String> {
+    match timeout(
+        Duration::from_secs(1),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(_)) => Ok(false),
+        Err(_) => Ok(true),
+    }
+}
+
+fn port_conflict_message(
+    port: u16,
+    latest_session: Option<&ProjectRuntimeSession>,
+) -> String {
+    match latest_session {
+        Some(session) if session.port_hint == Some(port) && is_managed_runtime_status(&session.status) => {
+            format!(
+                "Port {port} is already in use by runtime session {}. Stop the existing runtime or free the port before starting again.",
+                session.session_id
+            )
+        }
+        Some(session)
+            if session.port_hint == Some(port) && matches!(session.status, RuntimeSessionStatus::Orphaned) =>
+        {
+            format!(
+                "Port {port} is still held by orphaned runtime session {}. Stop or release the orphaned process before starting again.",
+                session.session_id
+            )
+        }
+        Some(session) if session.port_hint == Some(port) => {
+            format!(
+                "Port {port} is already in use and the latest runtime session {} is {:?}.",
+                session.session_id,
+                session.status
+            )
+        }
+        _ => format!(
+            "Port {port} is already in use. Free the port or change the runtime portHint before starting."
+        ),
+    }
+}
+
+async fn preflight_runtime_port(
+    state_db: &std::sync::Mutex<Database>,
+    project_id: &str,
+    port: u16,
+) -> Result<(), String> {
+    if !port_is_occupied(port).await? {
+        return Ok(());
+    }
+
+    let latest_session = {
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        db.latest_runtime_session(project_id)?
+            .map(|record| record.session)
+    };
+
+    Err(port_conflict_message(port, latest_session.as_ref()))
+}
+
+async fn normalize_orphaned_runtime_session(
+    state_db: &std::sync::Mutex<Database>,
+    project_id: &str,
+    mut session: ProjectRuntimeSession,
+) -> Result<ProjectRuntimeSession, String> {
+    if is_managed_runtime_status(&session.status) {
+        session.status = RuntimeSessionStatus::Orphaned;
+        session.updated_at = now();
+        if session.last_error.is_none() {
+            session.last_error = Some("Runtime session became orphaned when the app restarted".to_string());
+        }
+
+        let db = state_db.lock().map_err(|e| e.to_string())?;
+        let _ = db.upsert_runtime_session(project_id, None, &session)?;
+    }
+
+    Ok(session)
+}
+
 fn shell_command(shell_cmd: &str, working_dir: &Path) -> Command {
     let mut cmd = if cfg!(windows) {
         let mut command = Command::new("cmd");
@@ -876,8 +1014,23 @@ pub(crate) async fn current_runtime_status(
             Some(session)
         }
         None => {
-            let db = db.lock().map_err(|e| e.to_string())?;
-            db.latest_runtime_session(project_id)?.map(|record| record.session)
+            let record = {
+                let db = db.lock().map_err(|e| e.to_string())?;
+                db.latest_runtime_session(project_id)?
+            };
+
+            match record {
+                Some(record) => {
+                    let session = normalize_orphaned_runtime_session(
+                        db,
+                        project_id,
+                        record.session,
+                    )
+                    .await?;
+                    Some(session)
+                }
+                None => None,
+            }
         }
     };
 
@@ -889,6 +1042,7 @@ pub(crate) async fn current_runtime_status(
 }
 
 pub(crate) async fn start_runtime_session(
+    state_db: &std::sync::Mutex<Database>,
     project: &Project,
     spec: &ProjectRuntimeSpec,
     runtime_sessions: &std::sync::Mutex<RuntimeSessions>,
@@ -927,6 +1081,10 @@ pub(crate) async fn start_runtime_session(
                 session: Some(session),
             });
         }
+    }
+
+    if let Some(port) = spec.port_hint {
+        preflight_runtime_port(state_db, &project.id, port).await?;
     }
 
     let handle = create_runtime_handle(&project.id, spec).await?;
@@ -1293,7 +1451,7 @@ pub(crate) async fn start_runtime_impl(
         .ok_or_else(|| "Project runtime is not configured".to_string())?;
 
     debug!(project_id = %project_id, "Starting runtime session");
-    let status = start_runtime_session(&project, &spec, runtime_sessions).await?;
+    let status = start_runtime_session(state_db, &project, &spec, runtime_sessions).await?;
     if let Some(ref session) = status.session {
         let db = state_db.lock().map_err(|e| e.to_string())?;
         let _ = db.upsert_runtime_session(&project.id, None, session);
@@ -1439,11 +1597,12 @@ pub(crate) async fn verify_runtime_impl(
     let working_directory = PathBuf::from(working_directory);
 
     let status = current_runtime_status(state_db, runtime_sessions, &project_id).await?;
-    if !matches!(
-        status.session.as_ref().map(|session| &session.status),
-        Some(RuntimeSessionStatus::Running)
-    ) {
-        return Err("Runtime must be running before verification".to_string());
+    if let Some(session) = status.session.as_ref() {
+        if !matches!(session.status, RuntimeSessionStatus::Running) {
+            return Err(verification_blocker_message(Some(session)));
+        }
+    } else {
+        return Err(verification_blocker_message(None));
     }
 
     let suite = spec
@@ -1994,7 +2153,7 @@ async fn run_log_scan_check(
             expected,
             actual: Some(format!("0 matches over {} lines", lines.len())),
         },
-        (LogScanMode::MustNotMatch, Some((idx, pattern, line))) => {
+        (LogScanMode::MustNotMatch, Some((idx, pattern, _line))) => {
             let start = idx.saturating_sub(3);
             let excerpt = lines[start..=idx].join("\n");
             VerificationCheck {
@@ -2421,11 +2580,13 @@ pub async fn get_runtime_detection_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::goal_run_commands::build_goal_run_delivery_snapshot_impl;
     use crate::db::Database;
     use crate::models::{
-        AutonomyMode, ConflictResolutionPolicy, PhaseControlPolicy, ProjectSettings,
-        RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
+        AutonomyMode, CheckKind, ConflictResolutionPolicy, GoalRunStatus, PhaseControlPolicy,
+        ProjectSettings, RuntimeReadinessCheck, RuntimeSessionStatus, RuntimeStopBehavior,
     };
+    use crate::test_support::GoalRunScenarioFixture;
     use std::sync::Mutex;
 
     fn temp_dir(case: &str) -> PathBuf {
@@ -2445,6 +2606,31 @@ mod tests {
         if let Some(parent) = path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    async fn insert_live_runtime_handle(
+        sessions: &Mutex<RuntimeSessions>,
+        project_id: &str,
+        session: &ProjectRuntimeSession,
+        log_path: &Path,
+    ) -> std::sync::Arc<RuntimeSessionHandle> {
+        let log_file = tokio::fs::File::open(log_path)
+            .await
+            .expect("open scenario runtime log");
+        let handle = std::sync::Arc::new(RuntimeSessionHandle {
+            session: AsyncMutex::new(session.clone()),
+            child: AsyncMutex::new(None),
+            log_path: log_path.to_path_buf(),
+            log_file: AsyncMutex::new(log_file),
+            recent_logs: AsyncMutex::new(session.recent_logs.clone().into_iter().collect()),
+        });
+
+        sessions
+            .lock()
+            .expect("lock runtime sessions")
+            .insert(project_id.to_string(), handle.clone());
+
+        handle
     }
 
     fn create_project_settings(working_dir: &Path, runtime_spec: ProjectRuntimeSpec) -> ProjectSettings {
@@ -2579,6 +2765,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn log_scan_fails_on_forced_fatal_with_excerpt() {
+        let sessions = Mutex::new(HashMap::new());
+        let project_id = format!("forced-fatal-{}", uuid::Uuid::new_v4());
+        let spec = ProjectRuntimeSpec {
+            install_command: None,
+            run_command: "node server.js".to_string(),
+            readiness_check: RuntimeReadinessCheck::None,
+            verify_command: None,
+            stop_behavior: RuntimeStopBehavior::Kill,
+            app_url: Some("http://127.0.0.1:3030".to_string()),
+            port_hint: Some(3030),
+            acceptance_suite: None,
+        };
+        let handle = create_runtime_handle(&project_id, &spec)
+            .await
+            .expect("create runtime handle");
+        append_runtime_log(&handle, "runtime", "spawning run command")
+            .await
+            .expect("append setup line");
+        append_runtime_log(&handle, "stdout", "FATAL: forced for test")
+            .await
+            .expect("append fatal line");
+        {
+            let mut session = handle.session.lock().await;
+            session.status = RuntimeSessionStatus::Running;
+        }
+        {
+            let mut guard = sessions.lock().expect("lock runtime sessions");
+            guard.insert(project_id.clone(), handle);
+        }
+
+        let check = run_log_scan_check(
+            "log scan -- fatal patterns",
+            &[r"(?i)FATAL".to_string()],
+            &LogScanMode::MustNotMatch,
+            200,
+            &project_id,
+            &sessions,
+        )
+        .await;
+
+        assert!(!check.passed);
+        assert_eq!(check.kind, CheckKind::LogScan);
+        assert!(check.detail.contains("matched forbidden /(?i)FATAL/"));
+        assert!(check
+            .actual
+            .as_deref()
+            .unwrap_or("")
+            .contains("FATAL: forced for test"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_status_falls_back_to_persisted_session_without_live_process() {
         let dir = temp_dir("persisted-status");
         let db_path = dir.join("data.db");
@@ -2634,7 +2872,20 @@ mod tests {
             .expect("load runtime status");
         let status_session = status.session.expect("runtime status session");
         assert_eq!(status_session.session_id, session_id);
-        assert_eq!(status_session.status, RuntimeSessionStatus::Running);
+        assert_eq!(status_session.status, RuntimeSessionStatus::Orphaned);
+        assert!(status_session
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("orphaned"));
+
+        let persisted_after = {
+            let db = state_db.lock().expect("lock db");
+            db.latest_runtime_session(&project.id)
+                .expect("load persisted session")
+                .expect("persisted runtime session")
+        };
+        assert_eq!(persisted_after.session.status, RuntimeSessionStatus::Orphaned);
 
         if let Some(mut child) = detached_handle.child.lock().await.take() {
             let _ = child.start_kill();
@@ -2642,6 +2893,242 @@ mod tests {
         }
 
         cleanup(&db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_fatal_retry_exhausted_fixture_reports_log_scan_failure_and_snapshot_contract() {
+        let fixture = GoalRunScenarioFixture::forced_fatal_retry_exhausted();
+        let live_handle = insert_live_runtime_handle(
+            &fixture.runtime_sessions,
+            &fixture.project.id,
+            &fixture.runtime_session,
+            &fixture.runtime_log_path,
+        )
+        .await;
+
+        let verification = verify_runtime_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("verify runtime");
+
+        assert!(!verification.passed);
+        assert_eq!(verification.checks.len(), 1);
+        assert_eq!(verification.checks[0].kind, CheckKind::LogScan);
+        assert!(verification.message.contains("log scan — fatal patterns"));
+        assert!(verification.checks[0].detail.contains("line 16"));
+
+        let tail = tail_runtime_logs_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            Some(20),
+        )
+        .await
+        .expect("tail runtime logs");
+        assert!(tail
+            .lines
+            .last()
+            .expect("tail line")
+            .contains("FATAL: forced for test"));
+
+        let snapshot = build_goal_run_delivery_snapshot_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            &fixture.goal_run.id,
+        )
+        .await
+        .expect("build delivery snapshot");
+        assert_eq!(snapshot.retry_state.retry_count, 3);
+        assert_eq!(
+            snapshot
+                .verification_result
+                .as_ref()
+                .expect("verification result")
+                .passed,
+            false
+        );
+        assert_eq!(
+            snapshot.recent_events.last().map(|event| event.kind.clone()),
+            Some(crate::models::GoalRunEventKind::Blocked)
+        );
+
+        drop(live_handle);
+        fixture.cleanup();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_logs_vs_live_logs_fixture_prefers_live_snapshot_but_persisted_tail_keeps_stale_warning() {
+        let fixture = GoalRunScenarioFixture::stale_logs_vs_live_logs();
+        let live_handle = insert_live_runtime_handle(
+            &fixture.runtime_sessions,
+            &fixture.project.id,
+            &fixture.runtime_session,
+            &fixture.runtime_log_path,
+        )
+        .await;
+
+        let snapshot = build_goal_run_delivery_snapshot_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            &fixture.goal_run.id,
+        )
+        .await
+        .expect("build delivery snapshot");
+        let live_logs = &snapshot
+            .runtime_status
+            .as_ref()
+            .expect("runtime status")
+            .session
+            .as_ref()
+            .expect("runtime session")
+            .recent_logs;
+        assert!(live_logs.iter().any(|line| line.contains("fresh status ok")));
+        assert!(
+            !live_logs
+                .iter()
+                .any(|line| line.contains("stale blocker from a prior run"))
+        );
+
+        {
+            let mut sessions = fixture.runtime_sessions.lock().expect("lock runtime sessions");
+            sessions.remove(&fixture.project.id);
+        }
+        drop(live_handle);
+
+        let tail = tail_runtime_logs_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            Some(20),
+        )
+        .await
+        .expect("tail runtime logs");
+        assert!(tail
+            .lines
+            .iter()
+            .any(|line| line.contains("WARNING: stale blocker from a prior run")));
+
+        fixture.cleanup();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clean_runtime_pass_fixture_verifies_without_external_server() {
+        let fixture = GoalRunScenarioFixture::clean_runtime_pass();
+        let live_handle = insert_live_runtime_handle(
+            &fixture.runtime_sessions,
+            &fixture.project.id,
+            &fixture.runtime_session,
+            &fixture.runtime_log_path,
+        )
+        .await;
+
+        let verification = verify_runtime_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("verify runtime");
+
+        assert!(verification.passed);
+        assert_eq!(verification.checks.len(), 1);
+        assert_eq!(verification.checks[0].kind, CheckKind::LogScan);
+        assert!(verification.message.contains("1/1 checks passed"));
+
+        let snapshot = build_goal_run_delivery_snapshot_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            &fixture.goal_run.id,
+        )
+        .await
+        .expect("build delivery snapshot");
+        assert!(
+            snapshot
+                .verification_result
+                .as_ref()
+                .expect("verification result")
+                .passed
+        );
+        assert_eq!(snapshot.goal_run.status, GoalRunStatus::Completed);
+        assert!(snapshot
+            .verification_result
+            .as_ref()
+            .expect("verification result")
+            .checks
+            .iter()
+            .any(|check| check.passed));
+
+        let tail = tail_runtime_logs_impl(
+            &fixture.db,
+            &fixture.runtime_sessions,
+            fixture.project.id.clone(),
+            Some(20),
+        )
+        .await
+        .expect("tail runtime logs");
+        assert!(tail
+            .lines
+            .iter()
+            .any(|line| line.contains("runtime: server ready")));
+
+        drop(live_handle);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn verification_blocker_messages_distinguish_runtime_states() {
+        assert_eq!(
+            verification_blocker_message(None),
+            "No runtime session exists for this project"
+        );
+
+        let stopped = ProjectRuntimeSession {
+            session_id: "stopped".to_string(),
+            status: RuntimeSessionStatus::Stopped,
+            started_at: None,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            ended_at: Some("2024-01-01T00:01:00Z".to_string()),
+            url: None,
+            port_hint: None,
+            log_path: None,
+            recent_logs: vec![],
+            last_error: None,
+            exit_code: None,
+            pid: None,
+        };
+        let failed = ProjectRuntimeSession { last_error: Some("boom".to_string()), status: RuntimeSessionStatus::Failed, ..stopped.clone() };
+        let orphaned = ProjectRuntimeSession { last_error: Some("lost handle".to_string()), status: RuntimeSessionStatus::Orphaned, ..stopped };
+
+        assert!(verification_blocker_message(Some(&failed)).contains("failed before verification"));
+        assert!(verification_blocker_message(Some(&orphaned)).contains("orphaned and unmanaged"));
+        assert!(verification_blocker_message(Some(&orphaned)).contains("lost handle"));
+    }
+
+    #[test]
+    fn port_conflict_message_distinguishes_orphaned_runtime_sessions() {
+        let session = ProjectRuntimeSession {
+            session_id: "sess-1".to_string(),
+            status: RuntimeSessionStatus::Orphaned,
+            started_at: None,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            url: Some("http://127.0.0.1:3000".to_string()),
+            port_hint: Some(3000),
+            log_path: None,
+            recent_logs: vec![],
+            last_error: Some("stale process".to_string()),
+            exit_code: None,
+            pid: None,
+        };
+
+        let message = port_conflict_message(3000, Some(&session));
+        assert!(message.contains("orphaned runtime session"));
+        assert!(message.contains("sess-1"));
     }
 
     fn write_file(dir: &Path, name: &str, content: &str) {

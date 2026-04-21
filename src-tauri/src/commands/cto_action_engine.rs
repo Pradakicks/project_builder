@@ -360,6 +360,7 @@ pub(crate) fn review_cto_actions_impl(assistant_text: &str) -> Result<CtoDecisio
         cleaned_content: strip_action_blocks(assistant_text),
         actions,
         validation_errors,
+        repair_context: None,
     })
 }
 
@@ -517,7 +518,17 @@ async fn execute_cto_actions_impl_inner<R: tauri::Runtime>(
                 let name = action["name"].as_str().unwrap_or("New Component");
                 let piece = {
                     let db = state.lock().map_err(|e| e.to_string())?;
-                    db.create_piece(&project_id, parent_id.as_deref(), name, 260.0, 180.0)?
+                    // Stagger new pieces against the project's existing pieces
+                    // so a CTO batch that creates several pieces doesn't
+                    // stack them all at the same canvas coordinates.
+                    let existing = db.list_pieces(&project_id).map(|p| p.len()).unwrap_or(0);
+                    let slot = existing + created_piece_refs.len();
+                    let cols = 3usize;
+                    let col = (slot % cols) as f64;
+                    let row = (slot / cols) as f64;
+                    let x = 120.0 + col * 260.0;
+                    let y = 120.0 + row * 180.0;
+                    db.create_piece(&project_id, parent_id.as_deref(), name, x, y)?
                 };
                 let mut update = PieceUpdate::default();
                 if let Some(piece_type) = action.get("pieceType").and_then(Value::as_str) {

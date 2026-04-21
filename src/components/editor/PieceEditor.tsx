@@ -518,6 +518,220 @@ const engineOptions = [
   { value: "codex", label: "Codex" },
 ];
 
+const PIECE_ROLES = [
+  {
+    id: "implementation",
+    label: "Implementation",
+    description: "Writes the code. Always runs.",
+    required: true,
+  },
+  {
+    id: "testing",
+    label: "Testing",
+    description:
+      "Writes tests against the implementation and runs them via the validation command.",
+    required: false,
+  },
+  {
+    id: "review",
+    label: "Review",
+    description:
+      "Reads the diff + test output and produces APPROVED / REJECTED. Sets review status on the implementation artifact.",
+    required: false,
+  },
+] as const;
+
+function ActiveAgentsEditor({
+  piece,
+  onUpdate,
+}: {
+  piece: Piece;
+  onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
+}) {
+  const current = piece.agentConfig.activeAgents ?? [];
+  // Empty list = legacy single-role (implementation only). Treat it as such
+  // for checkbox display — the UI never claims testing/review are on unless
+  // they're explicitly in the list.
+  const has = (role: string) => current.some((r) => r.toLowerCase() === role);
+
+  const toggle = async (role: string, on: boolean) => {
+    // Treat empty current as ["implementation"] so toggles start from a sane
+    // baseline rather than silently flipping the whole piece to three-role.
+    const base = current.length > 0 ? current : ["implementation"];
+    let next: string[];
+    if (on) {
+      next = base.includes(role) ? base : [...base, role];
+    } else {
+      next = base.filter((r) => r.toLowerCase() !== role);
+    }
+    // Keep canonical order (implementation → testing → review) so the list is
+    // deterministic and the orchestrator can trust it.
+    const order = ["implementation", "testing", "review"];
+    next.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    await onUpdate(piece.id, {
+      agentConfig: { ...piece.agentConfig, activeAgents: next },
+    });
+  };
+
+  return (
+    <div className="space-y-1.5 border-t border-gray-800 pt-3">
+      <FieldLabel>Active agents</FieldLabel>
+      <p className="text-[10px] text-gray-500">
+        Sequential — each sees the previous output. Extra roles triple the
+        token cost of a run; opt in per piece. Empty means legacy single-role
+        (Implementation only).
+      </p>
+      <div className="mt-1.5 space-y-1.5">
+        {PIECE_ROLES.map((role) => {
+          const checked = has(role.id);
+          return (
+            <label
+              key={role.id}
+              className={`flex items-start gap-2 rounded border px-2 py-1.5 text-xs ${
+                checked
+                  ? "border-emerald-900/60 bg-emerald-950/20"
+                  : "border-gray-800 bg-gray-900"
+              } ${role.required ? "cursor-default opacity-80" : "cursor-pointer hover:bg-gray-900/70"}`}
+            >
+              <input
+                type="checkbox"
+                checked={role.required ? true : checked}
+                disabled={role.required}
+                onChange={(e) => {
+                  if (role.required) return;
+                  void toggle(role.id, e.target.checked);
+                }}
+                className="mt-0.5"
+              />
+              <div className="flex-1">
+                <div className="font-medium text-gray-200">
+                  {role.label}
+                  {role.required && (
+                    <span className="ml-2 text-[10px] text-gray-500">
+                      (always on)
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-gray-500">{role.description}</div>
+              </div>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/// Canonicalise to kebab-case to match the Rust `normalize_team_name`
+/// helper, so what the user types and what the backend stores are always
+/// the same. Kept small and dependency-free; mirror the Rust rules.
+function normalizeTeamName(raw: string): string | null {
+  const lowered = raw.trim().toLowerCase();
+  if (!lowered) return null;
+  let out = "";
+  let prevDash = false;
+  for (const ch of lowered) {
+    if (/[a-z0-9]/.test(ch)) {
+      out += ch;
+      prevDash = false;
+    } else if (ch === "-" || /\s/.test(ch)) {
+      if (!prevDash && out.length > 0) {
+        out += "-";
+        prevDash = true;
+      }
+    }
+  }
+  while (out.endsWith("-")) out = out.slice(0, -1);
+  if (!out) return null;
+  if (out.length > 40) {
+    out = out.slice(0, 40);
+    while (out.endsWith("-")) out = out.slice(0, -1);
+  }
+  return out;
+}
+
+function TeamEditor({
+  piece,
+  onUpdate,
+}: {
+  piece: Piece;
+  onUpdate: (id: string, updates: Record<string, unknown>) => Promise<void>;
+}) {
+  const projectId = useProjectStore((s) => s.project?.id);
+  const [teams, setTeams] = useState<string[]>([]);
+  const [draft, setDraft] = useState(piece.agentConfig.team ?? "");
+
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listTeamsForProject } = await import("../../api/projectApi");
+        const list = await listTeamsForProject(projectId);
+        if (!cancelled) setTeams(list);
+      } catch {
+        // Best-effort. The field still works as a free-text input.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  // Only reset the draft when the selected piece changes. Reacting to
+  // `piece.agentConfig.team` would stomp on the input while the user is
+  // mid-edit: any intermediate re-render (e.g. clicking Run Agent triggers
+  // agent/runtime state updates that briefly re-fetch the piece) would
+  // fire the effect and clear what the user just typed.
+  useEffect(() => {
+    setDraft(piece.agentConfig.team ?? "");
+  }, [piece.id]);
+
+  const commit = async (raw: string) => {
+    const normalized = normalizeTeamName(raw);
+    setDraft(normalized ?? "");
+    if ((normalized ?? null) !== (piece.agentConfig.team ?? null)) {
+      await onUpdate(piece.id, {
+        agentConfig: { ...piece.agentConfig, team: normalized },
+      });
+    }
+  };
+
+  const datalistId = `team-options-${piece.id}`;
+
+  return (
+    <div className="space-y-1.5 border-t border-gray-800 pt-3">
+      <FieldLabel>Team</FieldLabel>
+      <p className="text-[10px] text-gray-500">
+        Optional. Pieces sharing a team contribute to a team brief that every
+        OTHER team's pieces read when they run. Leave blank to opt out.
+      </p>
+      <input
+        list={datalistId}
+        type="text"
+        value={draft}
+        placeholder="e.g. payments, auth, ingest"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={(e) => void commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void commit((e.target as HTMLInputElement).value);
+          }
+        }}
+        className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+      />
+      {teams.length > 0 && (
+        <datalist id={datalistId}>
+          {teams.map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
+      )}
+    </div>
+  );
+}
+
 function AgentTab({
   piece,
   onUpdate,
@@ -835,6 +1049,10 @@ function AgentTab({
           </div>
         </>
       )}
+
+      <ActiveAgentsEditor piece={piece} onUpdate={onUpdate} />
+
+      <TeamEditor piece={piece} onUpdate={onUpdate} />
 
       <div className="border-t border-gray-800 pt-3">
         <button

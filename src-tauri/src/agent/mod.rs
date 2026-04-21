@@ -3,6 +3,7 @@ pub mod external;
 pub mod git_ops;
 pub mod merge;
 pub mod runner;
+pub mod team_brief;
 
 use crate::db::Database;
 use crate::llm::Message;
@@ -16,6 +17,17 @@ pub struct PieceContext {
     pub parent: Option<Piece>,
     /// (piece_name, summary_content) from context_summary artifacts of connected pieces
     pub connected_summaries: Vec<(String, String)>,
+    /// Briefs produced by OTHER teams in this project. Empty when the piece
+    /// has no team tag or when no other teams have briefs yet. Capped and
+    /// staleness-filtered by `load_piece_context`.
+    pub cross_team_briefs: Vec<CrossTeamBrief>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrossTeamBrief {
+    pub team: String,
+    pub content: String,
+    pub updated_at: String,
 }
 
 /// Build the LLM messages from a piece's configuration
@@ -86,6 +98,22 @@ pub fn build_agent_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message>
             "Context from connected pieces (use this to understand what they built):\n\n{}",
             summary_parts.join("\n\n")
         ));
+    }
+
+    if !context.cross_team_briefs.is_empty() {
+        let mut section = String::from(
+            "Cross-team context (what other teams in this project are working on). \
+             Use this to stay consistent with their contracts. Flag cross-team concerns explicitly if the diff would break them.\n",
+        );
+        for brief in &context.cross_team_briefs {
+            section.push_str(&format!(
+                "\n### team: {} — updated {}\n{}\n",
+                brief.team,
+                brief.updated_at,
+                snip_cross_team_brief(&brief.content, 1500),
+            ));
+        }
+        system_parts.push(section);
     }
 
     system_parts.push(format!(
@@ -565,6 +593,190 @@ pub fn build_external_prompt(piece: &Piece, context: &PieceContext) -> (String, 
     (system, user)
 }
 
+/// Truncate a prior-role output blob so it fits in a prompt without blowing
+/// up the token budget. Mirrors the helper in repair_prompt.rs.
+fn snip_role_output(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max).collect();
+    format!("{kept}…[truncated {} more chars]", total - max)
+}
+
+/// Same shape, explicit name so grep finds both call sites separately.
+fn snip_cross_team_brief(s: &str, max: usize) -> String {
+    snip_role_output(s, max)
+}
+
+/// Outputs from earlier role(s) in the same piece run that later roles should
+/// see. Empty on the first role (Implementation).
+#[derive(Debug, Default, Clone)]
+pub struct RolePriorOutputs {
+    pub implementation_diff: Option<String>,
+    pub implementation_summary: Option<String>,
+    pub tests_summary: Option<String>,
+    pub tests_passed: Option<bool>,
+    pub tests_output_tail: Option<String>,
+}
+
+const ROLE_PRIOR_MAX_CHARS: usize = 2_000;
+
+/// Implementation-role prompt. Today's `build_agent_prompt` exactly — this
+/// thin wrapper exists so every caller goes through the role-aware API and
+/// future tweaks to the impl-specific framing land in one place.
+pub fn build_implementation_prompt(piece: &Piece, context: &PieceContext) -> Vec<Message> {
+    build_agent_prompt(piece, context)
+}
+
+/// Testing-role prompt. Wraps the base piece prompt with a directive to write
+/// tests and attaches the implementation agent's diff as context.
+pub fn build_testing_prompt(
+    piece: &Piece,
+    context: &PieceContext,
+    prior: &RolePriorOutputs,
+) -> Vec<Message> {
+    let mut messages = build_agent_prompt(piece, context);
+
+    let mut addendum = String::from(
+        "You are the TESTING agent for this piece. The implementation agent just finished its \
+         pass against the responsibilities and interfaces above. Your job:\n\
+         1. Write tests that verify the implementation matches the piece's responsibilities and \
+            any interface contracts. Prefer the simplest framework already present in the repo.\n\
+         2. Cover at least the happy path plus one failure or edge case implied by the \
+            constraints.\n\
+         3. Commit test files to the piece's branch; do NOT modify implementation code.\n\
+         4. Keep output concise — you are not writing implementation, only tests.",
+    );
+
+    if let Some(diff) = prior.implementation_diff.as_deref() {
+        addendum.push_str("\n\nImplementation diff:\n");
+        addendum.push_str(&snip_role_output(diff, ROLE_PRIOR_MAX_CHARS));
+    }
+    if let Some(summary) = prior.implementation_summary.as_deref() {
+        addendum.push_str("\n\nImplementation summary:\n");
+        addendum.push_str(&snip_role_output(summary, ROLE_PRIOR_MAX_CHARS));
+    }
+
+    messages.push(Message {
+        role: "user".to_string(),
+        content: addendum,
+    });
+    messages
+}
+
+/// Review-role prompt. Wraps the base piece prompt with an explicit critique
+/// directive, attaches the impl diff + test outcome, and pins the verdict
+/// format the orchestrator parses.
+pub fn build_review_prompt(
+    piece: &Piece,
+    context: &PieceContext,
+    prior: &RolePriorOutputs,
+) -> Vec<Message> {
+    let mut messages = build_agent_prompt(piece, context);
+
+    let mut addendum = String::from(
+        "You are the REVIEW agent for this piece. Do NOT write code or tests. Review what the \
+         implementation and testing agents produced and decide whether the piece is acceptable.\n\n\
+         Review for:\n\
+         (1) does the diff satisfy the responsibilities and interfaces stated above?\n\
+         (2) are there obvious correctness, safety, or security issues?\n\
+         (3) do the tests cover meaningful behavior, not just smoke pings?\n\n\
+         End your response with a SINGLE LINE verdict in one of these exact shapes:\n\
+         APPROVED\n\
+         REJECTED: <one-line reason>",
+    );
+
+    if let Some(diff) = prior.implementation_diff.as_deref() {
+        addendum.push_str("\n\nImplementation diff:\n");
+        addendum.push_str(&snip_role_output(diff, ROLE_PRIOR_MAX_CHARS));
+    }
+    if let Some(summary) = prior.implementation_summary.as_deref() {
+        addendum.push_str("\n\nImplementation summary:\n");
+        addendum.push_str(&snip_role_output(summary, ROLE_PRIOR_MAX_CHARS));
+    }
+    if let Some(tests) = prior.tests_summary.as_deref() {
+        let passed_note = match prior.tests_passed {
+            Some(true) => " (PASSED)",
+            Some(false) => " (FAILED)",
+            None => "",
+        };
+        addendum.push_str(&format!("\n\nTests outcome{passed_note}:\n"));
+        addendum.push_str(&snip_role_output(tests, ROLE_PRIOR_MAX_CHARS));
+    }
+    if let Some(tail) = prior.tests_output_tail.as_deref() {
+        addendum.push_str("\n\nTest runner tail:\n");
+        addendum.push_str(&snip_role_output(tail, ROLE_PRIOR_MAX_CHARS));
+    }
+
+    messages.push(Message {
+        role: "user".to_string(),
+        content: addendum,
+    });
+    messages
+}
+
+/// External-CLI flavour of the role prompts — same layering, flat strings.
+pub fn build_role_external_prompt(
+    piece: &Piece,
+    context: &PieceContext,
+    role: crate::models::AgentRole,
+    prior: &RolePriorOutputs,
+) -> (String, String) {
+    let messages = match role {
+        crate::models::AgentRole::Testing => build_testing_prompt(piece, context, prior),
+        crate::models::AgentRole::Review => build_review_prompt(piece, context, prior),
+        _ => build_implementation_prompt(piece, context),
+    };
+    let system = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let user = messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (system, user)
+}
+
+/// Parse the single-line verdict from a review agent's output. Lenient:
+/// - case-insensitive
+/// - accepts "approved", "✅"
+/// - accepts "rejected: <reason>", "❌", "reject"
+/// Returns (approved, reason) where reason is the trimmed text after the
+/// colon for REJECTED, or empty for APPROVED / unknown.
+pub fn parse_review_verdict(output: &str) -> (bool, String) {
+    // Scan lines from the end — verdict is expected on the last non-empty line.
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("approved") || trimmed == "✅" {
+            return (true, String::new());
+        }
+        if lower.starts_with("rejected") || lower.starts_with("reject") || trimmed == "❌" {
+            let reason = trimmed
+                .splitn(2, ':')
+                .nth(1)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            return (false, reason);
+        }
+        // Not a verdict line — keep scanning upward in case there's trailing
+        // prose after the verdict.
+        break;
+    }
+    // No clear verdict — treat as rejected with an explanatory reason so the
+    // operator doesn't silently get a green light from an ambiguous output.
+    (false, "review agent did not produce a clear APPROVED / REJECTED verdict".to_string())
+}
+
 /// Phase-specific instructions injected into the agent's system prompt.
 fn phase_instructions(phase: &Phase) -> String {
     match phase {
@@ -636,6 +848,242 @@ fn resolve_references(prompt: &str, pieces: &[Piece]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod role_prompt_tests {
+    use super::*;
+    use crate::models::piece::Interface as PieceInterface;
+    use crate::models::{AgentConfig, Constraint, OutputMode, Phase, Piece};
+
+    fn sample_piece() -> Piece {
+        Piece {
+            id: "p1".to_string(),
+            project_id: "proj".to_string(),
+            parent_id: None,
+            name: "Server".to_string(),
+            piece_type: "implementation".to_string(),
+            color: None,
+            icon: None,
+            responsibilities: "Return JSON on GET /".to_string(),
+            interfaces: vec![PieceInterface {
+                name: "GET /".to_string(),
+                direction: crate::models::piece::InterfaceDirection::Out,
+                description: "200 ok".to_string(),
+            }],
+            constraints: vec![Constraint {
+                category: "security".to_string(),
+                description: "no secrets in logs".to_string(),
+            }],
+            notes: String::new(),
+            agent_prompt: "build it".to_string(),
+            agent_config: AgentConfig::default(),
+            output_mode: OutputMode::CodeOnly,
+            phase: Phase::Implementing,
+            position_x: 0.0,
+            position_y: 0.0,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        }
+    }
+
+    fn sample_context() -> PieceContext {
+        PieceContext {
+            connected_pieces: vec![],
+            parent: None,
+            connected_summaries: vec![],
+            cross_team_briefs: vec![],
+        }
+    }
+
+    #[test]
+    fn implementation_prompt_is_the_legacy_prompt() {
+        let piece = sample_piece();
+        let ctx = sample_context();
+        let legacy = build_agent_prompt(&piece, &ctx);
+        let impl_messages = build_implementation_prompt(&piece, &ctx);
+        assert_eq!(legacy.len(), impl_messages.len());
+        for (a, b) in legacy.iter().zip(impl_messages.iter()) {
+            assert_eq!(a.role, b.role);
+            assert_eq!(a.content, b.content);
+        }
+    }
+
+    #[test]
+    fn testing_prompt_appends_directive_and_impl_diff() {
+        let piece = sample_piece();
+        let ctx = sample_context();
+        let prior = RolePriorOutputs {
+            implementation_diff: Some("server.js | 10 +++++-----".to_string()),
+            implementation_summary: Some("added GET handler".to_string()),
+            ..Default::default()
+        };
+        let messages = build_testing_prompt(&piece, &ctx, &prior);
+        // At least one extra user message beyond the legacy prompt.
+        let user_msgs: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+        let testing_addendum = user_msgs
+            .last()
+            .expect("testing prompt has a user turn")
+            .content
+            .as_str();
+        assert!(testing_addendum.contains("TESTING agent"));
+        assert!(testing_addendum.contains("Implementation diff"));
+        assert!(testing_addendum.contains("server.js | 10"));
+        assert!(testing_addendum.contains("Implementation summary"));
+        assert!(testing_addendum.contains("added GET handler"));
+    }
+
+    #[test]
+    fn review_prompt_requires_verdict_and_includes_test_outcome() {
+        let piece = sample_piece();
+        let ctx = sample_context();
+        let prior = RolePriorOutputs {
+            implementation_summary: Some("impl body".to_string()),
+            tests_summary: Some("wrote server.test.js".to_string()),
+            tests_passed: Some(false),
+            tests_output_tail: Some("1 failed, 0 passed".to_string()),
+            ..Default::default()
+        };
+        let messages = build_review_prompt(&piece, &ctx, &prior);
+        let last_user = messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .last()
+            .expect("review user turn")
+            .content
+            .clone();
+        assert!(last_user.contains("REVIEW agent"));
+        assert!(last_user.contains("APPROVED"));
+        assert!(last_user.contains("REJECTED"));
+        assert!(last_user.contains("Tests outcome (FAILED)"));
+        assert!(last_user.contains("1 failed, 0 passed"));
+    }
+
+    #[test]
+    fn review_verdict_parser_accepts_approved_variants() {
+        assert_eq!(parse_review_verdict("lgtm\nAPPROVED"), (true, String::new()));
+        assert_eq!(parse_review_verdict("approved"), (true, String::new()));
+        assert_eq!(parse_review_verdict("...\n✅"), (true, String::new()));
+    }
+
+    #[test]
+    fn review_verdict_parser_accepts_rejected_variants() {
+        let (ok, reason) = parse_review_verdict("REJECTED: tests are stubbed out");
+        assert!(!ok);
+        assert_eq!(reason, "tests are stubbed out");
+
+        let (ok, _) = parse_review_verdict("rejected");
+        assert!(!ok);
+
+        let (ok, _) = parse_review_verdict("❌");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn review_verdict_parser_treats_ambiguous_output_as_rejected() {
+        let (ok, reason) = parse_review_verdict("I think it's probably fine?");
+        assert!(!ok);
+        assert!(reason.contains("did not produce a clear"));
+    }
+
+    #[test]
+    fn cross_team_briefs_appear_in_system_prompt_when_present() {
+        let piece = sample_piece();
+        let ctx = PieceContext {
+            connected_pieces: vec![],
+            parent: None,
+            connected_summaries: vec![],
+            cross_team_briefs: vec![
+                super::CrossTeamBrief {
+                    team: "payments".to_string(),
+                    content: "## Owned surface\nCharge + refund API".to_string(),
+                    updated_at: "2026-04-20T01:23:45Z".to_string(),
+                },
+                super::CrossTeamBrief {
+                    team: "auth".to_string(),
+                    content: "## Owned surface\nLogin + session tokens".to_string(),
+                    updated_at: "2026-04-20T00:10:00Z".to_string(),
+                },
+            ],
+        };
+        let messages = build_agent_prompt(&piece, &ctx);
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("system msg")
+            .content
+            .clone();
+        assert!(
+            system.contains("Cross-team context"),
+            "system prompt must include the cross-team section"
+        );
+        assert!(system.contains("team: payments"));
+        assert!(system.contains("Charge + refund API"));
+        assert!(system.contains("team: auth"));
+        assert!(system.contains("Login + session tokens"));
+    }
+
+    #[test]
+    fn cross_team_briefs_section_is_omitted_when_empty() {
+        let piece = sample_piece();
+        let ctx = sample_context();
+        let messages = build_agent_prompt(&piece, &ctx);
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("system msg")
+            .content
+            .clone();
+        assert!(
+            !system.contains("Cross-team context"),
+            "no cross-team section when briefs empty"
+        );
+    }
+
+    #[test]
+    fn cross_team_briefs_snip_to_cap() {
+        let piece = sample_piece();
+        let huge = "x".repeat(5_000);
+        let ctx = PieceContext {
+            connected_pieces: vec![],
+            parent: None,
+            connected_summaries: vec![],
+            cross_team_briefs: vec![super::CrossTeamBrief {
+                team: "payments".to_string(),
+                content: huge,
+                updated_at: "2026-04-20T01:00:00Z".to_string(),
+            }],
+        };
+        let messages = build_agent_prompt(&piece, &ctx);
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .unwrap()
+            .content
+            .clone();
+        assert!(system.contains("…[truncated"));
+    }
+
+    #[test]
+    fn role_prior_snips_large_blobs() {
+        let piece = sample_piece();
+        let ctx = sample_context();
+        let huge = "x".repeat(10_000);
+        let prior = RolePriorOutputs {
+            implementation_diff: Some(huge.clone()),
+            ..Default::default()
+        };
+        let messages = build_testing_prompt(&piece, &ctx, &prior);
+        let content = messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(content.contains("…[truncated"));
+        assert!(content.len() < 6_000, "prompt blew past snip cap: {}", content.len());
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,9 @@
-use crate::agent::{build_agent_prompt, build_external_prompt, build_leader_prompt, next_phase, PieceContext};
+use crate::agent::{
+    build_agent_prompt, build_external_prompt, build_implementation_prompt, build_leader_prompt,
+    build_review_prompt, build_role_external_prompt, build_testing_prompt, next_phase,
+    parse_review_verdict, PieceContext, RolePriorOutputs,
+};
+use crate::models::{AgentRole, AgentState};
 use crate::db::{Database, PieceUpdate};
 use crate::llm::{self, LlmConfig, Message, TokenUsage};
 use crate::models::*;
@@ -65,10 +70,39 @@ fn load_piece_context(
     let project = db.get_project(&piece.project_id).ok();
     let settings = project.map(|p| p.settings).unwrap_or_default();
 
+    // Cross-team briefs: only load when this piece is tagged with a team.
+    // Excludes the piece's own team, caps at 5, drops briefs older than 24h.
+    const CROSS_TEAM_CAP: usize = 5;
+    const CROSS_TEAM_STALENESS_HOURS: i64 = 24;
+    let cross_team_briefs: Vec<crate::agent::CrossTeamBrief> = if let Some(ref my_team) =
+        piece.agent_config.team
+    {
+        let staleness_cutoff = chrono::Utc::now()
+            - chrono::Duration::hours(CROSS_TEAM_STALENESS_HOURS);
+        db.list_team_briefs_for_project(&piece.project_id, Some(my_team.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|brief| {
+                chrono::DateTime::parse_from_rfc3339(&brief.updated_at)
+                    .map(|ts| ts.with_timezone(&chrono::Utc) >= staleness_cutoff)
+                    .unwrap_or(false)
+            })
+            .take(CROSS_TEAM_CAP)
+            .map(|brief| crate::agent::CrossTeamBrief {
+                team: brief.team,
+                content: brief.content,
+                updated_at: brief.updated_at,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let context = PieceContext {
         connected_pieces,
         parent,
         connected_summaries,
+        cross_team_briefs,
     };
 
     Ok((piece, context, settings))
@@ -205,12 +239,50 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         .or(settings.default_execution_engine.as_deref())
         .unwrap_or("built-in");
 
+    // Transition the implementation-agent row to Working. Phase 1 only tracks
+    // one role; the orchestrator in Phase 3 will drive Testing / Review too.
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.upsert_agent(piece_id, crate::models::AgentRole::Implementation);
+        let _ = db_lock.set_agent_state(
+            piece_id,
+            crate::models::AgentRole::Implementation,
+            crate::models::AgentState::Working,
+        );
+    }
+
+    let impl_prior = RolePriorOutputs::default();
     let result = match engine {
         "built-in" | "" => {
-            run_builtin_agent(&piece, &context, &settings, piece_id, feedback, db, app_handle, cancel.clone()).await
+            run_builtin_agent(
+                &piece,
+                &context,
+                &settings,
+                piece_id,
+                feedback,
+                db,
+                app_handle,
+                cancel.clone(),
+                AgentRole::Implementation,
+                &impl_prior,
+            )
+            .await
         }
         name => {
-            run_external_agent(&piece, &context, &settings, name, piece_id, feedback, db, app_handle, cancel.clone()).await
+            run_external_agent(
+                &piece,
+                &context,
+                &settings,
+                name,
+                piece_id,
+                feedback,
+                db,
+                app_handle,
+                cancel.clone(),
+                AgentRole::Implementation,
+                &impl_prior,
+            )
+            .await
         }
     };
 
@@ -220,6 +292,20 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
         Ok(AgentResult::External { success, .. }) => *success,
         Err(_) => false,
     };
+
+    // Flip the agent row back to Idle on success, or Error on failure.
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.set_agent_state(
+            piece_id,
+            crate::models::AgentRole::Implementation,
+            if success {
+                crate::models::AgentState::Idle
+            } else {
+                crate::models::AgentState::Error
+            },
+        );
+    }
 
     // Compute phase transition based on policy (only on success)
     let mut phase_proposal: Option<String> = None;
@@ -337,6 +423,99 @@ pub async fn run_piece_agent<R: tauri::Runtime>(
             }
         }
 
+        // Phase 3 — Specialized agent chain. Must run AFTER the impl's
+        // generated_files artifact exists so the Review agent can flip its
+        // reviewStatus. Pieces with an empty active_agents list (legacy
+        // default) stay on the single-role flow.
+        let run_testing = piece
+            .agent_config
+            .active_agents
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case("testing"));
+        let run_review = piece
+            .agent_config
+            .active_agents
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case("review"));
+
+        if run_testing || run_review {
+            let impl_diff = match &result {
+                Ok(AgentResult::External {
+                    git_diff_stat: Some(stat),
+                    ..
+                }) => Some(stat.clone()),
+                _ => None,
+            };
+
+            let mut chain_prior = RolePriorOutputs {
+                implementation_summary: Some(agent_output.clone()),
+                implementation_diff: impl_diff,
+                ..Default::default()
+            };
+
+            if run_testing {
+                let prior_snapshot = chain_prior.clone();
+                if let Err(e) = run_extra_role(
+                    &piece,
+                    &context,
+                    &settings,
+                    piece_id,
+                    engine,
+                    db,
+                    app_handle,
+                    cancel.clone(),
+                    AgentRole::Testing,
+                    &prior_snapshot,
+                    &mut chain_prior,
+                )
+                .await
+                {
+                    warn!(piece_id, error = %e, "Testing role failed; continuing to Review if active");
+                }
+            }
+
+            if run_review {
+                let prior_snapshot = chain_prior.clone();
+                if let Err(e) = run_extra_role(
+                    &piece,
+                    &context,
+                    &settings,
+                    piece_id,
+                    engine,
+                    db,
+                    app_handle,
+                    cancel.clone(),
+                    AgentRole::Review,
+                    &prior_snapshot,
+                    &mut chain_prior,
+                )
+                .await
+                {
+                    warn!(piece_id, error = %e, "Review role failed");
+                }
+            }
+        }
+
+        // Team-brief regeneration (fire-and-forget). If this piece belongs to
+        // a team, refresh the team's brief so pieces in OTHER teams see the
+        // latest team state on their next run. Debounced internally to 5min.
+        if let Some(ref team) = piece.agent_config.team {
+            let team_owned = team.clone();
+            let project_id_owned = piece.project_id.clone();
+            let app_for_brief = app_handle.clone();
+            tokio::spawn(async move {
+                if let Err(e) = super::team_brief::generate_team_brief(
+                    team_owned,
+                    project_id_owned,
+                    app_for_brief,
+                )
+                .await
+                {
+                    warn!(error = %e, "Team brief generation failed");
+                }
+            });
+        }
+
         let piece_phase = piece.phase.clone();
         let piece_clone = piece.clone();
 
@@ -403,6 +582,168 @@ fn update_plan_task_status_in_db(
         },
     )?;
     Ok(())
+}
+
+/// Run one of the follow-on roles (Testing or Review) after Implementation has
+/// succeeded. Handles: upsert_agent + state transitions, dispatch to built-in
+/// or external engine with the role-specific prompt, and role-specific
+/// post-processing (tests artifact for Testing; review artifact + verdict +
+/// reviewStatus flip for Review). Returns Err if the LLM/CLI call itself
+/// errors; tests-failing or review-rejecting do NOT produce Err — they record
+/// their outcome so the operator / repair agent can act.
+async fn run_extra_role<R: tauri::Runtime>(
+    piece: &Piece,
+    context: &PieceContext,
+    settings: &ProjectSettings,
+    piece_id: &str,
+    engine: &str,
+    db: &Mutex<Database>,
+    app_handle: &AppHandle<R>,
+    cancel: Option<CancellationToken>,
+    role: AgentRole,
+    prior_in: &RolePriorOutputs,
+    prior_out: &mut RolePriorOutputs,
+) -> Result<(), String> {
+    info!(piece_id, role = role.as_str(), engine, "Starting extra role");
+
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.upsert_agent(piece_id, role);
+        let _ = db_lock.set_agent_state(piece_id, role, AgentState::Working);
+    }
+
+    let role_result = match engine {
+        "built-in" | "" => {
+            run_builtin_agent(
+                piece, context, settings, piece_id, None, db, app_handle, cancel, role, prior_in,
+            )
+            .await
+        }
+        name => {
+            run_external_agent(
+                piece, context, settings, name, piece_id, None, db, app_handle, cancel, role,
+                prior_in,
+            )
+            .await
+        }
+    };
+
+    let role_succeeded = matches!(
+        &role_result,
+        Ok(AgentResult::Builtin { .. }) | Ok(AgentResult::External { success: true, .. })
+    );
+
+    {
+        let db_lock = db.lock().map_err(|e| e.to_string())?;
+        let _ = db_lock.set_agent_state(
+            piece_id,
+            role,
+            if role_succeeded {
+                AgentState::Idle
+            } else {
+                AgentState::Error
+            },
+        );
+    }
+
+    // Extract role output from the result or from history.
+    let role_output = match &role_result {
+        Ok(AgentResult::Builtin { output, .. }) => output.clone(),
+        Ok(AgentResult::External { .. }) => db
+            .lock()
+            .ok()
+            .and_then(|d| d.list_agent_history_by_role(piece_id, role).ok())
+            .and_then(|h| h.into_iter().next().map(|e| e.output_text))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+
+    // Role-specific post-processing.
+    match role {
+        AgentRole::Testing => {
+            // Capture the test output for Review's prompt; flag pass/fail if
+            // the validation command ran.
+            prior_out.tests_summary = Some(role_output.clone());
+            prior_out.tests_output_tail = if role_output.chars().count() > 800 {
+                Some(
+                    role_output
+                        .chars()
+                        .skip(role_output.chars().count().saturating_sub(800))
+                        .collect(),
+                )
+            } else {
+                Some(role_output.clone())
+            };
+            if let Ok(AgentResult::External {
+                validation: Some(v),
+                ..
+            }) = &role_result
+            {
+                prior_out.tests_passed = Some(v.passed);
+            }
+            // Record a lightweight "tests" artifact for the UI timeline.
+            if role_succeeded {
+                if let Ok(db_lock) = db.lock() {
+                    let _ = db_lock.upsert_artifact(
+                        piece_id,
+                        "tests",
+                        "Tests written",
+                        &role_output,
+                    );
+                }
+            }
+        }
+        AgentRole::Review => {
+            let (approved, reason) = parse_review_verdict(&role_output);
+
+            // Store the full review prose so operators can read it inline.
+            if let Ok(db_lock) = db.lock() {
+                let _ = db_lock.upsert_artifact(
+                    piece_id,
+                    "review",
+                    if approved { "Review: APPROVED" } else { "Review: REJECTED" },
+                    &role_output,
+                );
+
+                // Flip the implementation's generated_files artifact's
+                // reviewStatus. Legacy pieces without such an artifact get a
+                // silent no-op via the helper.
+                let new_status = if approved {
+                    crate::models::artifact::ReviewStatus::Approved
+                } else {
+                    crate::models::artifact::ReviewStatus::Rejected
+                };
+                let _ = db_lock.set_artifact_review_status(
+                    piece_id,
+                    "generated_files",
+                    new_status,
+                );
+            }
+
+            if !approved {
+                warn!(
+                    piece_id,
+                    reason = %reason,
+                    "Review agent rejected the implementation"
+                );
+                // Surface via the running event channel so the UI's ActivityFeed
+                // / ProjectStatusBar pick it up immediately without a poll.
+                let _ = app_handle.emit(
+                    "agent-output-chunk",
+                    json!({
+                        "pieceId": piece_id,
+                        "chunk": "",
+                        "done": true,
+                        "reviewRejected": true,
+                        "reviewReason": reason,
+                    }),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    role_result.map(|_| ())
 }
 
 pub async fn run_all_plan_tasks<R: tauri::Runtime>(
@@ -614,6 +955,8 @@ async fn run_builtin_agent<R: tauri::Runtime>(
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
     cancel: Option<CancellationToken>,
+    role: AgentRole,
+    prior: &RolePriorOutputs,
 ) -> Result<AgentResult, String> {
     let max_tokens = piece.agent_config.token_budget.unwrap_or(4096) as u32;
 
@@ -647,7 +990,13 @@ async fn run_builtin_agent<R: tauri::Runtime>(
         ));
     }
 
-    let mut messages = build_agent_prompt(piece, context);
+    // Role-aware prompt: Implementation keeps today's exact shape; Testing and
+    // Review layer role-specific directives + prior-role context on top.
+    let mut messages = match role {
+        AgentRole::Testing => build_testing_prompt(piece, context, prior),
+        AgentRole::Review => build_review_prompt(piece, context, prior),
+        _ => build_implementation_prompt(piece, context),
+    };
 
     // Iterative mode: inject previous output + feedback as conversation context
     if let Some(fb) = feedback {
@@ -722,6 +1071,7 @@ async fn run_builtin_agent<R: tauri::Runtime>(
         };
         if let Err(e) = db.insert_agent_history(
             piece_id,
+            role,
             "run",
             &piece.agent_prompt,
             &output_text,
@@ -759,6 +1109,8 @@ async fn run_external_agent<R: tauri::Runtime>(
     db: &Mutex<Database>,
     app_handle: &AppHandle<R>,
     cancel: Option<CancellationToken>,
+    role: AgentRole,
+    prior: &RolePriorOutputs,
 ) -> Result<AgentResult, String> {
     use super::git_ops;
 
@@ -772,7 +1124,11 @@ async fn run_external_agent<R: tauri::Runtime>(
 
     info!(piece_id, engine = engine_name, working_dir, timeout = piece.agent_config.timeout.unwrap_or(300), "Starting external agent run");
 
-    let (system_prompt, user_prompt_base) = build_external_prompt(piece, context);
+    // Role-aware external prompt.
+    let (system_prompt, user_prompt_base) = match role {
+        AgentRole::Implementation => build_external_prompt(piece, context),
+        _ => build_role_external_prompt(piece, context, role, prior),
+    };
     let mut user_prompt = user_prompt_base;
 
     // Iterative mode: append previous output + feedback to the prompt
@@ -947,6 +1303,7 @@ async fn run_external_agent<R: tauri::Runtime>(
                 let db = db.lock().map_err(|e| e.to_string())?;
                 if let Err(e) = db.insert_agent_history(
                     piece_id,
+                    role,
                     "external-run",
                     &user_prompt,
                     &run_result.output,
@@ -1591,6 +1948,319 @@ mod tests {
         let generated = fs::read_to_string(std::path::Path::new(&working_dir).join("generated-from-codex.txt"))
             .expect("read fake codex output");
         assert!(generated.contains("fake codex run"));
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Regression: a piece configured with only the Implementation role
+    /// produces exactly the same shape as pre-Phase-3 behavior — one history
+    /// row, one generated_files artifact, no tests or review artifacts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_role_piece_runs_only_implementation() {
+        ensure_test_tools();
+
+        let workspace = temp_workspace("single-role");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Single-role".to_string(),
+            "legacy behavior".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "Solo", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        active_agents: vec!["implementation".to_string()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("configure single-role piece");
+            piece
+        };
+
+        run_piece_agent(&piece.id, None, &state, &app_handle, None)
+            .await
+            .expect("run single-role piece");
+
+        {
+            let db = state.lock().expect("lock db");
+            let history = db.list_agent_history(&piece.id).expect("list history");
+            assert_eq!(
+                history.len(),
+                1,
+                "single-role piece must produce exactly one history row"
+            );
+            assert_eq!(history[0].role, AgentRole::Implementation);
+
+            let impl_agents = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Implementation)
+                .expect("list by role");
+            assert_eq!(impl_agents.len(), 1);
+            let testing_agents = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Testing)
+                .expect("list by role");
+            assert!(
+                testing_agents.is_empty(),
+                "no Testing history for single-role piece"
+            );
+            let review_agents = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Review)
+                .expect("list by role");
+            assert!(
+                review_agents.is_empty(),
+                "no Review history for single-role piece"
+            );
+
+            // Only the impl artifact gets created. No 'tests' or 'review'.
+            let artifacts = db.list_artifacts(&piece.id).expect("list artifacts");
+            let types: Vec<&str> = artifacts.iter().map(|a| a.artifact_type.as_str()).collect();
+            assert!(types.contains(&"generated_files"));
+            assert!(!types.contains(&"tests"));
+            assert!(!types.contains(&"review"));
+        }
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Three-agent orchestration path: a piece with all three roles active
+    /// produces one history row per role, a `tests` artifact for Testing,
+    /// and a `review` artifact for Review. Because the fake codex stub
+    /// produces ambiguous output (no APPROVED / REJECTED line), the review
+    /// verdict defaults to Rejected — which also exercises the
+    /// reviewStatus flip on the impl artifact.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn three_role_piece_runs_testing_and_review_and_records_rejection() {
+        ensure_test_tools();
+
+        let workspace = temp_workspace("three-role");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+        let app = tauri::test::mock_app();
+        let app_handle = app.handle().clone();
+
+        let project = create_project_impl(
+            &state,
+            "Three-role".to_string(),
+            "impl + test + review".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock db");
+            let piece = db
+                .create_piece(&project.id, None, "TrioPiece", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        execution_engine: Some("codex".to_string()),
+                        active_agents: vec![
+                            "implementation".to_string(),
+                            "testing".to_string(),
+                            "review".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("configure three-role piece");
+            piece
+        };
+
+        run_piece_agent(&piece.id, None, &state, &app_handle, None)
+            .await
+            .expect("three-role run");
+
+        {
+            let db = state.lock().expect("lock db");
+
+            // One history row per role.
+            let impl_h = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Implementation)
+                .expect("list impl");
+            let test_h = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Testing)
+                .expect("list test");
+            let review_h = db
+                .list_agent_history_by_role(&piece.id, AgentRole::Review)
+                .expect("list review");
+            assert_eq!(impl_h.len(), 1, "one Implementation history row");
+            assert_eq!(test_h.len(), 1, "one Testing history row");
+            assert_eq!(review_h.len(), 1, "one Review history row");
+
+            // Three distinct agents.id rows in the agents table, one per role.
+            let agents = db
+                .list_agents_for_piece(&piece.id)
+                .expect("list agents for piece");
+            let roles: std::collections::HashSet<_> = agents.iter().map(|a| a.role).collect();
+            assert!(roles.contains(&AgentRole::Implementation));
+            assert!(roles.contains(&AgentRole::Testing));
+            assert!(roles.contains(&AgentRole::Review));
+
+            // Artifact shape: generated_files + tests + review.
+            let artifacts = db.list_artifacts(&piece.id).expect("list artifacts");
+            let types: Vec<&str> = artifacts.iter().map(|a| a.artifact_type.as_str()).collect();
+            assert!(
+                types.contains(&"generated_files"),
+                "impl artifact present: {types:?}"
+            );
+            assert!(types.contains(&"tests"), "tests artifact present");
+            assert!(types.contains(&"review"), "review artifact present");
+
+            // Review defaults to Rejected because the fake codex output
+            // contains no APPROVED / REJECTED verdict line — the lenient
+            // parser treats "no clear verdict" as rejection.
+            let impl_artifact = db
+                .get_artifact_by_type(&piece.id, "generated_files")
+                .expect("read impl artifact")
+                .expect("impl artifact exists");
+            assert_eq!(
+                impl_artifact.review_status,
+                crate::models::artifact::ReviewStatus::Rejected,
+                "ambiguous review output must flip impl to Rejected"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Phase C regression: a piece tagged with `team = foo` loading its
+    /// context sees briefs for OTHER teams (not its own), capped at 5, with
+    /// stale rows filtered out. Empty team = no cross-team briefs loaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_piece_context_pulls_cross_team_briefs() {
+        let workspace = temp_workspace("cross-team-briefs");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+
+        let project = create_project_impl(
+            &state,
+            "Cross-team".to_string(),
+            "Phase C regression".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock");
+            let piece = db
+                .create_piece(&project.id, None, "AuthPiece", 0.0, 0.0)
+                .expect("create piece");
+            db.update_piece(
+                &piece.id,
+                &PieceUpdate {
+                    agent_config: Some(AgentConfig {
+                        team: Some("auth".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("tag piece with team");
+            piece
+        };
+
+        // Seed briefs: one for auth (caller's team — must be excluded),
+        // one for payments (should show), one stale for legacy (dropped).
+        {
+            let db = state.lock().expect("lock");
+            db.upsert_team_brief(&project.id, "auth", "own brief", &[], 0)
+                .expect("upsert auth brief");
+            db.upsert_team_brief(&project.id, "payments", "charge + refund", &[], 0)
+                .expect("upsert payments brief");
+            // Stale row — manually write with an old timestamp.
+            db.upsert_team_brief(&project.id, "legacy", "stale", &[], 0)
+                .expect("upsert legacy brief");
+            db.conn
+                .execute(
+                    "UPDATE team_briefs SET updated_at = '2000-01-01T00:00:00Z' \
+                     WHERE project_id = ?1 AND team = 'legacy'",
+                    [&project.id],
+                )
+                .expect("stale timestamp");
+        }
+
+        let (_piece, context, _settings) =
+            load_piece_context(&piece.id, &state).expect("load context");
+        let teams: Vec<&str> = context
+            .cross_team_briefs
+            .iter()
+            .map(|b| b.team.as_str())
+            .collect();
+        assert!(
+            teams.contains(&"payments"),
+            "payments brief must appear: {:?}",
+            teams
+        );
+        assert!(
+            !teams.contains(&"auth"),
+            "caller's own team must NOT appear: {:?}",
+            teams
+        );
+        assert!(
+            !teams.contains(&"legacy"),
+            "stale (>24h) briefs must be dropped: {:?}",
+            teams
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    /// Pieces without a team tag receive no cross-team briefs — zero
+    /// overhead for legacy pieces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_piece_context_with_no_team_loads_no_briefs() {
+        let workspace = temp_workspace("no-team");
+        let db_path = workspace.join("projects.db");
+        let db = Database::new_at_path(&db_path).expect("open test db");
+        let state = Mutex::new(db);
+
+        let project = create_project_impl(
+            &state,
+            "No team".to_string(),
+            "legacy piece".to_string(),
+            Some(workspace.to_string_lossy().to_string()),
+        )
+        .expect("create project");
+
+        let piece = {
+            let db = state.lock().expect("lock");
+            let piece = db
+                .create_piece(&project.id, None, "Legacy", 0.0, 0.0)
+                .expect("create piece");
+            // No team tag; leave agent_config default.
+            db.upsert_team_brief(&project.id, "payments", "hi", &[], 0)
+                .expect("seed a brief");
+            piece
+        };
+
+        let (_piece, context, _settings) =
+            load_piece_context(&piece.id, &state).expect("load");
+        assert!(
+            context.cross_team_briefs.is_empty(),
+            "no team → no cross-team briefs"
+        );
 
         let _ = fs::remove_dir_all(&workspace);
     }

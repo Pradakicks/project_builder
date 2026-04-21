@@ -26,6 +26,7 @@ fn parse_review_record(
         cleaned_content: summary.to_string(),
         actions,
         validation_errors: vec![],
+        repair_context: None,
     })
 }
 
@@ -241,6 +242,19 @@ mod tests {
                 "guidance": "Build the thing"
             })],
             validation_errors: vec![],
+            repair_context: Some(CtoRepairContext {
+                goal_run_id: "goal-run-1".to_string(),
+                phase: GoalRunPhase::Verification,
+                retry_count: 2,
+                provider_name: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                base_url: Some("https://example.invalid".to_string()),
+                failure_summary: "HTTP readiness check failed".to_string(),
+                failed_check_count: 1,
+                passed_check_count: 0,
+                prompt_preview: "Autonomous CTO repair during verification".to_string(),
+                prompt_length: 42,
+            }),
         };
         let execution = CtoDecisionExecution {
             executed: 1,
@@ -265,12 +279,21 @@ mod tests {
             .insert_cto_decision(&project.id, &decision)
             .expect("insert decision");
         assert_eq!(inserted.review.actions.len(), 1);
+        assert!(inserted.review.repair_context.is_some());
         assert_eq!(inserted.execution.as_ref().unwrap().executed, 1);
         assert_eq!(inserted.status, CtoDecisionStatus::Executed);
 
         let listed = db.list_cto_decisions(&project.id).expect("list decisions");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].review.cleaned_content, "Create a plan");
+        assert_eq!(
+            listed[0]
+                .review
+                .repair_context
+                .as_ref()
+                .map(|ctx| ctx.goal_run_id.as_str()),
+            Some("goal-run-1")
+        );
 
         let rollback = CtoRollbackResult {
             applied_at: chrono::Utc::now().to_rfc3339(),
