@@ -678,9 +678,14 @@ function TeamEditor({
     };
   }, [projectId]);
 
+  // Only reset the draft when the selected piece changes. Reacting to
+  // `piece.agentConfig.team` would stomp on the input while the user is
+  // mid-edit: any intermediate re-render (e.g. clicking Run Agent triggers
+  // agent/runtime state updates that briefly re-fetch the piece) would
+  // fire the effect and clear what the user just typed.
   useEffect(() => {
     setDraft(piece.agentConfig.team ?? "");
-  }, [piece.id, piece.agentConfig.team]);
+  }, [piece.id]);
 
   const commit = async (raw: string) => {
     const normalized = normalizeTeamName(raw);
